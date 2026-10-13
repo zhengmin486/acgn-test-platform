@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}批次历史 - ACGN 测试平台{% endblock %}
+{% block content %}
+<h1 class="h3 mb-3">批次执行历史</h1>
+<table class="table table-hover align-middle bg-white">
+    <thead>
+    <tr><th>批次ID</th><th>开始时间</th><th>用例数</th><th>通过</th><th>失败</th><th>通过率</th><th>操作</th></tr>
+    </thead>
+    <tbody>
+    {% for b in batches %}
+    <tr>
+        <td>{{ b.id }}</td>
+        <td class="text-muted small">{{ b.started_at.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+        <td>{{ b.total }}</td>
+        <td>{{ b.passed }}</td>
+        <td>{{ b.failed }}</td>
+        <td>{% if b.pass_rate is not none %}{{ b.pass_rate }}%{% else %}—{% endif %}</td>
+        <td><a class="btn btn-sm btn-outline-primary" href="/batches/{{ b.id }}">详情</a></td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% if not batches %}<p class="text-muted">暂无批次。</p>{% endif %}
+{% endblock %}

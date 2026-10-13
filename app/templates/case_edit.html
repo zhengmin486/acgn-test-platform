@@ -1,0 +1,36 @@
+{% extends "base.html" %}
+{% block title %}编辑用例 - ACGN 测试平台{% endblock %}
+{% block content %}
+<h1 class="h3 mb-3">编辑用例 #{{ case.id }}</h1>
+{% if error %}<div class="alert alert-danger py-2 mb-3">{{ error }}</div>{% endif %}
+<form method="post" action="/testcases/{{ case.id }}/edit" class="row g-2">
+    <div class="col-md-6">
+        <label class="form-label">用例名称</label>
+        <input class="form-control" name="name" maxlength="100" value="{{ case.name }}" required>
+    </div>
+    <div class="col-md-6">
+        <label class="form-label">请求方法</label>
+        <input class="form-control" name="method" value="{{ case.method }}" required>
+        <div class="form-text">支持 GET/POST/PUT/DELETE/PATCH/HEAD/OPTIONS</div>
+    </div>
+    <div class="col-md-6">
+        <label class="form-label">请求路径</label>
+        <input class="form-control" name="path" value="{{ case.path }}" required>
+        <div class="form-text">必须是本站路径（以 / 开头），不允许外部 URL。</div>
+    </div>
+    <div class="col-md-3">
+        <label class="form-label">预期状态码</label>
+        <input class="form-control" name="expected_status" type="number" min="100" max="599" value="{{ case.expected_status }}" required>
+    </div>
+    <div class="col-md-3 d-flex align-items-end">
+        <div class="form-check">
+            <input class="form-check-input" type="checkbox" name="enabled" id="edit-enabled" {% if case.enabled %}checked{% endif %}>
+            <label class="form-check-label" for="edit-enabled">启用</label>
+        </div>
+    </div>
+    <div class="col-12">
+        <button class="btn btn-primary btn-sm" type="submit">保存</button>
+        <a class="btn btn-outline-secondary btn-sm" href="/testcases">返回列表</a>
+    </div>
+</form>
+{% endblock %}

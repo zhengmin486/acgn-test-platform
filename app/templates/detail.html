@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}{{ content.title }} - ACGN 测试平台{% endblock %}
+{% block content %}
+<h1 class="h3 mb-1">{{ content.title }}</h1>
+<p>
+    <span class="badge bg-secondary">{{ content.type }}</span>
+    <span class="ms-2 text-muted">评分：{{ content.rating }}</span>
+</p>
+<p>{{ content.summary }}</p>
+{% if content.source_url %}
+<p class="text-muted small">
+    来源：<a href="{{ content.source_url }}" target="_blank" rel="noopener noreferrer">{{ content.source_url }}</a>
+</p>
+{% endif %}
+<a class="btn btn-outline-secondary btn-sm" href="/">返回列表</a>
+{% endblock %}

@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}{{ title }} - ACGN 测试平台{% endblock %}
+{% block content %}
+<h1 class="h3 mb-3">{{ title }}</h1>
+{% if case_id %}<a class="btn btn-outline-secondary btn-sm mb-3" href="/testcases">返回用例列表</a>{% endif %}
+<table class="table table-hover align-middle bg-white">
+    <thead>
+    <tr><th>ID</th><th>用例ID</th><th>用例名称</th><th>方法</th><th>路径</th><th>预期</th><th>实际</th><th>耗时(ms)</th><th>结果</th><th>执行时间</th><th>操作</th></tr>
+    </thead>
+    <tbody>
+    {% for r in runs %}
+    <tr>
+        <td>{{ r.id }}</td>
+        <td>{{ r.case_id }}</td>
+        <td>{{ r.case_name }}</td>
+        <td><span class="badge bg-info text-dark">{{ r.method }}</span></td>
+        <td><code>{{ r.path }}</code></td>
+        <td>{{ r.expected_status }}</td>
+        <td>{{ r.actual_status if r.actual_status is not none else '—' }}</td>
+        <td>{{ '%.1f'|format(r.duration_ms) }}</td>
+        <td>{% if r.passed %}<span class="badge bg-success">通过</span>{% else %}<span class="badge bg-danger">失败</span>{% endif %}</td>
+        <td class="text-muted small">{{ r.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+        <td><a class="btn btn-sm btn-outline-primary" href="/runs/{{ r.id }}">详情</a></td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% if not runs %}<p class="text-muted">暂无执行记录。</p>{% endif %}
+{% endblock %}
