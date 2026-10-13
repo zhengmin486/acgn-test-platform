@@ -63,32 +63,6 @@ acgn-test-platform/
 └── README.md
 ```
 
-## 4. 本地运行
-
-以下命令适用于 Windows PowerShell，并假设项目虚拟环境 `.venv` 已创建、依赖已安装。
-
-进入项目目录：
-
-```powershell
-cd C:\Users\52487\projects\acgn-test-platform
-```
-
-启动应用：
-
-```powershell
-.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload
-```
-
-启动后访问：
-
-- 内容服务首页：<http://127.0.0.1:8000/>
-- 交互式 API 文档：<http://127.0.0.1:8000/docs>
-
-如果本地环境尚未安装依赖，可在确认使用项目虚拟环境后执行：
-
-```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-```
 
 ## 5. 主要接口
 
