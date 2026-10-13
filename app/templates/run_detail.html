@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}执行详情 #{{ run.id }} - ACGN 测试平台{% endblock %}
+{% block content %}
+<h1 class="h3 mb-3">执行详情 #{{ run.id }}</h1>
+{% if run.passed %}
+<div class="alert alert-success py-2">通过：实际状态码与预期一致。</div>
+{% else %}
+<div class="alert alert-danger py-2">失败{% if run.error %}：{{ run.error }}{% endif %}</div>
+{% endif %}
+<dl class="row">
+    <dt class="col-sm-3">用例</dt>
+    <dd class="col-sm-9">#{{ run.case_id }} {{ run.case_name }}</dd>
+    <dt class="col-sm-3">请求</dt>
+    <dd class="col-sm-9"><span class="badge bg-info text-dark">{{ run.method }}</span> <code>{{ run.path }}</code></dd>
+    <dt class="col-sm-3">预期状态码</dt>
+    <dd class="col-sm-9">{{ run.expected_status }}</dd>
+    <dt class="col-sm-3">实际状态码</dt>
+    <dd class="col-sm-9">{{ run.actual_status if run.actual_status is not none else '未获得（请求异常）' }}</dd>
+    <dt class="col-sm-3">耗时</dt>
+    <dd class="col-sm-9">{{ '%.1f'|format(run.duration_ms) }} ms</dd>
+    <dt class="col-sm-3">执行时间</dt>
+    <dd class="col-sm-9">{{ run.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</dd>
+    {% if run.error %}<dt class="col-sm-3">错误摘要</dt><dd class="col-sm-9"><code>{{ run.error }}</code></dd>{% endif %}
+</dl>
+<a class="btn btn-outline-secondary btn-sm" href="/runs?case_id={{ run.case_id }}">返回该用例历史</a>
+<a class="btn btn-outline-secondary btn-sm" href="/runs">全部执行历史</a>
+<a class="btn btn-outline-secondary btn-sm" href="/testcases">返回用例列表</a>
+{% endblock %}

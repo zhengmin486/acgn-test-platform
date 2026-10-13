@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+{% block title %}新番档期 - ACGN 测试平台{% endblock %}
+{% block content %}
+<h1 class="h3 mb-3">新番档期</h1>
+
+{% if not seasons %}
+<div class="alert alert-info">
+    暂无已同步的新番档期数据。请先在服务器上运行同步脚本（默认预览，不写数据库）：<br>
+    <code>python scripts/sync_yuc_schedule.py --list-seasons</code><br>
+    <code>python scripts/sync_yuc_schedule.py --apply</code>
+</div>
+{% else %}
+<form class="row g-2 align-items-end mb-3" method="get">
+    <div class="col-auto">
+        <label class="form-label small mb-0">档期</label>
+        <select name="season" class="form-select form-select-sm">
+            {% for s in seasons %}
+            <option value="{{ s.season_code }}" {% if s.season_code == current_season %}selected{% endif %}>{{ s.season_code }}（{{ s.count }} 部）</option>
+            {% endfor %}
+        </select>
+    </div>
+    <div class="col-auto">
+        <label class="form-label small mb-0">星期</label>
+        <select name="weekday" class="form-select form-select-sm">
+            <option value="">全部</option>
+            {% for wd, name in weekday_names.items() %}
+            <option value="{{ wd }}" {% if weekday == wd %}selected{% endif %}>{{ name }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <div class="col-auto">
+        <label class="form-label small mb-0">关键词</label>
+        <input type="text" name="q" value="{{ q }}" class="form-control form-control-sm" placeholder="标题 / 播出说明">
+    </div>
+    <div class="col-auto">
+        <button class="btn btn-primary btn-sm" type="submit">筛选</button>
+        <a class="btn btn-outline-secondary btn-sm" href="/schedule">重置</a>
+    </div>
+</form>
+
+<p class="text-muted small">
+    档期 {{ current_season }} · 共 {{ total }} 部作品 · 第 {{ page }}/{{ total_pages }} 页
+    {% if season_url %} · <a href="{{ season_url }}" target="_blank" rel="noopener noreferrer">Yuc.wiki 档期页</a>{% endif %}
+</p>
+
+{% if not works %}
+<div class="alert alert-warning">该档期暂无匹配的作品记录（可能尚未同步，或筛选条件过严）。</div>
+{% else %}
+<div class="row row-cols-1 row-cols-md-2 row-cols-xl-3 g-3">
+    {% for item in works %}
+    <div class="col">
+        <div class="card h-100">
+            {% if item.image_url %}
+            <img src="{{ item.image_url }}" referrerpolicy="no-referrer" class="card-img-top" style="max-height: 300px; object-fit: contain;" alt="{{ item.title_main }}">
+            {% endif %}
+            <div class="card-body">
+                <h5 class="card-title mb-1">{{ item.title_main }}</h5>
+                {% if item.title_cn and item.title_cn != item.title_main %}
+                <p class="mb-0 small text-primary">中文：{{ item.title_cn }}</p>
+                {% endif %}
+                {% if item.title_jp %}
+                <p class="mb-1 small text-muted">日文：{{ item.title_jp }}</p>
+                {% endif %}
+                <p class="mb-1 small">
+                    {% if item.weekday and item.weekday in weekday_names %}<span class="badge bg-secondary">{{ weekday_names[item.weekday] }}</span>{% endif %}
+                    {% if item.broadcast_time %}<span class="ms-1">{{ item.broadcast_time }}</span>{% endif %}
+                </p>
+                {% if item.broadcast_note %}
+                <p class="mb-1 small text-muted">{{ item.broadcast_note }}</p>
+                {% endif %}
+                {% if item.platforms %}
+                <p class="mb-1 small">
+                    播放：
+                    {% for p in item.platforms %}
+                    <a href="{{ p.url }}" target="_blank" rel="noopener noreferrer">{{ p.name }}</a>{% if not loop.last %} · {% endif %}
+                    {% endfor %}
+                </p>
+                {% endif %}
+            </div>
+            <div class="card-footer bg-white small">
+                <a href="{{ item.source_url }}" target="_blank" rel="noopener noreferrer">Yuc.wiki 来源</a>
+            </div>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+
+<nav class="mt-3">
+    <ul class="pagination pagination-sm mb-0">
+        {% if page > 1 %}
+        <li class="page-item"><a class="page-link" href="/schedule?season={{ current_season }}&weekday={{ weekday if weekday else '' }}&q={{ q }}&page={{ page - 1 }}">上一页</a></li>
+        {% endif %}
+        <li class="page-item disabled"><span class="page-link">第 {{ page }} / {{ total_pages }} 页</span></li>
+        {% if page < total_pages %}
+        <li class="page-item"><a class="page-link" href="/schedule?season={{ current_season }}&weekday={{ weekday if weekday else '' }}&q={{ q }}&page={{ page + 1 }}">下一页</a></li>
+        {% endif %}
+    </ul>
+</nav>
+{% endif %}
+{% endif %}
+{% endblock %}

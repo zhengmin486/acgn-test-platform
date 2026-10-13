@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}测试用例管理 - ACGN 测试平台{% endblock %}
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h1 class="h3 mb-0">测试用例管理</h1>
+    <form method="post" action="/testcases/execute-all">
+        <button class="btn btn-success btn-sm" type="submit">执行全部启用用例</button>
+    </form>
+</div>
+<p class="text-muted small">单条/批量执行仅面向本站（进程内），请求路径只允许本站本地路径；批次结果见"批次"页。</p>
+{% if error %}<div class="alert alert-danger py-2 mb-3">{{ error }}</div>{% endif %}
+<div class="card mb-4">
+    <div class="card-header">新建用例</div>
+    <div class="card-body">
+        <form method="post" action="/testcases" class="row g-2 align-items-end">
+            <div class="col-md-3">
+                <label class="form-label">用例名称</label>
+                <input class="form-control" name="name" maxlength="100" value="{{ form.name or '' }}" required>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label">请求方法</label>
+                <input class="form-control" name="method" placeholder="GET" value="{{ form.method or '' }}" required>
+                <div class="form-text">支持 GET/POST/PUT/DELETE/PATCH/HEAD/OPTIONS</div>
+            </div>
+            <div class="col-md-3">
+                <label class="form-label">请求路径</label>
+                <input class="form-control" name="path" placeholder="/api/health" value="{{ form.path or '' }}" required>
+                <div class="form-text">必须是本站路径（以 / 开头），不允许外部 URL。</div>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label">预期状态码</label>
+                <input class="form-control" name="expected_status" type="number" min="100" max="599" value="{{ form.expected_status or '' }}" required>
+            </div>
+            <div class="col-md-2">
+                <div class="form-check mb-2">
+                    <input class="form-check-input" type="checkbox" name="enabled" id="create-enabled"
+                        {% if not form %}checked{% elif form.enabled == 'on' %}checked{% endif %}>
+                    <label class="form-check-label" for="create-enabled">启用</label>
+                </div>
+                <button class="btn btn-primary btn-sm" type="submit">新建</button>
+            </div>
+        </form>
+    </div>
+</div>
+<table class="table table-hover align-middle bg-white">
+    <thead>
+    <tr><th>ID</th><th>名称</th><th>方法</th><th>路径</th><th>预期状态码</th><th>状态</th><th>创建时间</th><th>操作</th></tr>
+    </thead>
+    <tbody>
+    {% for c in cases %}
+    <tr>
+        <td>{{ c.id }}</td>
+        <td>{{ c.name }}</td>
+        <td><span class="badge bg-info text-dark">{{ c.method }}</span></td>
+        <td><code>{{ c.path }}</code></td>
+        <td>{{ c.expected_status }}</td>
+        <td>{% if c.enabled %}<span class="badge bg-success">启用</span>{% else %}<span class="badge bg-secondary">停用</span>{% endif %}</td>
+        <td class="text-muted small">{{ c.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+        <td>
+            <form method="post" action="/testcases/{{ c.id }}/execute" class="d-inline">
+                <button class="btn btn-sm btn-success" type="submit">执行</button>
+            </form>
+            <a class="btn btn-sm btn-outline-primary" href="/testcases/{{ c.id }}/edit">编辑</a>
+            <a class="btn btn-sm btn-outline-secondary" href="/runs?case_id={{ c.id }}">历史</a>
+            <form method="post" action="/testcases/{{ c.id }}/delete" class="d-inline">
+                <button class="btn btn-sm btn-outline-danger" type="submit">删除</button>
+            </form>
+        </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% if not cases %}<p class="text-muted">暂无用例。</p>{% endif %}
+{% endblock %}
