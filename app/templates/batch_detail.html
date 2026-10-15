@@ -1,12 +1,12 @@
 {% extends "base.html" %}
-{% block title %}批次 #{{ batch.id }} - ACGN 测试平台{% endblock %}
+{% block title %}批次 #{{ batch.id }} - ACGN 内容平台{% endblock %}
 {% block content %}
 <h1 class="h3 mb-3">批次 #{{ batch.id }} 执行结果</h1>
 <div class="row g-2 mb-3">
-    <div class="col-md-3"><div class="card text-center"><div class="card-body py-2"><div class="h4 mb-0">{{ batch.total }}</div><div class="text-muted small">用例数</div></div></div></div>
-    <div class="col-md-3"><div class="card text-center"><div class="card-body py-2"><div class="h4 mb-0 text-success">{{ batch.passed }}</div><div class="text-muted small">通过</div></div></div></div>
-    <div class="col-md-3"><div class="card text-center"><div class="card-body py-2"><div class="h4 mb-0 text-danger">{{ batch.failed }}</div><div class="text-muted small">失败</div></div></div></div>
-    <div class="col-md-3"><div class="card text-center"><div class="card-body py-2"><div class="h4 mb-0">{% if pass_rate is not none %}{{ pass_rate }}%{% else %}—{% endif %}</div><div class="text-muted small">通过率</div></div></div></div>
+    <div class="col-md-3"><div class="card app-card text-center"><div class="card-body py-2"><div class="h4 mb-0">{{ batch.total }}</div><div class="text-muted small">用例数</div></div></div></div>
+    <div class="col-md-3"><div class="card app-card text-center"><div class="card-body py-2"><div class="h4 mb-0 text-success">{{ batch.passed }}</div><div class="text-muted small">通过</div></div></div></div>
+    <div class="col-md-3"><div class="card app-card text-center"><div class="card-body py-2"><div class="h4 mb-0 text-danger">{{ batch.failed }}</div><div class="text-muted small">失败</div></div></div></div>
+    <div class="col-md-3"><div class="card app-card text-center"><div class="card-body py-2"><div class="h4 mb-0">{% if pass_rate is not none %}{{ pass_rate }}%{% else %}—{% endif %}</div><div class="text-muted small">通过率</div></div></div></div>
 </div>
 <p class="text-muted small">
     开始：{{ batch.started_at.strftime('%Y-%m-%d %H:%M:%S') }}
@@ -18,7 +18,8 @@
 <div class="alert alert-warning py-2 mb-3">无法对比：{{ regression.reason }}</div>
 {% else %}
 <p class="text-muted small">与批次 #{{ regression.previous_batch_id }} 对比（以用例 ID 对齐）；"缺失"表示当前批次无该用例记录，不计为通过。</p>
-<table class="table table-sm align-middle bg-white">
+<div class="table-responsive table-card">
+<table class="table table-sm align-middle">
     <thead>
     <tr><th>用例ID</th><th>用例名称</th><th>变化</th><th>上批</th><th>本批</th><th>说明</th></tr>
     </thead>
@@ -40,10 +41,13 @@
     {% endfor %}
     </tbody>
 </table>
+</div>
 {% endif %}
 
 <h2 class="h5 mt-4">各用例执行结果</h2>
-<table class="table table-hover align-middle bg-white">
+{% if runs %}
+<div class="table-responsive table-card">
+<table class="table table-hover align-middle">
     <thead>
     <tr><th>记录</th><th>用例</th><th>方法</th><th>路径</th><th>预期</th><th>实际</th><th>耗时(ms)</th><th>结果</th><th>操作</th></tr>
     </thead>
@@ -63,7 +67,10 @@
     {% endfor %}
     </tbody>
 </table>
-{% if not runs %}<p class="text-muted">本批次没有产生执行记录。</p>{% endif %}
+</div>
+{% else %}
+<div class="detail-empty">本批次没有产生执行记录。</div>
+{% endif %}
 <a class="btn btn-outline-secondary btn-sm" href="/batches">返回批次列表</a>
 <a class="btn btn-outline-secondary btn-sm" href="/testcases">返回用例列表</a>
 {% endblock %}

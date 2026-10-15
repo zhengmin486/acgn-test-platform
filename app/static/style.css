@@ -1,4 +1,358 @@
 /* 项目基础样式；页面主体样式由 Bootstrap 提供 */
 body {
     background-color: #f8f9fa;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+}
+
+main {
+    flex: 1 0 auto;
+}
+
+/* ---------- 公共导航与页脚 ---------- */
+
+/* 顶部导航：与首页 Hero 同源的紫色渐变，统一品牌色 */
+.site-navbar {
+    background: linear-gradient(135deg, #6f42c1 0%, #553098 60%, #3b256b 100%);
+    box-shadow: 0 2px 10px rgba(59, 37, 107, 0.35);
+}
+
+.site-navbar .navbar-brand {
+    font-weight: 600;
+}
+
+.site-navbar .nav-link {
+    color: rgba(255, 255, 255, 0.78);
+    border-radius: 0.5rem;
+}
+
+.site-navbar .nav-link:hover,
+.site-navbar .nav-link:focus {
+    color: #fff;
+}
+
+/* 当前页面导航高亮：浅色胶囊底 + 加粗 */
+.site-navbar .nav-link.active {
+    background: #ffffff;
+    color: #5b21b6 !important;
+    font-weight: 700;
+    border-radius: 999px;
+    box-shadow: 0 2px 8px rgba(31, 16, 64, 0.18);
+}
+
+/* 页脚：短页面时贴合视口底部 */
+.site-footer {
+    flex-shrink: 0;
+    border-top: 1px solid #e9ecef;
+}
+
+/* ---------- 通用卡片与表格容器 ---------- */
+
+/* 统一卡片：无边框 + 圆角 + 浅阴影，与内容页 detail-section 同风格 */
+.app-card {
+    border: 0;
+    border-radius: 0.75rem;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.app-card .card-header {
+    background-color: #fff;
+    font-weight: 600;
+    border-bottom: 1px solid #f1f3f5;
+    border-radius: 0.75rem 0.75rem 0 0 !important;
+}
+
+/* 表格容器：卡片化外观，窄屏时配合 table-responsive 横向滚动避免溢出 */
+.table-card {
+    background-color: #fff;
+    border-radius: 0.75rem;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.table-card .table {
+    margin-bottom: 0;
+}
+
+/* ---------- 产品首页 ---------- */
+
+/* 顶部 Hero：平台标识 + 搜索入口 */
+.home-hero {
+    background: linear-gradient(135deg, #6f42c1 0%, #553098 60%, #3b256b 100%);
+    box-shadow: 0 2px 10px rgba(111, 66, 193, 0.25);
+}
+
+.home-hero-sub {
+    color: rgba(255, 255, 255, 0.85);
+}
+
+.home-hero .form-control:focus,
+.home-hero .form-select:focus {
+    border-color: #ced4da;
+    box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.35);
+}
+
+/* 分类浏览卡片 */
+.home-type-tile {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.15rem;
+    padding: 1rem 0.5rem;
+    background-color: #fff;
+    border: 1px solid #e9ecef;
+    border-radius: 0.75rem;
+    color: #212529;
+    text-decoration: none;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+    transition: border-color 0.15s ease-in-out, box-shadow 0.15s ease-in-out,
+        color 0.15s ease-in-out;
+}
+
+.home-type-tile:hover {
+    border-color: #6f42c1;
+    box-shadow: 0 2px 8px rgba(111, 66, 193, 0.15);
+    color: #6f42c1;
+}
+
+.home-type-icon {
+    font-size: 1.4rem;
+    line-height: 1;
+}
+
+/* ---------- 内容详情页 ---------- */
+
+/* 顶部作品信息卡：与灰底页面形成层次 */
+.detail-hero {
+    border: 0;
+    border-radius: 0.75rem;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.detail-type-badge {
+    background-color: #6f42c1;
+    font-weight: 500;
+}
+
+.detail-type-badge-sm {
+    background-color: #e9ecef;
+    color: #495057;
+    font-weight: 400;
+    flex-shrink: 0;
+}
+
+/* 评分星级：数据来自条目真实评分，仅做视觉映射 */
+.detail-stars {
+    font-size: 1rem;
+    letter-spacing: 2px;
+    line-height: 1;
+}
+
+.detail-stars .star-on {
+    color: #fd7e14;
+}
+
+.detail-stars .star-off {
+    color: #dee2e6;
+}
+
+.detail-rating-num {
+    font-weight: 600;
+    font-size: 1.15rem;
+}
+
+.detail-summary {
+    color: #343a40;
+    line-height: 1.75;
+}
+
+/* 标签：仅展示库内真实存在的数据 */
+.detail-chip {
+    display: inline-block;
+    padding: 0.2rem 0.85rem;
+    border-radius: 999px;
+    background-color: #e9ecef;
+    color: #495057;
+    font-size: 0.85rem;
+}
+
+/* 关联区块卡片 */
+.detail-section {
+    border: 0;
+    border-radius: 0.75rem;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.detail-section .card-header {
+    border-bottom: 1px solid #f1f3f5;
+    border-radius: 0.75rem 0.75rem 0 0 !important;
+}
+
+/* 相关内容推荐卡片 */
+.detail-related-item {
+    display: block;
+    height: 100%;
+    padding: 0.75rem 0.9rem;
+    border: 1px solid #e9ecef;
+    border-radius: 0.6rem;
+    color: inherit;
+    text-decoration: none;
+    background-color: #fff;
+    transition: border-color 0.15s ease-in-out, box-shadow 0.15s ease-in-out;
+}
+
+.detail-related-item:hover {
+    border-color: #6f42c1;
+    box-shadow: 0 2px 8px rgba(111, 66, 193, 0.12);
+}
+
+/* 相关资讯列表 */
+.detail-article-item a {
+    color: #212529;
+    text-decoration: none;
+}
+
+.detail-article-item a:hover {
+    color: #6f42c1;
+}
+
+/* 空数据态：统一虚线占位，明确“无数据”而非报错 */
+.detail-empty {
+    padding: 1.5rem 1rem;
+    border: 1px dashed #ced4da;
+    border-radius: 0.6rem;
+    text-align: center;
+    color: #6c757d;
+    background-color: #f8f9fa;
+}
+
+/* ---------- 资讯频道 ---------- */
+
+/* 资讯列表卡片 */
+.article-card {
+    padding: 1rem 1.25rem;
+    background-color: #fff;
+    border: 1px solid #e9ecef;
+    border-radius: 0.75rem;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
+    transition: border-color 0.15s ease-in-out;
+}
+
+.article-card:hover {
+    border-color: #6f42c1;
+}
+
+.article-list .article-card + .article-card {
+    margin-top: 0.75rem;
+}
+
+.article-card-title {
+    color: #212529;
+    text-decoration: none;
+}
+
+.article-card-title:hover {
+    color: #6f42c1;
+}
+
+/* 资讯详情：摘要引导块，与正文形成层次 */
+.article-lead {
+    color: #495057;
+    background-color: #f8f9fa;
+    border-left: 3px solid #6f42c1;
+    padding: 0.75rem 1rem;
+    border-radius: 0 0.5rem 0.5rem 0;
+    line-height: 1.7;
+}
+
+/* 资讯详情：正文阅读排版；pre-wrap 保留原文换行与段首缩进 */
+.article-body {
+    color: #343a40;
+    font-size: 1rem;
+    line-height: 1.85;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.article-source-divider {
+    margin: 1.25rem 0 0.75rem;
+    opacity: 0.25;
+}
+
+/* ---------- 新番档期 ---------- */
+
+/* 季度胶囊导航 */
+.season-nav {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
+.season-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.3rem 0.9rem;
+    border: 1px solid #dee2e6;
+    border-radius: 999px;
+    background-color: #fff;
+    color: #495057;
+    font-size: 0.9rem;
+    text-decoration: none;
+    transition: border-color 0.15s ease-in-out, color 0.15s ease-in-out,
+        background-color 0.15s ease-in-out;
+}
+
+.season-pill:hover {
+    border-color: #6f42c1;
+    color: #6f42c1;
+}
+
+.season-pill.active {
+    background-color: #6f42c1;
+    border-color: #6f42c1;
+    color: #fff;
+}
+
+.season-count {
+    padding: 0 0.45rem;
+    border-radius: 999px;
+    background-color: rgba(0, 0, 0, 0.08);
+    font-size: 0.75rem;
+}
+
+.season-pill.active .season-count {
+    background-color: rgba(255, 255, 255, 0.25);
+    color: #fff;
+}
+
+/* 星期分组标题 */
+.schedule-day-title {
+    padding-left: 0.6rem;
+    border-left: 4px solid #6f42c1;
+    line-height: 1.2;
+}
+
+/* 番剧信息卡片 */
+.schedule-card {
+    border: 0;
+    border-radius: 0.75rem;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.schedule-poster {
+    max-height: 300px;
+    object-fit: contain;
+    background-color: #f8f9fa;
+}
+
+.schedule-weekday-badge {
+    background-color: #6f42c1;
+    font-weight: 500;
+}
+
+.schedule-time-badge {
+    background-color: #e9ecef;
+    color: #495057;
+    font-weight: 400;
 }

@@ -146,7 +146,10 @@ def test_search_no_result():
     """关键词无匹配 -> 200 + 空列表，而非 404。"""
     resp = client.get("/api/contents/search", params={"q": "绝不存在的关键词xyz"})
     assert resp.status_code == 200
-    assert resp.json() == {"total": 0, "items": []}
+    assert resp.json() == {
+        "total": 0, "page": 1, "page_size": 20, "total_pages": 0,
+        "type": None, "items": [],
+    }
 
 
 def test_search_empty_q_rejected():
@@ -181,7 +184,10 @@ def test_empty_database_api_behaviour(tmp_path):
         assert client.get("/api/contents/1").status_code == 404
         search = client.get("/api/contents/search", params={"q": "星海"})
         assert search.status_code == 200
-        assert search.json() == {"total": 0, "items": []}
+        assert search.json() == {
+            "total": 0, "page": 1, "page_size": 20, "total_pages": 0,
+            "type": None, "items": [],
+        }
         assert client.get("/").status_code == 200
     finally:
         app.dependency_overrides.pop(get_db, None)

@@ -13,6 +13,9 @@ DbSession = Annotated[Session, Depends(get_db)]
 
 router = APIRouter(prefix="/api", tags=["api"])
 
+# ACGN 内容类型全集：列表筛选与搜索的类型校验共用同一份定义。
+CONTENT_TYPES = ("anime", "comic", "game", "novel")
+
 
 @router.get("/health")
 def health() -> dict:
@@ -25,11 +28,9 @@ def list_contents(
     content_type: str | None = Query(default=None, alias="type"),
 ) -> dict:
     """返回内容列表；可按 ACGN 类型筛选。"""
-    allowed_types = {"anime", "comic", "game", "novel"}
-
     if content_type is not None:
         content_type = content_type.strip().lower()
-        if content_type not in allowed_types:
+        if content_type not in CONTENT_TYPES:
             raise HTTPException(
                 status_code=400,
                 detail="类型不合法，可选值：anime、comic、game、novel",
@@ -39,18 +40,48 @@ def list_contents(
     return {"total": len(items), "items": [item.as_dict() for item in items]}
 
 @router.get("/contents/search")
-def search_contents(db: DbSession, q: str = Query(default="")) -> dict:
-    """按标题/简介模糊搜索。
+def search_contents(
+    db: DbSession,
+    q: str = Query(default=""),
+    content_type: str | None = Query(default=None, alias="type", max_length=20),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+) -> dict:
+    """按标题/简介模糊搜索（不区分大小写），可叠加类型筛选与分页。
 
     q 为空或纯空白 -> 400；无匹配 -> 200 + 空列表。
+    type/page/page_size 为可选参数；响应中的 type/page/page_size/total_pages
+    为回显与翻页信息，原有 total/items 契约不变。
     注意：本路由必须注册在 /contents/{content_id} 之前，
     否则 "search" 会被当作 path 参数匹配。
     """
     keyword = q.strip()
     if not keyword:
         raise HTTPException(status_code=400, detail="搜索参数 q 不能为空")
-    items = crud.search_contents(db, keyword)
-    return {"total": len(items), "items": [item.as_dict() for item in items]}
+
+    if content_type is not None:
+        content_type = content_type.strip().lower()
+        if content_type not in CONTENT_TYPES:
+            raise HTTPException(
+                status_code=400,
+                detail="类型不合法，可选值：anime、comic、game、novel",
+            )
+
+    total, items = crud.search_contents_page(
+        db,
+        keyword=keyword,
+        content_type=content_type,
+        page=page,
+        page_size=page_size,
+    )
+    return {
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "total_pages": (total + page_size - 1) // page_size,
+        "type": content_type,
+        "items": [item.as_dict() for item in items],
+    }
 
 
 @router.get("/contents/{content_id}")

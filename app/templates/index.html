@@ -1,26 +1,165 @@
 {% extends "base.html" %}
-{% block title %}内容列表 - ACGN 测试平台{% endblock %}
+{% block title %}首页 - ACGN 内容平台{% endblock %}
 {% block content %}
-<h1 class="h3 mb-3">内容列表</h1>
-<p class="text-muted small">以下为开发/测试用内存假数据，共 {{ contents|length }} 条。</p>
-<table class="table table-hover align-middle bg-white">
-    <thead>
-    <tr>
-        <th>ID</th>
-        <th>标题</th>
-        <th>类型</th>
-        <th>评分</th>
-    </tr>
-    </thead>
-    <tbody>
-    {% for item in contents %}
-    <tr>
-        <td>{{ item.id }}</td>
-        <td><a href="/contents/{{ item.id }}">{{ item.title }}</a></td>
-        <td><span class="badge bg-secondary">{{ item.type }}</span></td>
-        <td>{{ item.rating }}</td>
-    </tr>
-    {% endfor %}
-    </tbody>
-</table>
+{% set type_icons = {"anime": "🎬", "comic": "📚", "game": "🎮", "novel": "📖"} %}
+
+{# ===== 顶部：平台标识 + 搜索入口（始终显示） ===== #}
+<section class="home-hero text-white rounded-3 p-4 p-md-5 mb-4">
+    <h1 class="h3 mb-1">ACGN 内容平台</h1>
+    <p class="home-hero-sub mb-4">动画 · 漫画 · 游戏 · 轻小说一站浏览，支持关键词搜索与分类筛选。</p>
+    <form class="row g-2 align-items-end" method="get" action="/">
+        <div class="col-12 col-md-auto">
+            <label class="form-label small mb-0" for="home-type">类型</label>
+            <select name="type" id="home-type" class="form-select">
+                <option value="">全部</option>
+                {% for code, label in type_labels.items() %}
+                <option value="{{ code }}" {% if content_type == code %}selected{% endif %}>{{ label }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="col">
+            <label class="form-label small mb-0" for="home-q">关键词</label>
+            <input type="text" name="q" id="home-q" value="{{ q }}" class="form-control" placeholder="搜索标题 / 简介">
+        </div>
+        <div class="col-12 col-md-auto">
+            <button class="btn btn-light" type="submit">搜索</button>
+            <a class="btn btn-outline-light" href="/">重置</a>
+        </div>
+    </form>
+</section>
+
+{% if search_mode %}
+<p class="text-muted small">
+    搜索结果：{% if keyword %}关键词“{{ keyword }}”{% endif %}{% if content_type %}{% if keyword %} · {% endif %}类型：{{ type_labels.get(content_type, content_type) }}{% endif %} · 共 {{ total }} 条 · 第 {{ page }}/{{ total_pages }} 页
+</p>
+{% else %}
+
+{# ===== 分类浏览（数量来自库内真实统计） ===== #}
+<section class="mb-4">
+    <h2 class="h5 mb-3">分类浏览</h2>
+    <div class="row g-3">
+        {% for code, label in type_labels.items() %}
+        <div class="col-6 col-md-3">
+            <a class="home-type-tile" href="/?type={{ code }}">
+                <span class="home-type-icon" aria-hidden="true">{{ type_icons.get(code, "🗂") }}</span>
+                <span class="fw-semibold">{{ label }}</span>
+                <span class="small text-muted">{{ type_counts.get(code, 0) }} 部作品</span>
+            </a>
+        </div>
+        {% endfor %}
+    </div>
+</section>
+
+{# ===== 推荐作品 + 最新资讯 ===== #}
+<div class="row g-4 mb-4">
+    <section class="col-12 col-lg-8">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <h2 class="h5 mb-0">推荐作品</h2>
+            <span class="text-muted small">按评分排序 · 取自库内真实数据</span>
+        </div>
+        {% if top_contents %}
+        <div class="row g-3">
+            {% for item in top_contents %}
+            {% set stars = (item.rating / 2) | int %}
+            <div class="col-12 col-sm-6">
+                <a class="detail-related-item" href="/contents/{{ item.id }}">
+                    <div class="d-flex justify-content-between align-items-center gap-2">
+                        <span class="fw-semibold text-truncate">{{ item.title }}</span>
+                        <span class="badge detail-type-badge-sm">{{ type_labels.get(item.type, item.type) }}</span>
+                    </div>
+                    <div class="d-flex align-items-center gap-2 mt-1">
+                        <span class="detail-stars" aria-hidden="true">{% for i in range(1, 6) %}<span class="{{ 'star-on' if i <= stars else 'star-off' }}">★</span>{% endfor %}</span>
+                        <span class="small text-muted">{{ '%.1f' % item.rating }}</span>
+                    </div>
+                    <p class="small text-secondary mb-0 mt-1">{{ item.summary[:40] }}{% if item.summary|length > 40 %}…{% endif %}</p>
+                </a>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="detail-empty">暂无内容数据，暂时无法推荐。</div>
+        {% endif %}
+    </section>
+
+    <section class="col-12 col-lg-4">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <h2 class="h5 mb-0">最新资讯</h2>
+            <a class="small" href="/articles">全部资讯 &rarr;</a>
+        </div>
+        {% if latest_articles %}
+        <ul class="list-unstyled mb-0">
+            {% for art in latest_articles %}
+            <li class="detail-article-item{% if not loop.last %} pb-2 mb-2 border-bottom{% endif %}">
+                <a class="fw-semibold" href="/articles/{{ art.id }}">{{ art.title }}</a>
+                <div class="small text-muted mt-1">{{ art.category }} · {{ art.published_at.strftime('%Y-%m-%d') }}</div>
+                <p class="small text-secondary mb-0 mt-1">{{ art.summary[:50] }}{% if art.summary|length > 50 %}…{% endif %}</p>
+            </li>
+            {% endfor %}
+        </ul>
+        {% else %}
+        <div class="detail-empty">
+            暂无资讯。<br>
+            <a class="small" href="/articles">去资讯频道看看</a>
+        </div>
+        {% endif %}
+    </section>
+</div>
+{% endif %}
+
+{# ===== 内容列表（浏览模式=全量列表；搜索模式=搜索结果） ===== #}
+<section>
+    {% if not search_mode %}
+    <h2 class="h5 mb-2">内容列表</h2>
+    <p class="text-muted small">数据库内容共 {{ total }} 条，可按类型筛选或输入关键词搜索标题/简介。</p>
+    {% endif %}
+
+    {% if not contents %}
+    <div class="alert alert-warning">
+        {% if search_mode %}
+        没有找到匹配的内容。试试更短的关键词，或<a href="/">清除筛选</a>查看全部内容。
+        {% else %}
+        暂无内容数据。
+        {% endif %}
+    </div>
+    {% else %}
+    <div class="table-responsive table-card">
+    <table class="table table-hover align-middle">
+        <thead>
+        <tr>
+            <th>ID</th>
+            <th>标题</th>
+            <th>类型</th>
+            <th>评分</th>
+            <th>简介</th>
+        </tr>
+        </thead>
+        <tbody>
+        {% for item in contents %}
+        <tr>
+            <td>{{ item.id }}</td>
+            <td><a href="/contents/{{ item.id }}">{{ item.title }}</a></td>
+            <td><span class="badge bg-secondary">{{ type_labels.get(item.type, item.type) }}</span></td>
+            <td>{{ item.rating }}</td>
+            <td class="small text-muted" style="max-width: 320px" title="{{ item.summary }}">{{ item.summary[:50] }}{% if item.summary|length > 50 %}…{% endif %}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    </div>
+
+    {% if search_mode and total_pages > 1 %}
+    <nav class="mt-3">
+        <ul class="pagination pagination-sm mb-0">
+            {% if page > 1 %}
+            <li class="page-item"><a class="page-link" href="/?q={{ q }}&type={{ content_type or '' }}&page={{ page - 1 }}">上一页</a></li>
+            {% endif %}
+            <li class="page-item disabled"><span class="page-link">第 {{ page }} / {{ total_pages }} 页</span></li>
+            {% if page < total_pages %}
+            <li class="page-item"><a class="page-link" href="/?q={{ q }}&type={{ content_type or '' }}&page={{ page + 1 }}">下一页</a></li>
+            {% endif %}
+        </ul>
+    </nav>
+    {% endif %}
+    {% endif %}
+</section>
 {% endblock %}

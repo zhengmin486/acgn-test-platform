@@ -1,9 +1,14 @@
 {% extends "base.html" %}
-{% block title %}{{ title }} - ACGN 测试平台{% endblock %}
+{% block title %}{{ title }} - ACGN 内容平台{% endblock %}
 {% block content %}
-<h1 class="h3 mb-3">{{ title }}</h1>
-{% if case_id %}<a class="btn btn-outline-secondary btn-sm mb-3" href="/testcases">返回用例列表</a>{% endif %}
-<table class="table table-hover align-middle bg-white">
+<div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-1">
+    <h1 class="h3 mb-0">{{ title }}</h1>
+    {% if case_id %}<a class="btn btn-outline-secondary btn-sm" href="/testcases">返回用例列表</a>{% endif %}
+</div>
+<p class="text-muted small mb-3">{% if case_id %}仅显示该用例的执行记录。{% else %}全部用例的执行记录，可在测试用例页发起执行。{% endif %}</p>
+{% if runs %}
+<div class="table-responsive table-card">
+<table class="table table-hover align-middle">
     <thead>
     <tr><th>ID</th><th>用例ID</th><th>用例名称</th><th>方法</th><th>路径</th><th>预期</th><th>实际</th><th>耗时(ms)</th><th>结果</th><th>执行时间</th><th>操作</th></tr>
     </thead>
@@ -25,5 +30,8 @@
     {% endfor %}
     </tbody>
 </table>
-{% if not runs %}<p class="text-muted">暂无执行记录。</p>{% endif %}
+</div>
+{% else %}
+<div class="detail-empty">暂无执行记录。可在测试用例页发起执行。</div>
+{% endif %}
 {% endblock %}

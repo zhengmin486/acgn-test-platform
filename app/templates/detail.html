@@ -1,16 +1,101 @@
 {% extends "base.html" %}
-{% block title %}{{ content.title }} - ACGN 测试平台{% endblock %}
+{% block title %}{{ content.title }} - ACGN 内容平台{% endblock %}
 {% block content %}
-<h1 class="h3 mb-1">{{ content.title }}</h1>
-<p>
-    <span class="badge bg-secondary">{{ content.type }}</span>
-    <span class="ms-2 text-muted">评分：{{ content.rating }}</span>
-</p>
-<p>{{ content.summary }}</p>
-{% if content.source_url %}
-<p class="text-muted small">
-    来源：<a href="{{ content.source_url }}" target="_blank" rel="noopener noreferrer">{{ content.source_url }}</a>
-</p>
-{% endif %}
-<a class="btn btn-outline-secondary btn-sm" href="/">返回列表</a>
+{% set star_count = (content.rating / 2) | int %}
+
+<div class="card detail-hero">
+    <div class="card-body p-4">
+        <p class="small mb-3"><a href="/">&larr; 返回内容列表</a></p>
+
+        <div class="d-flex flex-wrap align-items-start justify-content-between gap-2">
+            <h1 class="h3 mb-0">{{ content.title }}</h1>
+            <span class="badge detail-type-badge">{{ type_label }}</span>
+        </div>
+
+        <div class="d-flex flex-wrap align-items-center gap-3 mt-2">
+            <span class="detail-stars" aria-hidden="true">{% for i in range(1, 6) %}<span class="{{ 'star-on' if i <= star_count else 'star-off' }}">★</span>{% endfor %}</span>
+            <span class="detail-rating-num">{{ '%.1f' % content.rating }}<small class="text-muted fw-normal"> / 10</small></span>
+            <span class="text-muted small">条目 ID：{{ content.id }}</span>
+            {% if content.bangumi_id %}
+            <span class="text-muted small">Bangumi ID：{{ content.bangumi_id }}</span>
+            {% endif %}
+        </div>
+
+        <p class="detail-summary mt-3 mb-0">{{ content.summary }}</p>
+
+        <div class="mt-3">
+            <span class="detail-chip">{{ type_label }}</span>
+            <span class="text-muted small ms-1">暂无其他标签数据</span>
+        </div>
+
+        {% if content.source_url %}
+        <p class="text-muted small mt-3 mb-0">
+            来源：<a href="{{ content.source_url }}" target="_blank" rel="noopener noreferrer">{{ content.source_url }}</a>
+        </p>
+        {% endif %}
+    </div>
+</div>
+
+<div class="row g-3 mt-1">
+    <section class="col-12 col-lg-7">
+        <div class="card detail-section h-100">
+            <div class="card-header bg-white fw-semibold">相关内容推荐</div>
+            <div class="card-body">
+                {% if related_contents %}
+                <div class="row g-3">
+                    {% for rel in related_contents %}
+                    <div class="col-12 col-md-6">
+                        <a class="detail-related-item" href="/contents/{{ rel.id }}">
+                            <div class="d-flex justify-content-between align-items-center gap-2">
+                                <span class="fw-semibold text-truncate">{{ rel.title }}</span>
+                                <span class="badge detail-type-badge-sm">{{ type_label }}</span>
+                            </div>
+                            <div class="small text-muted mt-1">评分 {{ '%.1f' % rel.rating }}</div>
+                            <p class="small text-secondary mb-0 mt-1">
+                                {{ rel.summary[:40] }}{% if rel.summary|length > 40 %}…{% endif %}
+                            </p>
+                        </a>
+                    </div>
+                    {% endfor %}
+                </div>
+                {% else %}
+                <div class="detail-empty">暂无同类型内容可推荐。</div>
+                {% endif %}
+            </div>
+        </div>
+    </section>
+
+    <section class="col-12 col-lg-5">
+        <div class="card detail-section h-100">
+            <div class="card-header bg-white fw-semibold d-flex justify-content-between align-items-center">
+                <span>相关资讯</span>
+                <a class="small fw-normal" href="/articles">全部资讯 &rarr;</a>
+            </div>
+            <div class="card-body">
+                {% if related_articles %}
+                <ul class="list-unstyled mb-0">
+                    {% for art in related_articles %}
+                    <li class="detail-article-item{% if not loop.last %} pb-2 mb-2 border-bottom{% endif %}">
+                        <a class="fw-semibold" href="/articles/{{ art.id }}">{{ art.title }}</a>
+                        <div class="small text-muted mt-1">{{ art.category }} · {{ art.published_at.strftime('%Y-%m-%d') }}</div>
+                        <p class="small text-secondary mb-0 mt-1">
+                            {{ art.summary[:60] }}{% if art.summary|length > 60 %}…{% endif %}
+                        </p>
+                    </li>
+                    {% endfor %}
+                </ul>
+                {% else %}
+                <div class="detail-empty">
+                    暂无提到该作品的资讯。<br>
+                    <a class="small" href="/articles">去浏览全部资讯</a>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </section>
+</div>
+
+<div class="mt-4">
+    <a class="btn btn-outline-secondary btn-sm" href="/">返回列表</a>
+</div>
 {% endblock %}

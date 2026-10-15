@@ -36,15 +36,85 @@ def list_contents(
     stmt = stmt.order_by(Content.id)
     return list(db.scalars(stmt))
 
+
+def count_contents_by_type(db: Session) -> dict[str, int]:
+    """按类型统计内容条数（首页分类浏览卡片）；空表返回空 dict。"""
+    rows = db.execute(
+        select(Content.type, func.count()).group_by(Content.type)
+    ).all()
+    return {content_type: count for content_type, count in rows}
+
+
+def list_top_contents(db: Session, limit: int = 6) -> list[Content]:
+    """首页推荐作品：按评分从高到低取前 limit 条真实数据，同分按 id 稳定排序。"""
+    stmt = (
+        select(Content)
+        .order_by(Content.rating.desc(), Content.id.asc())
+        .limit(limit)
+    )
+    return list(db.scalars(stmt))
+
 def get_content(db: Session, content_id: int) -> Content | None:
     """按主键查询，不存在返回 None（由路由层转 404）。"""
     return db.get(Content, content_id)
+
+
+def list_related_contents(
+    db: Session,
+    content: Content,
+    limit: int = 6,
+) -> list[Content]:
+    """详情页相关内容推荐：同类型、排除自身，按评分从高到低。
+
+    推荐依据只有库内真实数据（类型一致 + 评分排序）；无同类型条目时
+    返回空列表，由页面负责展示空态。
+    """
+    stmt = (
+        select(Content)
+        .where(Content.type == content.type, Content.id != content.id)
+        .order_by(Content.rating.desc(), Content.id.asc())
+        .limit(limit)
+    )
+    return list(db.scalars(stmt))
+
+
+def list_related_articles(
+    db: Session,
+    content: Content,
+    limit: int = 5,
+) -> list[Article]:
+    """详情页相关资讯：标题/摘要/正文提到该作品标题的已发布资讯。
+
+    关联依据是文章文本与作品标题的真实匹配（不区分大小写），不做任何
+    推测性关联；无匹配或作品标题为空时返回空列表，由页面展示空态。
+    """
+    keyword = content.title.strip()
+    if not keyword:
+        return []
+    pattern = f"%{keyword.lower()}%"
+    stmt = (
+        select(Article)
+        .where(
+            Article.is_published.is_(True),
+            or_(
+                func.lower(Article.title).like(pattern),
+                func.lower(Article.summary).like(pattern),
+                func.lower(Article.body).like(pattern),
+            ),
+        )
+        .order_by(Article.published_at.desc(), Article.id.desc())
+        .limit(limit)
+    )
+    return list(db.scalars(stmt))
+
+
 def list_articles(
     db: Session,
     category: str | None = None,
     published_only: bool = True,
+    limit: int | None = None,
 ) -> list[Article]:
-    """查询资讯列表，可按分类筛选，默认只显示已发布文章。"""
+    """查询资讯列表，可按分类筛选，默认只显示已发布文章；limit 限制返回条数。"""
     stmt = select(Article)
 
     if published_only:
@@ -57,6 +127,10 @@ def list_articles(
         Article.published_at.desc(),
         Article.id.desc(),
     )
+
+    if limit is not None:
+        stmt = stmt.limit(limit)
+
     return list(db.scalars(stmt))
 
 
@@ -73,17 +147,52 @@ def get_article(
 
     return db.scalar(stmt)
 
+def _content_search_stmt(keyword: str, content_type: str | None):
+    """内容搜索的共享查询：标题/简介不区分大小写包含匹配，可叠加类型筛选。
+
+    语义与第一阶段一致（lower 后包含匹配）；分页与不分页的调用方共用本构造，
+    避免两套搜索实现漂移。
+    """
+    stmt = select(Content)
+    if keyword:
+        pattern = f"%{keyword.lower()}%"
+        stmt = stmt.where(
+            or_(
+                func.lower(Content.title).like(pattern),
+                func.lower(Content.summary).like(pattern),
+            )
+        )
+    if content_type is not None:
+        stmt = stmt.where(Content.type == content_type)
+    return stmt.order_by(Content.id)
+
+
 def search_contents(db: Session, keyword: str) -> list[Content]:
     """标题/简介不区分大小写的包含匹配，语义与第一阶段一致。
 
-    数据量小，先在 Python 侧过滤以稳定契约；引入分页时再下沉到 SQL。
+    不分页、按 id 排序返回全部匹配；分页需求用 search_contents_page。
     """
-    lowered = keyword.lower()
-    return [
-        item
-        for item in list_contents(db)
-        if lowered in item.title.lower() or lowered in item.summary.lower()
-    ]
+    return list(db.scalars(_content_search_stmt(keyword, None)))
+
+
+def search_contents_page(
+    db: Session,
+    *,
+    keyword: str = "",
+    content_type: str | None = None,
+    page: int = 1,
+    page_size: int = 20,
+) -> tuple[int, list[Content]]:
+    """分页搜索内容：关键词（标题/简介）与类型筛选可叠加，返回 (总数, 当前页)。
+
+    关键词与类型均可缺省：只给类型即按类型浏览，只给关键词即全类型搜索。
+    """
+    stmt = _content_search_stmt(keyword, content_type)
+    total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    items = list(
+        db.scalars(stmt.offset((page - 1) * page_size).limit(page_size))
+    )
+    return total, items
 
 
 def seed_if_empty(db: Session) -> int:
@@ -263,19 +372,15 @@ def upsert_schedule(db: Session, data: dict) -> tuple[AnimeSchedule, str]:
     return record, ("updated" if changed else "unchanged")
 
 
-def list_schedules(
-    db: Session,
-    *,
-    season: str | None = None,
-    keyword: str | None = None,
-    weekday: int | None = None,
-    page: int = 1,
-    page_size: int = 20,
-) -> tuple[int, list[AnimeSchedule]]:
-    """分页查询档期作品：可按档期、星期、关键词（标题/播出说明）筛选。
+def _schedule_filter_stmt(
+    season: str | None,
+    keyword: str | None,
+    weekday: int | None,
+):
+    """档期查询的共享过滤构造：档期、星期、关键词（标题/播出说明）。
 
-    排序：星期几升序（便于按周一到周日浏览），未解析出星期的排在最后，
-    同星期内按主标题排序。
+    分页查询（list_schedules）与整季查询（list_all_schedules）共用，
+    避免两套过滤实现漂移。
     """
     stmt = select(AnimeSchedule)
     if season:
@@ -292,6 +397,47 @@ def list_schedules(
                 AnimeSchedule.broadcast_note.like(pattern),
             )
         )
+    return stmt
+
+
+def list_all_schedules(
+    db: Session,
+    *,
+    season: str | None = None,
+    keyword: str | None = None,
+    weekday: int | None = None,
+) -> list[AnimeSchedule]:
+    """整季档期作品（不分页）：页面默认视图按星期分组展示使用。
+
+    排序与 list_schedules 一致：星期升序、无星期最后、同星期按主标题。
+    """
+    stmt = _schedule_filter_stmt(season, keyword, weekday)
+    return list(
+        db.scalars(
+            stmt.order_by(
+                AnimeSchedule.weekday.is_(None),
+                AnimeSchedule.weekday.asc(),
+                AnimeSchedule.title_main.asc(),
+            )
+        )
+    )
+
+
+def list_schedules(
+    db: Session,
+    *,
+    season: str | None = None,
+    keyword: str | None = None,
+    weekday: int | None = None,
+    page: int = 1,
+    page_size: int = 20,
+) -> tuple[int, list[AnimeSchedule]]:
+    """分页查询档期作品：可按档期、星期、关键词（标题/播出说明）筛选。
+
+    排序：星期几升序（便于按周一到周日浏览），未解析出星期的排在最后，
+    同星期内按主标题排序。
+    """
+    stmt = _schedule_filter_stmt(season, keyword, weekday)
 
     total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     items = list(

@@ -45,7 +45,9 @@ acgn-test-platform/
 │   ├── api.py         # 内容相关 JSON API
 │   ├── cases.py       # 测试用例管理及执行相关 API
 │   ├── runner.py      # 用例执行器与执行记录
-│   ├── pages.py       # 页面路由
+│   ├── business_pages.py  # 业务页面路由（内容/资讯/新番档期/同步历史）
+│   ├── testing_pages.py   # 测试平台页面路由（用例管理/执行历史/批次）
+│   ├── page_common.py     # 页面路由共享设施（模板、会话注解、404 渲染）
 │   ├── schemas.py     # 请求数据校验模型
 │   ├── crud.py        # 数据库访问、查询与初始化逻辑
 │   ├── models.py      # 数据模型

@@ -1,47 +1,44 @@
 {% extends "base.html" %}
 
 {% block title %}
-{{ article.title }} - ACGN 资讯
+{{ article.title }} - ACGN 内容平台
 {% endblock %}
 
 {% block content %}
+<p class="small mb-3"><a href="/articles">&larr; 返回资讯频道</a></p>
 
-<h1 class="h3 mb-3">
-    {{ article.title }}
-</h1>
-
-<div class="text-muted mb-3">
-    分类：{{ article.category }}
-    |
-    发布时间：{{ article.published_at }}
+<div class="card detail-hero">
+    <div class="card-body p-4">
+        <h1 class="h3 mb-2">{{ article.title }}</h1>
+        <div class="d-flex flex-wrap align-items-center gap-2 text-muted small">
+            <span class="badge detail-type-badge-sm">{{ article.category }}</span>
+            <span>发布时间：{{ article.published_at.strftime('%Y-%m-%d %H:%M') }}</span>
+        </div>
+        {% if article.summary %}
+        <p class="article-lead mt-3 mb-0">{{ article.summary }}</p>
+        {% endif %}
+    </div>
 </div>
 
-<p>
-    {{ article.summary }}
-</p>
+<div class="card detail-section mt-3">
+    <div class="card-body p-4">
+        <div class="article-body">{{ article.body }}</div>
 
-<hr>
-
-<div>
-    {{ article.body }}
+        {% if article.source or article.original_url %}
+        <hr class="article-source-divider">
+        {% if article.source %}
+        <p class="text-muted small mb-1">来源：{{ article.source }}</p>
+        {% endif %}
+        {% if article.original_url %}
+        <p class="small mb-0">
+            <a href="{{ article.original_url }}" target="_blank" rel="noopener noreferrer">阅读原文 ↗</a>
+        </p>
+        {% endif %}
+        {% endif %}
+    </div>
 </div>
 
-{% if article.source %}
-<hr>
-<p class="text-muted">
-    来源：{{ article.source }}
-</p>
-{% endif %}
-{% if article.original_url %}
-<p class="mt-3">
-    <a
-        href="{{ article.original_url }}"
-        target="_blank"
-        rel="noopener noreferrer"
-    >
-        阅读原文
-    </a>
-</p>
-{% endif %}
-
+<div class="mt-4">
+    <a class="btn btn-outline-secondary btn-sm" href="/articles">返回资讯频道</a>
+</div>
 {% endblock %}
