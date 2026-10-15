@@ -1,157 +1,15 @@
-"""Jinja2 页面路由：内容展示 + 测试用例管理（数据来源：数据库访问层）。"""
+"""测试平台页面路由：测试用例管理、执行历史与批次结果（数据来源：数据库访问层）。"""
 
-from pathlib import Path
-from typing import Annotated
-
-from fastapi import APIRouter, Depends, Form, Query, Request
+from fastapi import APIRouter, Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
-from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
-from sqlalchemy.orm import Session
 
 from app import crud, runner
-from app.database import get_db
+from app.page_common import DbSession, render_missing, templates
 from app.schemas import TestCaseCreate
-
-# 复用的依赖注解：模块级定义一次，各页面签名直接引用（FastAPI 推荐写法）。
-DbSession = Annotated[Session, Depends(get_db)]
-
-BASE_DIR = Path(__file__).resolve().parent
-templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 router = APIRouter(tags=["pages"])
 
-
-def _render_missing(request: Request, subject: str, subject_id):
-    """统一 404 页面；subject 区分“内容/测试用例”。"""
-    return templates.TemplateResponse(
-        request=request,
-        name="404.html",
-        context={"subject": subject, "content_id": subject_id},
-        status_code=404,
-    )
-
-
-# ---------- ACGN 内容展示（契约不变） ----------
-
-
-@router.get("/", response_class=HTMLResponse)
-def index(request: Request, db: DbSession):
-    """首页：展示数据库中的全部内容列表。"""
-    return templates.TemplateResponse(
-        request=request,
-        name="index.html",
-        context={"contents": crud.list_contents(db)},
-    )
-
-@router.get("/contents/{content_id}", response_class=HTMLResponse)
-def content_detail(request: Request, content_id: int, db: DbSession):
-    """详情页；内容不存在时渲染 404 页面并返回 404 状态码。"""
-    item = crud.get_content(db, content_id)
-    if item is None:
-        return _render_missing(request, "内容", content_id)
-    return templates.TemplateResponse(
-        request=request,
-        name="detail.html",
-        context={"content": item},
-    )
-@router.get("/articles", response_class=HTMLResponse)
-def articles_page(request: Request, db: DbSession):
-    """资讯列表页面。"""
-    return templates.TemplateResponse(
-        request=request,
-        name="articles.html",
-        context={"articles": crud.list_articles(db)},
-    )
-
-
-@router.get("/articles/{article_id}", response_class=HTMLResponse)
-def article_detail_page(
-    request: Request,
-    article_id: int,
-    db: DbSession,
-):
-    """资讯详情页面。"""
-    article = crud.get_article(db, article_id)
-
-    if article is None:
-        return _render_missing(request, "资讯", article_id)
-
-    return templates.TemplateResponse(
-        request=request,
-        name="article_detail.html",
-        context={"article": article},
-    )
-
-# ---------- 新番档期展示（只读：数据来自同步脚本，不在请求时抓取外部网站） ----------
-
-WEEKDAY_NAMES = {1: "周一", 2: "周二", 3: "周三", 4: "周四", 5: "周五", 6: "周六", 7: "周日"}
-SCHEDULE_PAGE_SIZE = 20
-
-
-@router.get("/schedule", response_class=HTMLResponse)
-def schedule_page(
-    request: Request,
-    db: DbSession,
-    season: str | None = Query(default=None, max_length=6),
-    q: str = Query(default=""),
-    weekday: int | None = Query(default=None),
-    page: int = Query(default=1, ge=1),
-):
-    """新番档期页：档期切换、关键词/星期筛选与分页浏览。
-
-    未指定档期时默认展示最新已同步档期；数据库无任何档期数据时显示引导提示。
-    """
-    seasons = crud.list_schedule_seasons(db)
-    current_season = season or (seasons[0]["season_code"] if seasons else None)
-    if weekday is not None and weekday not in WEEKDAY_NAMES:
-        weekday = None
-    keyword = q.strip() or None
-
-    total = 0
-    works: list = []
-    total_pages = 1
-    season_url = None
-    if current_season:
-        total, works = crud.list_schedules(
-            db,
-            season=current_season,
-            keyword=keyword,
-            weekday=weekday,
-            page=page,
-            page_size=SCHEDULE_PAGE_SIZE,
-        )
-        total_pages = max(1, (total + SCHEDULE_PAGE_SIZE - 1) // SCHEDULE_PAGE_SIZE)
-        season_url = works[0].source_url if works else None
-
-    return templates.TemplateResponse(
-        request=request,
-        name="schedule.html",
-        context={
-            "seasons": seasons,
-            "current_season": current_season,
-            "season_url": season_url,
-            "weekday_names": WEEKDAY_NAMES,
-            "weekday": weekday,
-            "q": q,
-            "page": page,
-            "page_size": SCHEDULE_PAGE_SIZE,
-            "total": total,
-            "total_pages": total_pages,
-            "works": works,
-        },
-    )
-
-
-@router.get("/schedule/runs", response_class=HTMLResponse)
-def schedule_runs_page(request: Request, db: DbSession):
-    """同步历史页：每次同步（含 dry-run 预览）的运行结果。"""
-    total, runs = crud.list_sync_runs(db, limit=100)
-    return templates.TemplateResponse(
-        request=request,
-        name="schedule_runs.html",
-        context={"runs": runs, "total": total},
-    )
 
 # ---------- 测试用例管理页面（本阶段仅管理定义，不执行请求） ----------
 
@@ -223,7 +81,7 @@ def edit_case_page(request: Request, case_id: int, db: DbSession):
     """编辑页：预填当前用例；不存在返回 404。"""
     case = crud.get_case(db, case_id)
     if case is None:
-        return _render_missing(request, "测试用例", case_id)
+        return render_missing(request, "测试用例", case_id)
     return templates.TemplateResponse(
         request=request,
         name="case_edit.html",
@@ -239,7 +97,7 @@ def update_case_page(request: Request, case_id: int, db: DbSession,
     """表单编辑用例；校验失败返回 400 回显，用例不存在返回 404。"""
     case = crud.get_case(db, case_id)
     if case is None:
-        return _render_missing(request, "测试用例", case_id)
+        return render_missing(request, "测试用例", case_id)
     submitted = {"id": case.id, **_form_values(name, method, path, expected_status, enabled)}
     try:
         data = _parse_case_form(name, method, path, expected_status, enabled == "on")
@@ -264,7 +122,7 @@ def delete_case_page(request: Request, case_id: int, db: DbSession):
     """删除用例；不存在返回 404，成功后重定向回列表页。"""
     case = crud.get_case(db, case_id)
     if case is None:
-        return _render_missing(request, "测试用例", case_id)
+        return render_missing(request, "测试用例", case_id)
     crud.delete_case(db, case)
     return RedirectResponse("/testcases", status_code=303)
 
@@ -274,7 +132,7 @@ def execute_case_page(request: Request, case_id: int, db: DbSession):
     """执行单条用例，成功后重定向到本次执行详情页；用例不存在返回 404。"""
     case = crud.get_case(db, case_id)
     if case is None:
-        return _render_missing(request, "测试用例", case_id)
+        return render_missing(request, "测试用例", case_id)
     run = runner.run_case(db, case)
     return RedirectResponse(f"/runs/{run.id}", status_code=303)
 
@@ -296,7 +154,7 @@ def run_detail_page(request: Request, run_id: int, db: DbSession):
     """单次执行详情页；记录不存在返回 404。"""
     run = crud.get_run(db, run_id)
     if run is None:
-        return _render_missing(request, "执行记录", run_id)
+        return render_missing(request, "执行记录", run_id)
     return templates.TemplateResponse(
         request=request,
         name="run_detail.html",
@@ -326,7 +184,7 @@ def batch_detail_page(request: Request, batch_id: int, db: DbSession):
     """批次结果页：统计 + 回归对比 + 每条执行记录；批次不存在返回 404。"""
     batch = crud.get_batch(db, batch_id)
     if batch is None:
-        return _render_missing(request, "执行批次", batch_id)
+        return render_missing(request, "执行批次", batch_id)
     runs = crud.list_runs_for_batch(db, batch_id)
     regression = runner.compare_batches(db, batch)
     pass_rate = round(batch.passed / batch.total * 100, 1) if batch.total else None

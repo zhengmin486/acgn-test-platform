@@ -1,13 +1,16 @@
 {% extends "base.html" %}
-{% block title %}执行详情 #{{ run.id }} - ACGN 测试平台{% endblock %}
+{% block title %}执行详情 #{{ run.id }} - ACGN 内容平台{% endblock %}
 {% block content %}
-<h1 class="h3 mb-3">执行详情 #{{ run.id }}</h1>
+<h1 class="h3 mb-1">执行详情 #{{ run.id }}</h1>
+<p class="text-muted small mb-3">单条用例的请求参数与响应结果。</p>
 {% if run.passed %}
 <div class="alert alert-success py-2">通过：实际状态码与预期一致。</div>
 {% else %}
 <div class="alert alert-danger py-2">失败{% if run.error %}：{{ run.error }}{% endif %}</div>
 {% endif %}
-<dl class="row">
+<div class="card app-card">
+    <div class="card-body p-4">
+    <dl class="row mb-0">
     <dt class="col-sm-3">用例</dt>
     <dd class="col-sm-9">#{{ run.case_id }} {{ run.case_name }}</dd>
     <dt class="col-sm-3">请求</dt>
@@ -22,6 +25,8 @@
     <dd class="col-sm-9">{{ run.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</dd>
     {% if run.error %}<dt class="col-sm-3">错误摘要</dt><dd class="col-sm-9"><code>{{ run.error }}</code></dd>{% endif %}
 </dl>
+    </div>
+</div>
 <a class="btn btn-outline-secondary btn-sm" href="/runs?case_id={{ run.case_id }}">返回该用例历史</a>
 <a class="btn btn-outline-secondary btn-sm" href="/runs">全部执行历史</a>
 <a class="btn btn-outline-secondary btn-sm" href="/testcases">返回用例列表</a>

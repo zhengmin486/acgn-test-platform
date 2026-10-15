@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}同步历史 - ACGN 测试平台{% endblock %}
+{% block title %}同步历史 - ACGN 内容平台{% endblock %}
 {% block content %}
 <h1 class="h3 mb-3">新番档期同步历史</h1>
 
@@ -11,7 +11,7 @@
 <p class="text-muted small">
     共 {{ total }} 条记录，最新在前。<strong>dry-run</strong> 只做预览统计，不会写入新番数据；只有 <strong>apply</strong> 才正式写入。
 </p>
-<div class="table-responsive">
+<div class="table-responsive table-card">
     <table class="table table-hover align-middle bg-white">
         <thead>
         <tr>

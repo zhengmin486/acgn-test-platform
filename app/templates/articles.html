@@ -1,50 +1,36 @@
 {% extends "base.html" %}
 
-{% block title %}资讯列表 - ACGN 内容服务{% endblock %}
+{% block title %}ACGN 资讯 - ACGN 内容平台{% endblock %}
 
 {% block content %}
-<h1 class="h3 mb-3">ACGN 资讯列表</h1>
+<div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-3">
+    <div>
+        <h1 class="h3 mb-1">ACGN 资讯</h1>
+        <p class="text-muted small mb-0">共 {{ articles|length }} 篇资讯 · 按发布时间从新到旧排列</p>
+    </div>
+    <a class="btn btn-outline-secondary btn-sm" href="/">&larr; 返回首页</a>
+</div>
 
-<p class="text-muted small">
-    当前共有 {{ articles|length }} 篇资讯
-</p>
-
-<table class="table table-hover align-middle bg-white">
-    <thead>
-    <tr>
-        <th>ID</th>
-        <th>标题</th>
-        <th>分类</th>
-        <th>发布时间</th>
-    </tr>
-    </thead>
-
-    <tbody>
+{% if not articles %}
+<div class="detail-empty">暂无资讯内容。</div>
+{% else %}
+<div class="article-list">
     {% for article in articles %}
-    <tr>
-        <td>{{ article.id }}</td>
-        <td>
-            <a href="/articles/{{ article.id }}">
-                {{ article.title }}
-            </a>
-        </td>
-        <td>
-            <span class="badge bg-secondary">
-                {{ article.category }}
-            </span>
-        </td>
-        <td>
-            {{ article.published_at }}
-        </td>
-    </tr>
+    <article class="article-card">
+        <div class="d-flex flex-wrap align-items-center gap-2 mb-1">
+            <span class="badge detail-type-badge-sm">{{ article.category }}</span>
+            <span class="text-muted small">{{ article.published_at.strftime('%Y-%m-%d %H:%M') }}</span>
+        </div>
+        <h2 class="h6 mb-1">
+            <a class="article-card-title" href="/articles/{{ article.id }}">{{ article.title }}</a>
+        </h2>
+        {% if article.summary %}
+        <p class="small text-secondary mb-0">
+            {{ article.summary[:80] }}{% if article.summary|length > 80 %}…{% endif %}
+        </p>
+        {% endif %}
+    </article>
     {% endfor %}
-    </tbody>
-</table>
-
-{% if articles|length == 0 %}
-<p class="text-muted">
-    暂无资讯内容。
-</p>
+</div>
 {% endif %}
-
 {% endblock %}

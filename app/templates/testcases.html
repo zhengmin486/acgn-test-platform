@@ -1,7 +1,7 @@
 {% extends "base.html" %}
-{% block title %}测试用例管理 - ACGN 测试平台{% endblock %}
+{% block title %}测试用例管理 - ACGN 内容平台{% endblock %}
 {% block content %}
-<div class="d-flex justify-content-between align-items-center mb-3">
+<div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-3">
     <h1 class="h3 mb-0">测试用例管理</h1>
     <form method="post" action="/testcases/execute-all">
         <button class="btn btn-success btn-sm" type="submit">执行全部启用用例</button>
@@ -9,7 +9,7 @@
 </div>
 <p class="text-muted small">单条/批量执行仅面向本站（进程内），请求路径只允许本站本地路径；批次结果见"批次"页。</p>
 {% if error %}<div class="alert alert-danger py-2 mb-3">{{ error }}</div>{% endif %}
-<div class="card mb-4">
+<div class="card app-card mb-4">
     <div class="card-header">新建用例</div>
     <div class="card-body">
         <form method="post" action="/testcases" class="row g-2 align-items-end">
@@ -42,7 +42,9 @@
         </form>
     </div>
 </div>
-<table class="table table-hover align-middle bg-white">
+{% if cases %}
+<div class="table-responsive table-card">
+<table class="table table-hover align-middle">
     <thead>
     <tr><th>ID</th><th>名称</th><th>方法</th><th>路径</th><th>预期状态码</th><th>状态</th><th>创建时间</th><th>操作</th></tr>
     </thead>
@@ -70,5 +72,8 @@
     {% endfor %}
     </tbody>
 </table>
-{% if not cases %}<p class="text-muted">暂无用例。</p>{% endif %}
+</div>
+{% else %}
+<div class="detail-empty">暂无用例。可在上方表单中新建。</div>
+{% endif %}
 {% endblock %}

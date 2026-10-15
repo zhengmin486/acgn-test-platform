@@ -10,7 +10,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from app import api, cases, crud, pages
+from app import api, business_pages, cases, crud, testing_pages
 from app.database import engine
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -23,7 +23,8 @@ app = FastAPI(
 
 app.include_router(api.router)
 app.include_router(cases.router)
-app.include_router(pages.router)
+app.include_router(business_pages.router)
+app.include_router(testing_pages.router)
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 
 # 启动即初始化：建表（如无）并播种开发/测试数据；幂等，表已有数据时不覆盖。
@@ -35,3 +36,15 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run(app, host="127.0.0.1", port=8000)
+
+# 统一终端输入、输出编码为 UTF-8
+[Console]::InputEncoding = [System.Text.UTF8Encoding]::new($false)
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+$OutputEncoding = [Console]::OutputEncoding
+
+# 将常用文件读写命令的默认编码统一为 UTF-8
+$PSDefaultParameterValues['Get-Content:Encoding'] = 'utf8'
+$PSDefaultParameterValues['Set-Content:Encoding'] = 'utf8'
+$PSDefaultParameterValues['Add-Content:Encoding'] = 'utf8'
+$PSDefaultParameterValues['Out-File:Encoding'] = 'utf8'
+

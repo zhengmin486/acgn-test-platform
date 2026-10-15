@@ -1,66 +1,26 @@
-﻿# Python
-# pytest temporary directory
-pytest-of-*/
+# Python
 __pycache__/
-# pytest temporary directory
-pytest-of-*/
 *.py[cod]
-# pytest temporary directory
-pytest-of-*/
 .pytest_cache/
-# pytest temporary directory
-pytest-of-*/
 .ruff_cache/
-# pytest temporary directory
-pytest-of-*/
 .coverage
-# pytest temporary directory
-pytest-of-*/
 htmlcov/
-# pytest temporary directory
-pytest-of-*/
 
 # pytest temporary directory
 pytest-of-*/
+.pytest-tmp/
+
 # 虚拟环境
-# pytest temporary directory
-pytest-of-*/
 .venv/
-# pytest temporary directory
-pytest-of-*/
 
-# pytest temporary directory
-pytest-of-*/
 # 本地环境配置（禁止提交密码）
-# pytest temporary directory
-pytest-of-*/
 .env
-# pytest temporary directory
-pytest-of-*/
 
-# pytest temporary directory
-pytest-of-*/
 # 本地开发/验证用数据库文件（SQLite 临时方案）
-# pytest temporary directory
-pytest-of-*/
 *.db
-# pytest temporary directory
-pytest-of-*/
 
-# pytest temporary directory
-pytest-of-*/
 # 测试报告输出
-# pytest temporary directory
-pytest-of-*/
 reports/
-# pytest temporary directory
-pytest-of-*/
 
-# pytest temporary directory
-pytest-of-*/
-
-# pytest temporary directory
-pytest-of-*/
-pytest-of-*/
-# pytest temporary directory
-pytest-of-*/
+# 本地工具产物（沙箱 ACL 修复报告等）
+.acl-recovery/
