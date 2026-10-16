@@ -3,7 +3,7 @@
 覆盖：
 - 权限（未登录跳登录 / 普通用户 403 / 管理员可见）；
 - 入口与表单（总览入口、二级导航、三个数据源的表单与范围提示）；
-- 预览 → 确认两阶段的页面行为（成功、范围不合法、任务占用、意外异常）；
+- 预览 → 确认两步的页面行为（成功、范围不合法、任务占用、意外异常）；
 - 三类数据源的真实流程（不触网：Bangumi 打桩 fetch、Yuc 打桩页面、资讯打桩假站点）；
 - 重复数据与不覆盖本地数据、幂等（重复确认不产生重复数据）；
 - 同步结果的展示与同步历史。
@@ -309,7 +309,7 @@ def test_preview_shows_result_and_confirm_button(sync_env, monkeypatch):
     assert 'name="scope" value="265, 975"' in body  # 确认表单回传原始范围
 
     # 确认入口必须在「逐条结果」明细表之前出现：明细可能很长，放在后面会被推到
-    # 页面底部而让人以为只有预览、没有写入。顶部醒目一处 + 明细下方次要一处。
+    # 页面底部而让人以为只有预览、没有写入。与「预览」按钮并排一处 + 明细下方次要一处。
     first_confirm = body.find('action="/admin/data/sync/apply"')
     details_pos = body.find("逐条结果")
     assert first_confirm != -1 and details_pos != -1
@@ -372,7 +372,7 @@ def test_apply_redirects_to_run_detail(sync_env, monkeypatch):
 
 
 def test_apply_reports_errors_via_redirect(sync_env, monkeypatch):
-    """确认阶段的失败：303 回显原因，不产生 500，也不写业务数据。"""
+    """确认写入的失败：303 回显原因，不产生 500，也不写业务数据。"""
 
     def busy(*args, **kwargs):
         raise sync_tasks.TaskBusyError("「官方资讯」已有同步任务在执行，请稍后再试")
@@ -582,7 +582,7 @@ def test_articles_preview_then_apply_with_dedupe(sync_env, monkeypatch, article_
 
 
 def test_articles_scope_category_and_limit(sync_env, monkeypatch, article_site):
-    """资讯范围：按栏目 + 条数上限抓取（上限在采集阶段生效，去重在采集之后）。"""
+    """资讯范围：按栏目 + 条数上限抓取（上限在抓取时生效，去重在抓取之后）。"""
     monkeypatch.setattr(import_articles, "fetch_page", article_site)
     resp = sync_env.admin.post(
         "/admin/data/sync/apply",

@@ -5,7 +5,7 @@
 - 作品数据（contents）：查看 / 删除 / 批量删除；
 - 资讯数据（articles）：查看 / 删除；
 - 新番档期（anime_schedules）：查看 / 删除 / 重新同步；
-- 数据同步（本阶段新增）：选择数据源与范围 → 预览 → 确认写入 → 查看结果与历史。
+- 数据同步：选择数据源与范围 → 预览 → 确认写入 → 查看结果与历史。
 
 设计约束：
 - 全部页面挂在 /admin/data 下，由 app.main 用 require_admin_page 统一守卫，
@@ -15,17 +15,18 @@
 - 「重新同步」复用既有同步流程（scripts/sync_yuc_schedule.run_sync），
   不复制也不修改同步逻辑；外部网络失败时把原因回显到页面，应用其它功能不受影响；
 - 「数据同步」页同样只做编排：三类数据源的实际同步逻辑集中在 app.sync_tasks，
-  该模块调用既有脚本/流程，本文件只负责表单、预览/确认两阶段与结果展示。
+  该模块调用既有脚本/流程，本文件只负责表单、预览/确认两步与结果展示。
 """
 
 import math
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 from fastapi import APIRouter, Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from app import crud, sync_tasks
+from app import crud, mailer, sync_tasks
 from app.business_pages import CONTENT_TYPE_LABELS, WEEKDAY_NAMES
+from app.config import settings
 from app.database import SessionLocal
 from app.page_common import DbSession, render_missing, templates
 from scripts.sync_yuc_schedule import SeasonNotFoundError, YucFetchError, run_sync
@@ -506,3 +507,84 @@ def sync_apply_page(
             _url("/admin/data/sync", **base, run=result.run_id), status_code=303
         )
     return RedirectResponse(_url("/admin/data/sync", **base), status_code=303)
+
+
+# ---------- 账号验证（邮箱验证的人工兜底入口） ----------
+
+
+def _render_accounts_page(
+    request: Request,
+    db,
+    *,
+    verified: str = "",
+    error: str = "",
+    link: str = "",
+    link_user: str = "",
+):
+    return templates.TemplateResponse(
+        request=request,
+        name="admin_accounts.html",
+        context={
+            "pending_users": crud.list_unverified_users(db),
+            "verified": verified,
+            "error": error,
+            "link": link,
+            "link_user": link_user,
+            "smtp_enabled": mailer.smtp_enabled(),
+            "email_verification_enabled": settings.email_verification_enabled,
+        },
+    )
+
+
+@router.get("/admin/accounts", response_class=HTMLResponse)
+def accounts_page(
+    request: Request,
+    db: DbSession,
+    verified: str = Query(default=""),
+    error: str = Query(default=""),
+    link: str = Query(default=""),
+    link_user: str = Query(default=""),
+):
+    """待验证账号列表：管理员可直接放行，或在未配置邮件服务时取得验证链接。"""
+    return _render_accounts_page(
+        request, db, verified=verified, error=error, link=link, link_user=link_user
+    )
+
+
+@router.post("/admin/accounts/{user_id}/verify")
+def verify_account(request: Request, db: DbSession, user_id: int):
+    """管理员手动标记账号为已验证（PRG：303 回列表并回显用户名）。"""
+    account = crud.get_user(db, user_id)
+    if account is None:
+        return RedirectResponse(
+            _url("/admin/accounts", error=f"账号不存在：{user_id}"), status_code=303
+        )
+    crud.mark_email_verified(db, account)
+    return RedirectResponse(
+        _url("/admin/accounts", verified=account.username), status_code=303
+    )
+
+
+@router.post("/admin/accounts/{user_id}/link")
+def account_verification_link(request: Request, db: DbSession, user_id: int):
+    """为指定账号生成一次性验证链接，供管理员转交用户。
+
+    与面向普通用户的 /verify/link 不同，这里**不要求「未配置 SMTP」**：
+    邮件服务故障（配置错误、被拒收）时，管理员仍需要一条可转交的链接兜底。
+    管理员本身就能直接放行账号，因此不存在额外越权风险。
+    每次生成都会让该账号此前的链接失效。
+    """
+    if not settings.email_verification_enabled:
+        return RedirectResponse("/admin/accounts", status_code=303)
+    account = crud.get_user(db, user_id)
+    if account is None or not account.email:
+        return RedirectResponse(
+            _url("/admin/accounts", error=f"账号不存在或无邮箱：{user_id}"), status_code=303
+        )
+    token = crud.issue_email_token(db, account)
+    base = (settings.public_base_url or str(request.base_url)).rstrip("/")
+    verify_url = f"{base}/verify/email?token={quote(token)}"
+    return RedirectResponse(
+        _url("/admin/accounts", link=verify_url, link_user=account.username),
+        status_code=303,
+    )

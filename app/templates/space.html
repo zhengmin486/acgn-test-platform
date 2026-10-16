@@ -1,0 +1,212 @@
+{% extends "base_content.html" %}
+{% from "_pager.html" import pager %}
+{# 个人空间：用户信息 + 简介编辑 + 作品收藏 / 浏览记录（Tab 切换 + 分页）。
+   仅登录用户可达（路由层保证）；收藏与记录均只属于当前账号。 #}
+{% block title %}个人空间 - ACGN 内容平台{% endblock %}
+
+{% macro stars(rating) %}
+{% set star_count = (rating / 2) | int %}
+<span class="detail-stars" aria-hidden="true">{% for i in range(1, 6) %}<span class="{{ 'star-on' if i <= star_count else 'star-off' }}">★</span>{% endfor %}</span>
+{% endmacro %}
+
+{% block content %}
+<div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-3">
+    <div>
+        <h1 class="h3 mb-1 section-heading">个人空间</h1>
+        <p class="text-muted small mb-0">账号信息、个人简介、作品收藏与浏览记录，只属于你本人。</p>
+    </div>
+    <a class="btn btn-outline-secondary btn-sm" href="/">&larr; 返回首页</a>
+</div>
+
+{# ===== 写操作回显（PRG：303 后用查询参数带回结果） ===== #}
+{% if request.query_params.get('bio') == 'ok' %}
+<div class="alert alert-success py-2">简介已保存。</div>
+{% elif request.query_params.get('bio') == 'error' %}
+<div class="alert alert-danger py-2">简介保存失败：长度不能超过 {{ bio_max_length }} 个字符。</div>
+{% endif %}
+{% if request.query_params.get('fav_removed') %}
+<div class="alert alert-info py-2">已取消收藏。</div>
+{% endif %}
+{% if request.query_params.get('fav_cleared') %}
+<div class="alert alert-info py-2">已清空收藏（{{ request.query_params.get('fav_cleared') }} 条）。</div>
+{% endif %}
+{% if request.query_params.get('history_removed') %}
+<div class="alert alert-info py-2">已删除该条浏览记录。</div>
+{% endif %}
+{% if request.query_params.get('history_cleared') %}
+<div class="alert alert-info py-2">已清空浏览记录（{{ request.query_params.get('history_cleared') }} 条）。</div>
+{% endif %}
+
+{# ===== 用户信息卡：头像占位（渐变 + 首字）+ 账号信息 + 统计 ===== #}
+<div class="card app-card mb-3">
+    <div class="card-body p-4">
+        <div class="d-flex flex-wrap align-items-center gap-3">
+            <span class="space-avatar" aria-hidden="true">{{ account.username[:1] | upper }}</span>
+            <div class="flex-grow-1">
+                <div class="d-flex flex-wrap align-items-center gap-2">
+                    <span class="h5 mb-0">{{ account.username }}</span>
+                    <span class="badge {{ 'bg-primary' if account.role == 'admin' else 'bg-secondary' }}">
+                        {{ '管理员' if account.role == 'admin' else '普通用户' }}
+                    </span>
+                </div>
+                <div class="small text-muted mt-1">
+                    邮箱：{{ account.email or '未绑定' }} · 注册于 {{ account.created_at.strftime('%Y-%m-%d') }}
+                </div>
+            </div>
+            <a class="btn btn-outline-secondary btn-sm" href="/me?tab=history">浏览记录 &rarr;</a>
+        </div>
+        <div class="row g-3 mt-3">
+            <div class="col-6 col-md-3">
+                <div class="card app-card stat-card text-center h-100">
+                    <div class="card-body py-3">
+                        <div class="stat-num">{{ favorites_count }}</div>
+                        <div class="small text-muted">作品收藏</div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-6 col-md-3">
+                <div class="card app-card stat-card text-center h-100">
+                    <div class="card-body py-3">
+                        <div class="stat-num">{{ history_count }}</div>
+                        <div class="small text-muted">浏览记录</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+{# ===== 个人简介：展示 + 编辑（空串保存即清除） ===== #}
+<div class="card app-card mb-3">
+    <div class="card-header bg-white fw-semibold">个人简介</div>
+    <div class="card-body">
+        {% if account.bio %}
+        <p class="space-bio-text mb-3">{{ account.bio }}</p>
+        {% else %}
+        <p class="text-muted small mb-3">还没有填写简介，介绍一下自己喜欢的作品吧。</p>
+        {% endif %}
+        <form method="post" action="/me/profile">
+            <div class="mb-2">
+                <label class="form-label small mb-0" for="space-bio">简介</label>
+                <textarea class="form-control" id="space-bio" name="bio" rows="3"
+                          maxlength="{{ bio_max_length }}"
+                          placeholder="最多 {{ bio_max_length }} 个字符，简单介绍一下自己">{{ account.bio or '' }}</textarea>
+            </div>
+            <div class="d-flex flex-wrap align-items-center gap-2">
+                <button class="btn btn-primary btn-sm" type="submit">保存简介</button>
+                <span class="form-text mb-0">留空并保存可清除简介。</span>
+            </div>
+        </form>
+    </div>
+</div>
+
+{# ===== Tab：作品收藏 / 浏览记录 ===== #}
+<ul class="nav space-tabs mb-3">
+    <li class="nav-item">
+        <a class="nav-link space-tab{% if tab == 'favorites' %} active{% endif %}"
+           href="/me?tab=favorites">作品收藏（{{ favorites_count }}）</a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link space-tab{% if tab == 'history' %} active{% endif %}"
+           href="/me?tab=history">浏览记录（{{ history_count }}）</a>
+    </li>
+</ul>
+
+{% if tab == 'favorites' %}
+{# ===== 作品收藏：卡片网格 + 单条取消 + 清空 ===== #}
+{% if favorites %}
+<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+    <p class="text-muted small mb-0">共 {{ favorites_total }} 条收藏 · 第 {{ page }}/{{ total_pages }} 页</p>
+    <form method="post" action="/me/favorites/clear" class="m-0"
+          onsubmit="return confirm('确定清空全部收藏吗？');">
+        <button class="btn btn-outline-danger btn-sm" type="submit">清空收藏</button>
+    </form>
+</div>
+<div class="row g-3">
+    {% for item in favorites %}
+    <div class="col-12 col-sm-6 col-lg-4">
+        <a class="work-card" href="/contents/{{ item.id }}">
+            <span class="work-cover" aria-hidden="true">{{ item.title[:1] }}</span>
+            <span class="work-card-body">
+                <span class="d-flex justify-content-between align-items-center gap-2">
+                    <span class="fw-semibold text-truncate">{{ item.title }}</span>
+                    <span class="badge detail-type-badge-sm">{{ type_labels.get(item.type, item.type) }}</span>
+                </span>
+                <span class="d-flex align-items-center gap-2 mt-1">
+                    {{ stars(item.rating) }}
+                    <span class="small text-muted">{{ '%.1f' % item.rating }}</span>
+                </span>
+                <span class="small text-secondary mt-1 work-card-summary">{{ item.summary[:60] }}{% if item.summary|length > 60 %}…{% endif %}</span>
+            </span>
+        </a>
+        <form method="post" action="/me/favorites/{{ item.id }}/remove" class="mt-2">
+            <button class="btn btn-outline-secondary btn-sm w-100" type="submit">取消收藏</button>
+        </form>
+    </div>
+    {% endfor %}
+</div>
+{% if total_pages > 1 %}
+<div class="mt-3">
+    {{ pager('/me?tab=favorites&', page, total_pages) }}
+</div>
+{% endif %}
+{% else %}
+<div class="detail-empty">
+    还没有收藏任何作品。<br>
+    <a class="small" href="/contents">去全部作品挑一部收藏</a>
+</div>
+{% endif %}
+
+{% else %}
+{# ===== 浏览记录：表格（作品 / 类型 / 评分 / 浏览时间）+ 单条删除 + 清空 ===== #}
+{% if history %}
+<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+    <p class="text-muted small mb-0">共 {{ history_total }} 条记录 · 第 {{ page }}/{{ total_pages }} 页</p>
+    <form method="post" action="/me/history/clear" class="m-0"
+          onsubmit="return confirm('确定清空全部浏览记录吗？');">
+        <button class="btn btn-outline-danger btn-sm" type="submit">清空记录</button>
+    </form>
+</div>
+<div class="card table-card">
+    <div class="table-responsive">
+        <table class="table table-hover align-middle mb-0">
+            <thead>
+                <tr>
+                    <th>作品</th>
+                    <th>类型</th>
+                    <th>评分</th>
+                    <th>浏览时间</th>
+                    <th class="text-end">操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for item, viewed_at in history %}
+                <tr>
+                    <td><a class="fw-semibold" href="/contents/{{ item.id }}">{{ item.title }}</a></td>
+                    <td><span class="badge detail-type-badge-sm">{{ type_labels.get(item.type, item.type) }}</span></td>
+                    <td>{{ '%.1f' % item.rating }}</td>
+                    <td class="text-muted small">{{ viewed_at.strftime('%Y-%m-%d %H:%M') }}</td>
+                    <td class="text-end">
+                        <form method="post" action="/me/history/{{ item.id }}/remove" class="m-0 d-inline">
+                            <button class="btn btn-outline-secondary btn-sm" type="submit">删除</button>
+                        </form>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% if total_pages > 1 %}
+<div class="mt-3">
+    {{ pager('/me?tab=history&', page, total_pages) }}
+</div>
+{% endif %}
+{% else %}
+<div class="detail-empty">
+    还没有浏览记录。<br>
+    <a class="small" href="/contents">去全部作品看看</a>
+</div>
+{% endif %}
+{% endif %}
+{% endblock %}

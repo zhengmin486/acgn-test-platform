@@ -13,7 +13,7 @@ from app.config import settings
 
 
 class Base(DeclarativeBase):
-    """声明式基类；下阶段由 Alembic 接管迁移。"""
+    """声明式基类；后续由 Alembic 接管迁移。"""
 
 
 def build_engine(url: str) -> Engine:

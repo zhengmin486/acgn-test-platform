@@ -1,12 +1,14 @@
 {% extends "base_admin.html" %}
 {# 数据同步：选择数据源与范围 → 预览 → 确认写入。
    预览与正式走同一条执行路径，确认按钮只在预览结果上出现；
-   表单之间不嵌套（预览表单与确认表单是并列的两个 <form>）。 #}
+   表单之间不嵌套（范围表单 / 预览按钮 / 确认表单是并列关系）。
+   确认写入主入口与「预览」按钮并排（.sync-actions 操作行），明细表下方再留次要入口。 #}
 {% block title %}数据同步 - 测试管理平台{% endblock %}
 
-{# 确认写入区块：预览后必须在结果面板顶部就近出现，否则会被下方很长的「逐条结果」
-   明细表推到页面底部、难以发现。同一区块在明细表下方再出现一次（滚到底也能点）。
-   两处是并列的表单，不嵌套在预览表单内。 #}
+{# 确认写入表单：与范围表单并列（不嵌套），参数沿用预览时提交的原始范围值
+   （资讯的 result.scope 是展示文本、不可再解析，必须回传 form_scope/form_limit）。
+   prominent=True  → 主入口，放在「预览」按钮旁的操作行，按钮带待写入条数；
+   prominent=False → 次要入口，放在逐条明细表下方，滚到底也能确认。 #}
 {% macro confirm_block(prominent) %}
 {% if can_confirm %}
 <form method="post" action="/admin/data/sync/apply"
@@ -16,7 +18,7 @@
     <input type="hidden" name="limit" value="{{ form_limit }}">
     <div class="d-flex flex-wrap align-items-center gap-2">
         <button class="btn {% if prominent %}btn-success{% else %}btn-sm btn-outline-success{% endif %}"
-                type="submit">确认写入</button>
+                type="submit">确认写入{% if prominent and result.pending %}<span class="badge bg-white text-success ms-1">{{ result.pending }} 条待写入</span>{% endif %}</button>
         <span class="small text-secondary">
             {% if result.pending %}
             <strong class="text-success">预览到 {{ result.pending }} 条待写入内容</strong>，
@@ -65,7 +67,10 @@
                 <h2 class="h5 mb-1">{{ spec.label }}</h2>
                 <p class="text-secondary small mb-3">数据源：{{ spec.source }}</p>
 
-                <form method="post" action="/admin/data/sync/preview">
+                {# 范围表单：只装字段；表单末尾保留一个不可见的默认提交按钮，
+                   使在文本框里按回车也能触发预览。可见按钮在下方 .sync-actions 行，
+                   预览按钮经 form 属性归属本表单；确认写入是并列的独立表单，不嵌套。#}
+                <form method="post" action="/admin/data/sync/preview" id="sync-preview-form">
                     <input type="hidden" name="task" value="{{ spec.key }}">
 
                     {% if spec.scope_kind == "ids" %}
@@ -118,9 +123,17 @@
                     </div>
                     {% endif %}
 
-                    <button class="btn btn-sm btn-primary" type="submit">预览</button>
-                    <span class="text-muted small ms-2">预览不会写入任何数据</span>
+                    {# 不可见默认提交按钮：保留「文本框内回车 = 预览」的习惯操作 #}
+                    <button class="visually-hidden" type="submit" aria-hidden="true" tabindex="-1">预览</button>
                 </form>
+
+                {# 操作按钮行：预览与确认写入并排，预览完一眼就能看到写入入口。
+                   预览按钮用 form 属性提交上方范围表单；确认写入沿用预览时的原始范围。 #}
+                <div class="sync-actions">
+                    <button class="btn btn-primary" type="submit" form="sync-preview-form">预览</button>
+                    <span class="text-muted small">预览不会写入任何数据</span>
+                    {{ confirm_block(true) }}
+                </div>
             </div>
         </div>
 
@@ -144,9 +157,8 @@
                 <p class="small mb-3">{{ result.message }}</p>
                 {% endif %}
 
-                {# 确认写入：放在计数表与逐条明细之前，预览完第一眼就能看到 #}
-                {{ confirm_block(true) }}
-
+                {# 确认写入主入口在范围表单的操作按钮行（与「预览」并排）；此处不再重复，
+                   只在很长的逐条明细表下方保留次要入口（见本面板末尾）。 #}
                 <div class="table-responsive mb-3">
                     <table class="table table-sm table-bordered small mb-0">
                         <thead class="table-light">

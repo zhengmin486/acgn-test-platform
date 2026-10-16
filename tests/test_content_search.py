@@ -1,8 +1,11 @@
-"""内容搜索功能测试：JSON API（类型/分页）与首页搜索交互（表单/空态/翻页）。
+"""内容搜索功能测试：JSON API（类型/分页）与作品页搜索交互（表单/空态/翻页）。
 
 原则与 test_api.py 一致：受控临时 SQLite（只含 6 条种子 + 批量造数），
 不依赖本地开发库真实数据，不访问外部网络。
+首页（/）是门户页，全量浏览与搜索在「全部作品」页（/contents）。
 """
+
+import re
 
 import pytest
 from fastapi.testclient import TestClient
@@ -104,7 +107,7 @@ def test_crud_search_page_total_and_ids(tmp_path):
 
 
 def test_crud_search_legacy_semantics_kept(tmp_path):
-    """第一阶段契约守护：search_contents 不分页、大小写不敏感、按 id 排序。"""
+    """既有契约守护：search_contents 不分页、大小写不敏感、按 id 排序。"""
     from app.database import Base as B
 
     engine = create_engine(
@@ -170,12 +173,12 @@ def test_api_search_blank_q_still_rejected(seeded_client):
     assert resp.status_code == 400
 
 
-# ---------- 首页搜索交互 ----------
+# ---------- 首页（门户）与全部作品页（/contents）交互 ----------
 
 
-def test_index_search_hit_and_feedback(seeded_client):
+def test_contents_search_hit_and_feedback(seeded_client):
     """命中：结果统计行（关键词/条数）+ 表单回填 + 命中条目。"""
-    resp = seeded_client.get("/", params={"q": "星海"})
+    resp = seeded_client.get("/contents", params={"q": "星海"})
     assert resp.status_code == 200
     assert "星海航线" in resp.text
     assert "搜索结果" in resp.text and "共 1 条" in resp.text
@@ -183,56 +186,62 @@ def test_index_search_hit_and_feedback(seeded_client):
     assert "/contents/1" in resp.text
 
 
-def test_index_search_type_filter(seeded_client):
+def test_contents_search_type_filter(seeded_client):
     """仅按类型浏览：只显示该类型条目，统计行带类型中文标签。"""
-    resp = seeded_client.get("/", params={"type": "game"})
+    resp = seeded_client.get("/contents", params={"type": "game"})
     assert resp.status_code == 200
     assert "迷宫回响" in resp.text and "Cyber Shrine" in resp.text
     assert "星海航线" not in resp.text
     assert "类型：游戏" in resp.text and "共 2 条" in resp.text
 
 
-def test_index_search_empty_state(seeded_client):
-    """无匹配：警示空态 + 清除筛选入口，而非空白表格。"""
-    resp = seeded_client.get("/", params={"q": "绝不存在的关键词xyz"})
+def test_contents_search_empty_state(seeded_client):
+    """无匹配：空态 + 清除筛选入口（指向作品页自身），而非空白网格。"""
+    resp = seeded_client.get("/contents", params={"q": "绝不存在的关键词xyz"})
     assert resp.status_code == 200
     assert "没有找到匹配的内容" in resp.text
-    assert 'href="/"' in resp.text  # 清除筛选链接
+    assert 'href="/contents"' in resp.text  # 清除筛选链接
 
 
-def test_index_search_pagination_links(seeded_client):
+def test_contents_search_pagination_links(seeded_client):
     """翻页：第二页有“上一页”且只含后半段数据；第一页有“下一页”。"""
-    page1 = seeded_client.get("/", params={"q": "批量"})
+    page1 = seeded_client.get("/contents", params={"q": "批量"})
     assert "共 25 条" in page1.text and "下一页" in page1.text
     assert "批量作品01" in page1.text
 
-    page2 = seeded_client.get("/", params={"q": "批量", "page": 2})
-    assert "上一页" in page2.text and "下一页" not in page2.text
+    page2 = seeded_client.get("/contents", params={"q": "批量", "page": 2})
+    assert "上一页" in page2.text
     assert "批量作品21" in page2.text and "批量作品01" not in page2.text
+    # 末页：「下一页」渲染为禁用态（复用 _pager.html 分页宏，禁用项不可点）
+    assert re.search(
+        r'<li class="page-item disabled">\s*<a class="page-link"[^>]*>下一页</a>', page2.text
+    )
 
 
-def test_index_default_view_without_search(seeded_client):
-    """无筛选参数时保持原样：全量列表，无搜索统计行与分页。"""
+def test_index_is_portal_without_full_list(seeded_client):
+    """无筛选参数：首页是门户（分类/推荐/资讯），不再渲染全量列表。"""
     resp = seeded_client.get("/")
     assert resp.status_code == 200
     assert "搜索结果" not in resp.text
-    assert "/contents/1" in resp.text and "星海航线" in resp.text
+    assert "内容列表" not in resp.text  # 全量列表已移到「全部作品」页
+    assert "分类浏览" in resp.text and "推荐作品" in resp.text
+    assert "/contents/1" in resp.text and "星海航线" in resp.text  # 推荐位仍链到详情
 
 
-def test_index_invalid_type_falls_back_to_full_list(seeded_client):
-    """页面侧宽容处理：非法类型被忽略，回退全量列表（严格校验归 API）。"""
-    resp = seeded_client.get("/", params={"type": "banana"})
+def test_index_ignores_filter_params(seeded_client):
+    """首页不再接受筛选参数（q/type 归作品页）：带参访问仍是门户，不报错。"""
+    resp = seeded_client.get("/", params={"type": "banana", "q": "星海"})
     assert resp.status_code == 200
     assert "搜索结果" not in resp.text
-    assert "星海航线" in resp.text
+    assert "星海航线" in resp.text  # 推荐位
 
 
-def test_index_empty_database_with_and_without_search(empty_client):
-    """空库：默认视图提示暂无数据；搜索态提示无匹配，两者都保持 200。"""
+def test_empty_database_portal_and_works_search(empty_client):
+    """空库：首页门户展示推荐空态；作品页搜索提示无匹配，两者都保持 200。"""
     plain = empty_client.get("/")
     assert plain.status_code == 200
     assert "暂无内容数据" in plain.text and 'name="q"' in plain.text
 
-    searched = empty_client.get("/", params={"q": "任意"})
+    searched = empty_client.get("/contents", params={"q": "任意"})
     assert searched.status_code == 200
     assert "没有找到匹配的内容" in searched.text

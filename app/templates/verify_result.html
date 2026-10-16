@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}{% if success %}邮箱验证成功{% else %}邮箱验证失败{% endif %} - ACGN 内容服务平台{% endblock %}
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-12 col-md-8 col-lg-6">
+        <div class="card app-card auth-card mt-4">
+            <div class="card-body p-4">
+                <div class="auth-band mb-4">
+                    <span class="brand-mark" aria-hidden="true"></span>
+                    <h1 class="h4 mb-1">{% if success %}邮箱验证成功{% else %}邮箱验证失败{% endif %}</h1>
+                    <p class="small mb-0" style="color: rgba(255,255,255,.85);">
+                        {% if success %}现在可以使用账号登录了{% else %}链接无效或已过期{% endif %}
+                    </p>
+                </div>
+
+                {% if success %}
+                    <p class="mb-4">
+                        <strong>{{ username }}</strong> 的邮箱已完成验证。
+                    </p>
+                    <div class="d-grid mb-3">
+                        <a class="btn btn-primary"
+                           href="/login{% if next and next != '/' %}?next={{ next }}{% endif %}">去登录</a>
+                    </div>
+                {% else %}
+                    <p class="mb-4">
+                        验证链接无效、已被使用过或已过期。请重新发送验证邮件后再次尝试。
+                    </p>
+                    <div class="d-grid mb-3">
+                        <a class="btn btn-primary"
+                           href="/verify/resend{% if next and next != '/' %}?next={{ next }}{% endif %}">重新发送验证邮件</a>
+                    </div>
+                {% endif %}
+
+                <p class="text-center mb-0">
+                    <a class="small" href="/">&larr; 返回内容平台首页</a>
+                </p>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

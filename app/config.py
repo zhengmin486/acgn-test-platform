@@ -25,6 +25,32 @@ class Settings(BaseSettings):
     default_user_username: str = "demo"
     default_user_password: str = "demo123456"
 
+    # ---------- 邮箱验证（可插拔） ----------
+    # 总开关：置为 False 后注册即登录、登录不再校验邮箱，行为完全退回加该功能之前。
+    email_verification_enabled: bool = True
+    # 验证令牌有效期（秒），默认 24 小时。
+    email_verification_token_ttl_seconds: int = 24 * 60 * 60
+    # 找回密码令牌有效期（秒），默认 1 小时——重置链接权限更高，有效期刻意
+    # 比邮箱验证短很多。
+    password_reset_token_ttl_seconds: int = 60 * 60
+    # 同一账号两次发送验证邮件之间的冷却时间（秒），防止被拿来轰炸邮箱。
+    email_resend_cooldown_seconds: int = 60
+    # 站点对外基址（如 https://acgn.example.com）；留空时取当前请求的 host。
+    public_base_url: str = ""
+
+    # ---------- 邮件发送（SMTP，全部留空则不真发） ----------
+    # smtp_host 与 smtp_from_address 都为空 = 不发送真实邮件：
+    # 验证链接写入日志，并可在待验证页面 / 管理员页面手动生成，保证本地无邮件服务也能走完流程。
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    # 465 端口用 smtp_use_ssl=True；587 端口用 smtp_use_tls=True（STARTTLS）。
+    smtp_use_ssl: bool = False
+    smtp_use_tls: bool = True
+    smtp_from_address: str = ""
+    smtp_from_name: str = "ACGN 平台"
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 

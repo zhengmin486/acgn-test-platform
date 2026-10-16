@@ -3,6 +3,13 @@
 {% block content %}
 {% set star_count = (content.rating / 2) | int %}
 
+{# 收藏操作回显（POST + 303 PRG 后由查询参数带回结果） #}
+{% if request.query_params.get('fav') == 'added' %}
+<div class="alert alert-success py-2 mb-3">已加入收藏，可在<a href="/me?tab=favorites">个人空间</a>查看。</div>
+{% elif request.query_params.get('fav') == 'removed' %}
+<div class="alert alert-info py-2 mb-3">已取消收藏。</div>
+{% endif %}
+
 <div class="card detail-hero">
     <div class="card-body p-4">
         <p class="small mb-3"><a href="/">&larr; 返回内容列表</a></p>
@@ -32,6 +39,21 @@
         <div class="mt-3">
             <span class="detail-chip">{{ type_label }}</span>
             <span class="text-muted small ms-1">暂无其他标签数据</span>
+        </div>
+
+        {# 收藏入口（个人空间）：登录用户可收藏 / 取消收藏，游客引导登录后回来本页 #}
+        <div class="mt-3 d-flex flex-wrap align-items-center gap-3">
+            {% if current_user %}
+            <form method="post" action="/contents/{{ content.id }}/favorite" class="m-0">
+                <input type="hidden" name="next" value="/contents/{{ content.id }}">
+                <button class="btn btn-sm {{ 'btn-outline-danger' if is_favorited else 'btn-outline-primary' }}"
+                        type="submit">{{ '取消收藏' if is_favorited else '收藏作品' }}</button>
+            </form>
+            <a class="small" href="/me?tab=favorites">我的收藏 &rarr;</a>
+            {% else %}
+            <a class="btn btn-sm btn-outline-primary"
+               href="/login?next=/contents/{{ content.id }}">登录后可收藏作品</a>
+            {% endif %}
         </div>
 
         {% if content.source_url %}

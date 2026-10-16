@@ -12,6 +12,7 @@
                 </div>
 
                 {% if error %}<div class="alert alert-danger py-2 mb-3">{{ error }}</div>{% endif %}
+                {% if notice %}<div class="alert alert-success py-2 mb-3">{{ notice }}</div>{% endif %}
 
                 <form method="post" action="/login">
                     <input type="hidden" name="next" value="{{ next }}">
@@ -34,6 +35,11 @@
                 <p class="small text-muted mb-0">
                     普通用户登录后只能使用 ACGN 内容平台；管理员额外可进入测试管理平台。<br>
                     未登录也可正常浏览内容平台（首页 / ACGN 资讯 / 新番档期）。
+                </p>
+                <p class="text-center mt-3 mb-0">
+                    <a class="small" href="/forgot-password">忘记密码？</a>
+                    &nbsp;·&nbsp;
+                    <a class="small" href="/register{% if next and next != '/' %}?next={{ next }}{% endif %}">还没有账号？注册普通用户</a>
                 </p>
             </div>
         </div>

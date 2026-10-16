@@ -194,11 +194,12 @@ def test_empty_database_api_behaviour(tmp_path):
 
 
 def test_index_page():
-    """首页：渲染列表标题与数据条目链接。"""
+    """首页（门户）：渲染分类/推荐区块与条目链接，不再有全量列表表格。"""
     resp = client.get("/")
     assert resp.status_code == 200
-    assert "内容列表" in resp.text
-    assert "/contents/1" in resp.text
+    assert "分类浏览" in resp.text and "推荐作品" in resp.text
+    assert "内容列表" not in resp.text  # 全量列表已移到「全部作品」页（/contents）
+    assert "/contents/" in resp.text  # 推荐位链到详情
 
 
 def test_detail_page():

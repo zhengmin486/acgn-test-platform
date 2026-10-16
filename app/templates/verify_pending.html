@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+{# 邮箱验证与找回密码共用的「链接已发出」提示页。
+   kind="verify" 为邮箱验证，kind="reset" 为找回密码，仅文案与提交地址不同。 #}
+{% block title %}{% if is_reset %}重置密码{% else %}验证邮箱{% endif %} - ACGN 内容服务平台{% endblock %}
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-12 col-md-8 col-lg-6">
+        <div class="card app-card auth-card mt-4">
+            <div class="card-body p-4">
+                <div class="auth-band mb-4">
+                    <span class="brand-mark" aria-hidden="true"></span>
+                    <h1 class="h4 mb-1">{% if is_reset %}重置你的密码{% else %}验证你的邮箱{% endif %}</h1>
+                    <p class="small mb-0" style="color: rgba(255,255,255,.85);">
+                        {% if is_reset %}打开邮件中的链接即可设置新密码{% else %}完成验证后即可登录 ACGN 内容平台{% endif %}
+                    </p>
+                </div>
+
+                {% if error %}<div class="alert alert-danger py-2 mb-3">{{ error }}</div>{% endif %}
+                {% if resent and not error %}<div class="alert alert-success py-2 mb-3">{% if is_reset %}重置密码邮件已重新发送，请查收。{% else %}验证邮件已重新发送，请查收。{% endif %}</div>{% endif %}
+
+                {% if email %}
+                    <p class="mb-3">
+                        {% if sent %}
+                            {% if is_reset %}重置密码邮件已发送至{% else %}验证邮件已发送至{% endif %} <strong>{{ email }}</strong>，请点击邮件中的链接{% if is_reset %}设置新密码{% else %}完成验证{% endif %}。
+                        {% else %}
+                            我们已为 <strong>{{ email }}</strong> 创建{% if is_reset %}重置{% else %}验证{% endif %}链接。
+                        {% endif %}
+                    </p>
+
+                    {% if verify_url %}
+                        <div class="alert alert-warning py-2">
+                            <div class="small mb-1">当前未配置邮件服务，请复制下面的{% if is_reset %}重置{% else %}验证{% endif %}链接在浏览器中打开：</div>
+                            <div class="text-break"><code>{{ verify_url }}</code></div>
+                        </div>
+                    {% endif %}
+
+                    <div class="d-flex gap-2 flex-wrap mb-3">
+                        <form method="post" action="{{ resend_action }}">
+                            <input type="hidden" name="next" value="{{ next }}">
+                            <button class="btn btn-outline-primary btn-sm" type="submit"
+                                    {% if cooldown > 0 %}disabled{% endif %}>
+                                {% if cooldown > 0 %}{{ cooldown }} 秒后可重发{% else %}重新发送{% if is_reset %}重置{% else %}验证{% endif %}邮件{% endif %}
+                            </button>
+                        </form>
+                        {% if not smtp_enabled %}
+                        <form method="post" action="{{ link_action }}">
+                            <input type="hidden" name="next" value="{{ next }}">
+                            <button class="btn btn-outline-secondary btn-sm" type="submit">生成{% if is_reset %}重置{% else %}验证{% endif %}链接</button>
+                        </form>
+                        {% endif %}
+                    </div>
+                {% elif is_reset %}
+                    <p class="text-muted small mb-3">
+                        如果该邮箱已在平台注册，重置链接已发送至该邮箱，请查收邮件后点击链接设置新密码。<br>
+                        没有收到邮件时，可稍后重试，或联系管理员协助处理。
+                    </p>
+                {% else %}
+                    <p class="text-muted small mb-3">
+                        没有待验证的会话信息（可能已换浏览器或清理了 Cookie）。请输入注册时使用的邮箱重新发送验证邮件。
+                    </p>
+                    <form method="post" action="{{ resend_action }}">
+                        <input type="hidden" name="next" value="{{ next }}">
+                        <div class="mb-3">
+                            <label class="form-label" for="resend-email">邮箱</label>
+                            <input class="form-control" id="resend-email" name="email"
+                                   type="email" required autofocus autocomplete="email">
+                        </div>
+                        <div class="d-grid">
+                            <button class="btn btn-primary" type="submit">发送验证邮件</button>
+                        </div>
+                    </form>
+                {% endif %}
+
+                <hr class="my-4">
+                <p class="text-center mb-0">
+                    <a class="small" href="/login{% if next and next != '/' %}?next={{ next }}{% endif %}">返回登录</a>
+                </p>
+            </div>
+        </div>
+        <div class="text-center mt-3 mb-4">
+            <a class="small" href="/">&larr; 返回内容平台首页</a>
+        </div>
+    </div>
+</div>
+{% endblock %}

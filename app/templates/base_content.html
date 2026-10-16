@@ -9,6 +9,10 @@
     ("ACGN 资讯", "/articles", nav_path.startswith("/articles")),
     ("新番档期", "/schedule", nav_path == "/schedule" or nav_path == "/schedule/")
 ] %}
+{# 登录用户追加「个人空间」入口（游客不显示，未登录访问 /me 会跳登录页） #}
+{% if current_user %}
+{% set nav_items = nav_items + [("个人空间", "/me", nav_path == "/me")] %}
+{% endif %}
 <nav class="navbar navbar-expand-lg navbar-dark sticky-top site-navbar content-navbar px-3">
     <a class="navbar-brand" href="/"><span class="brand-mark" aria-hidden="true"></span>ACGN 内容平台</a>
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#content-nav"
@@ -24,20 +28,21 @@
             </li>
             {% endfor %}
         </ul>
-        {# 未登录：提供登录入口；普通用户：仅内容导航 + 账号与退出；
-           管理员：额外显示跨区入口「测试管理」（不占用内容导航位置）。 #}
+        {# 游客：提供注册与登录入口；普通用户：仅内容导航 + 账号与退出；
+           管理员：额外显示跨区入口「测试管理」（不占用内容导航位置）。
+           导航不展示「未登录」状态提示（用户要求去掉）。 #}
         <div class="d-flex flex-wrap align-items-center gap-2">
             {% if current_user %}
             {% if current_user.is_admin %}
             <a class="btn btn-sm nav-cta" href="/testcases">测试管理 &rarr;</a>
             {% endif %}
             <span class="navbar-user">
-                <span class="navbar-user-name">{{ current_user.username }}</span>
+                <a class="navbar-user-name" href="/me" style="color: inherit;">{{ current_user.username }}</a>
                 <span class="navbar-user-role">{{ current_user.role_label }}</span>
             </span>
             <a class="btn btn-sm navbar-action" href="/logout">退出</a>
             {% else %}
-            <span class="navbar-user navbar-user-guest">未登录</span>
+            <a class="btn btn-sm navbar-action" href="/register">注册</a>
             <a class="btn btn-sm nav-cta" href="/login">登录</a>
             {% endif %}
         </div>

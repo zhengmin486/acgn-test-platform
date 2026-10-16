@@ -1,0 +1,75 @@
+{% extends "base_admin.html" %}
+{# 账号验证：邮箱验证的人工兜底入口。
+   列出「有邮箱且未验证」的账号，管理员可一键放行，
+   也能生成一次性验证链接转交用户（邮件服务故障时的兜底通道）。 #}
+{% block title %}账号验证 - 测试管理平台{% endblock %}
+{% block content %}
+<h1 class="h3 mb-1 section-heading">账号验证</h1>
+<p class="text-muted small mb-3">
+    注册账号需完成邮箱验证后才能登录。这里可以查看待验证账号、手动放行，
+    {% if not smtp_enabled %}或在未配置邮件服务时生成验证链接。{% else %}验证邮件由系统自动发送。{% endif %}
+</p>
+{% include "_data_nav.html" %}
+
+{% if not email_verification_enabled %}
+<div class="alert alert-secondary py-2 small mb-3" role="alert">
+    邮箱验证功能当前已关闭（EMAIL_VERIFICATION_ENABLED=false）：注册后可直接登录，下面的列表仅供参考。
+</div>
+{% endif %}
+
+{% if error %}
+<div class="alert alert-danger py-2 small mb-3" role="alert">{{ error }}</div>
+{% endif %}
+{% if verified %}
+<div class="alert alert-success py-2 small mb-3" role="alert">已将 <strong>{{ verified }}</strong> 标记为已验证。</div>
+{% endif %}
+{% if link %}
+<div class="alert alert-warning py-2 small mb-3" role="alert">
+    <div class="mb-1">{{ link_user }} 的验证链接（复制转交，重新生成后旧链接失效）：</div>
+    <div class="text-break"><code>{{ link }}</code></div>
+</div>
+{% endif %}
+
+<div class="card app-card">
+    <div class="card-body">
+        <h2 class="h6 mb-3">待验证账号（{{ pending_users|length }}）</h2>
+        {% if pending_users %}
+        <div class="table-responsive">
+            <table class="table table-sm align-middle mb-0">
+                <thead>
+                    <tr>
+                        <th scope="col">ID</th>
+                        <th scope="col">用户名</th>
+                        <th scope="col">邮箱</th>
+                        <th scope="col">注册时间</th>
+                        <th scope="col" class="text-end">操作</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for user in pending_users %}
+                    <tr>
+                        <td>{{ user.id }}</td>
+                        <td>{{ user.username }}</td>
+                        <td class="text-break">{{ user.email }}</td>
+                        <td class="small text-muted">{{ user.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+                        <td class="text-end">
+                            <div class="d-flex justify-content-end gap-2">
+                                <form method="post" action="/admin/accounts/{{ user.id }}/verify">
+                                    <button class="btn btn-sm btn-success" type="submit">标记为已验证</button>
+                                </form>
+                                <form method="post" action="/admin/accounts/{{ user.id }}/link">
+                                    <button class="btn btn-sm btn-outline-secondary" type="submit">生成验证链接</button>
+                                </form>
+                            </div>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <p class="text-muted small mb-0">暂无待验证账号。</p>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

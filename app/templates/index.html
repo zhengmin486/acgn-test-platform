@@ -3,44 +3,41 @@
 {% block content %}
 {% set type_icons = {"anime": "🎬", "comic": "📚", "game": "🎮", "novel": "📖"} %}
 
-{# ===== 顶部：平台标识 + 搜索入口（始终显示） ===== #}
+{# ===== 顶部：平台标识 + 搜索入口（始终显示；搜索提交到「全部作品」页） ===== #}
 <section class="home-hero text-white rounded-3 p-4 p-md-5 mb-4">
     <h1 class="h3 mb-1">ACGN 内容平台</h1>
     <p class="home-hero-sub mb-4">动画 · 漫画 · 游戏 · 轻小说一站浏览，支持关键词搜索与分类筛选。</p>
-    <form class="row g-2 align-items-end" method="get" action="/">
+    <form class="row g-2 align-items-end" method="get" action="/contents">
         <div class="col-12 col-md-auto">
             <label class="form-label small mb-0" for="home-type">类型</label>
             <select name="type" id="home-type" class="form-select">
                 <option value="">全部</option>
                 {% for code, label in type_labels.items() %}
-                <option value="{{ code }}" {% if content_type == code %}selected{% endif %}>{{ label }}</option>
+                <option value="{{ code }}">{{ label }}</option>
                 {% endfor %}
             </select>
         </div>
         <div class="col">
             <label class="form-label small mb-0" for="home-q">关键词</label>
-            <input type="text" name="q" id="home-q" value="{{ q }}" class="form-control" placeholder="搜索标题 / 简介">
+            <input type="text" name="q" id="home-q" class="form-control" placeholder="搜索标题 / 简介">
         </div>
         <div class="col-12 col-md-auto">
             <button class="btn btn-light" type="submit">搜索</button>
-            <a class="btn btn-outline-light" href="/">重置</a>
+            <a class="btn btn-outline-light" href="/contents">全部作品</a>
         </div>
     </form>
 </section>
 
-{% if search_mode %}
-<p class="text-muted small">
-    搜索结果：{% if keyword %}关键词“{{ keyword }}”{% endif %}{% if content_type %}{% if keyword %} · {% endif %}类型：{{ type_labels.get(content_type, content_type) }}{% endif %} · 共 {{ total }} 条 · 第 {{ page }}/{{ total_pages }} 页
-</p>
-{% else %}
-
-{# ===== 分类浏览（数量来自库内真实统计） ===== #}
+{# ===== 分类浏览（数量来自库内真实统计；磁贴进入作品页并按类型筛选） ===== #}
 <section class="mb-4">
-    <h2 class="h5 mb-3 section-heading">分类浏览</h2>
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <h2 class="h5 mb-0 section-heading">分类浏览</h2>
+        <a class="small fw-semibold" href="/contents">全部作品 &rarr;</a>
+    </div>
     <div class="row g-3">
         {% for code, label in type_labels.items() %}
         <div class="col-6 col-md-3">
-            <a class="home-type-tile" href="/?type={{ code }}">
+            <a class="home-type-tile" href="/contents?type={{ code }}">
                 <span class="home-type-icon" aria-hidden="true">{{ type_icons.get(code, "🗂") }}</span>
                 <span class="fw-semibold">{{ label }}</span>
                 <span class="small text-muted">{{ type_counts.get(code, 0) }} 部作品</span>
@@ -55,7 +52,7 @@
     <section class="col-12 col-lg-8">
         <div class="d-flex justify-content-between align-items-center mb-3">
             <h2 class="h5 mb-0 section-heading">推荐作品</h2>
-            <span class="text-muted small">按评分排序 · 取自库内真实数据</span>
+            <a class="small fw-semibold" href="/contents">更多作品 &rarr;</a>
         </div>
         {% if top_contents %}
         <div class="row g-3">
@@ -104,62 +101,4 @@
         {% endif %}
     </section>
 </div>
-{% endif %}
-
-{# ===== 内容列表（浏览模式=全量列表；搜索模式=搜索结果） ===== #}
-<section>
-    {% if not search_mode %}
-    <h2 class="h5 mb-2 section-heading">内容列表</h2>
-    <p class="text-muted small">数据库内容共 {{ total }} 条，可按类型筛选或输入关键词搜索标题/简介。</p>
-    {% endif %}
-
-    {% if not contents %}
-    <div class="alert alert-warning">
-        {% if search_mode %}
-        没有找到匹配的内容。试试更短的关键词，或<a href="/">清除筛选</a>查看全部内容。
-        {% else %}
-        暂无内容数据。
-        {% endif %}
-    </div>
-    {% else %}
-    <div class="table-responsive table-card">
-    <table class="table table-hover align-middle">
-        <thead>
-        <tr>
-            <th>ID</th>
-            <th>标题</th>
-            <th>类型</th>
-            <th>评分</th>
-            <th>简介</th>
-        </tr>
-        </thead>
-        <tbody>
-        {% for item in contents %}
-        <tr>
-            <td>{{ item.id }}</td>
-            <td><a href="/contents/{{ item.id }}">{{ item.title }}</a></td>
-            <td><span class="badge bg-secondary">{{ type_labels.get(item.type, item.type) }}</span></td>
-            <td>{{ item.rating }}</td>
-            <td class="small text-muted" style="max-width: 320px" title="{{ item.summary }}">{{ item.summary[:50] }}{% if item.summary|length > 50 %}…{% endif %}</td>
-        </tr>
-        {% endfor %}
-        </tbody>
-    </table>
-    </div>
-
-    {% if search_mode and total_pages > 1 %}
-    <nav class="mt-3">
-        <ul class="pagination pagination-sm mb-0">
-            {% if page > 1 %}
-            <li class="page-item"><a class="page-link" href="/?q={{ q }}&type={{ content_type or '' }}&page={{ page - 1 }}">上一页</a></li>
-            {% endif %}
-            <li class="page-item disabled"><span class="page-link">第 {{ page }} / {{ total_pages }} 页</span></li>
-            {% if page < total_pages %}
-            <li class="page-item"><a class="page-link" href="/?q={{ q }}&type={{ content_type or '' }}&page={{ page + 1 }}">下一页</a></li>
-            {% endif %}
-        </ul>
-    </nav>
-    {% endif %}
-    {% endif %}
-</section>
 {% endblock %}
