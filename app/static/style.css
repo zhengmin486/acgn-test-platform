@@ -356,3 +356,102 @@ main {
     color: #495057;
     font-weight: 400;
 }
+
+/* ---------- 双区域：内容平台导航 与 测试管理平台导航 ---------- */
+
+/* 内容平台导航沿用品牌紫渐变（.site-navbar 已定义），此处只补充跨区入口。 */
+
+/* 内容平台 → 测试管理 的跨区入口：轻量胶囊按钮，不抢占内容导航位置 */
+.content-navbar .nav-cta {
+    border: 1px solid rgba(255, 255, 255, 0.6);
+    color: #fff;
+    border-radius: 999px;
+    font-weight: 600;
+    padding: 0.25rem 0.9rem;
+    white-space: nowrap;
+    transition: background-color 0.15s ease-in-out, color 0.15s ease-in-out;
+}
+
+.content-navbar .nav-cta:hover,
+.content-navbar .nav-cta:focus {
+    background-color: #fff;
+    border-color: #fff;
+    color: #553098;
+}
+
+/* 管理后台整体底色略深于内容平台，形成“管理区域”的视觉层级 */
+.admin-body {
+    background-color: #eef1f5;
+}
+
+/* 测试管理平台导航：深色管理后台风格，与内容平台明显区分 */
+.admin-navbar {
+    background: linear-gradient(135deg, #1f2937 0%, #111827 100%);
+    box-shadow: 0 2px 10px rgba(17, 24, 39, 0.35);
+}
+
+.admin-navbar .navbar-brand {
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+}
+
+/* 品牌前的“测试”标记，强化管理平台身份 */
+.admin-navbar .admin-brand-badge {
+    display: inline-block;
+    margin-right: 0.4rem;
+    padding: 0.1rem 0.45rem;
+    background-color: #0ea5e9;
+    color: #fff;
+    border-radius: 0.35rem;
+    font-size: 0.72rem;
+    font-weight: 700;
+    line-height: 1.5;
+}
+
+.admin-navbar .nav-link {
+    color: rgba(255, 255, 255, 0.75);
+    border-radius: 0.5rem;
+}
+
+.admin-navbar .nav-link:hover,
+.admin-navbar .nav-link:focus {
+    color: #fff;
+}
+
+/* 管理平台当前页高亮：白色胶囊 + 深色字，与内容平台高亮风格一致但配色不同 */
+.admin-navbar .nav-link.active {
+    background-color: #ffffff;
+    color: #111827 !important;
+    font-weight: 700;
+    border-radius: 999px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
+}
+
+/* 测试管理平台 → 内容平台 的返回入口 */
+.admin-navbar .btn-back-content {
+    border: 1px solid rgba(255, 255, 255, 0.55);
+    color: #fff;
+    border-radius: 999px;
+    font-weight: 600;
+    padding: 0.25rem 0.9rem;
+    white-space: nowrap;
+    transition: background-color 0.15s ease-in-out, color 0.15s ease-in-out;
+}
+
+.admin-navbar .btn-back-content:hover,
+.admin-navbar .btn-back-content:focus {
+    background-color: #fff;
+    border-color: #fff;
+    color: #111827;
+}
+
+/* 管理平台二级信息条：说明系统与区域属性 */
+.admin-subbar {
+    background-color: #f8fafc;
+    border-bottom: 1px solid #e2e8f0;
+}
+
+.admin-footer {
+    background-color: #fff;
+}

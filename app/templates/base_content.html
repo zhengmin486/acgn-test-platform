@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{# ACGN 内容平台布局（面向普通用户）：内容导航（首页 / ACGN 资讯 / 新番档期）
+   + 右侧跨区入口“测试管理”。
+   内容页统一继承本布局；测试管理功能不出现在本导航中。 #}
+{% block navbar %}
+{% set nav_path = request.url.path %}
+{% set nav_items = [
+    ("首页", "/", nav_path == "/" or nav_path.startswith("/contents")),
+    ("ACGN 资讯", "/articles", nav_path.startswith("/articles")),
+    ("新番档期", "/schedule", nav_path == "/schedule" or nav_path == "/schedule/")
+] %}
+<nav class="navbar navbar-expand-lg navbar-dark sticky-top site-navbar content-navbar px-3">
+    <a class="navbar-brand" href="/">ACGN 内容平台</a>
+    <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#content-nav"
+            aria-controls="content-nav" aria-expanded="false" aria-label="切换导航">
+        <span class="navbar-toggler-icon"></span>
+    </button>
+    <div class="collapse navbar-collapse" id="content-nav">
+        <ul class="navbar-nav flex-grow-1">
+            {% for label, href, is_active in nav_items %}
+            <li class="nav-item">
+                <a class="nav-link{% if is_active %} active{% endif %}" href="{{ href }}"
+                   {% if is_active %}aria-current="page"{% endif %}>{{ label }}</a>
+            </li>
+            {% endfor %}
+        </ul>
+        {# 跨区入口：内容平台 → 测试管理平台（不占用内容导航位置） #}
+        <a class="btn btn-sm nav-cta" href="/testcases">测试管理 &rarr;</a>
+    </div>
+</nav>
+{% endblock %}

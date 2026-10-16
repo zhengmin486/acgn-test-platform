@@ -20,11 +20,33 @@ BASE_DIR = Path(__file__).resolve().parent
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 
+# 按 404 主体归属选择所属区域的布局与返回入口：
+# 内容类主体（内容/资讯）落在内容平台布局，测试/管理类主体落在测试管理平台布局。
+_MISSING_SECTIONS = {
+    "内容": {"layout": "base_content.html", "platform": "ACGN 内容平台",
+             "back_href": "/", "back_label": "返回列表"},
+    "资讯": {"layout": "base_content.html", "platform": "ACGN 内容平台",
+             "back_href": "/articles", "back_label": "返回资讯频道"},
+    "测试用例": {"layout": "base_admin.html", "platform": "测试管理平台",
+               "back_href": "/testcases", "back_label": "返回用例列表"},
+    "执行记录": {"layout": "base_admin.html", "platform": "测试管理平台",
+               "back_href": "/runs", "back_label": "返回执行历史"},
+    "执行批次": {"layout": "base_admin.html", "platform": "测试管理平台",
+               "back_href": "/batches", "back_label": "返回批次列表"},
+}
+_MISSING_DEFAULT = {"layout": "base_content.html", "platform": "ACGN 内容平台",
+                    "back_href": "/", "back_label": "返回列表"}
+
+
 def render_missing(request: Request, subject: str, subject_id):
-    """统一 404 页面；subject 区分“内容/资讯/测试用例/执行记录”等主体。"""
+    """统一 404 页面；subject 区分“内容/资讯/测试用例/执行记录”等主体。
+
+    主体决定使用内容平台还是测试管理平台的布局，保证 404 页面也处于正确的区域。
+    """
+    section = _MISSING_SECTIONS.get(subject, _MISSING_DEFAULT)
     return templates.TemplateResponse(
         request=request,
         name="404.html",
-        context={"subject": subject, "content_id": subject_id},
+        context={"subject": subject, "content_id": subject_id, **section},
         status_code=404,
     )
