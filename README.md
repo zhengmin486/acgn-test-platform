@@ -373,7 +373,7 @@ ruff check app tests conftest.py
 
 当前共 **327 项用例**，`test_api.py` 之外的全部通过（详见 [第 12 节](#12-已知问题)）。
 
-测试组织：
+测试结构：
 
 - `tests/auth_helpers.py` 提供 `create_accounts(factory)` + `login_as_admin(client)`，
   管理相关测试需先建账号并登录；`tests/` 目录由 pytest prepend 模式加入 `sys.path`，可直接导入。
@@ -403,20 +403,11 @@ mysql+pymysql://用户名:密码@127.0.0.1:3306/acgn_test_platform?charset=utf8m
 
 ## 12. 已知问题
 
-1. **`test_api.py` 中 5 项依赖本地种子数据的用例会失败**
+1. **`test_api.py` 中 5 项用例依赖本地种子数据的固定 id**
    （`test_get_content_detail`、`test_detail_page`、`test_search_hit`、`test_search_case_insensitive`、`test_search_matches_summary_only_keyword`）。
-   原因是这些用例直连 `local_dev.db` 并假设固定 id（如 id=1、5、6），当本地数据被后台删除或改动后即失败。
-   属于数据依赖问题，不是代码缺陷；重置本地库即可恢复。
+   它们直连 `local_dev.db` 并假设 id 为 1、5、6，一旦本地数据被后台删除或改动即失败。
+   属于用例的数据依赖，不是代码缺陷：把种子重新播进干净库后这 5 项同样通过。
+   后续计划改为不依赖固定 id。
 
-2. **本机 `.venv\Scripts\python.exe` 启动器损坏**（无法读取 `pyvenv.cfg`，退出码 107）。
-   可改用系统解释器复用同一份 site-packages：
-
-   ```powershell
-   $env:PYTHONPATH = "C:\Users\52487\projects\acgn-test-platform\.venv\Lib\site-packages"
-   E:\python\python.exe -m pytest -q
-   ```
-
-3. **本机 `.venv\Scripts\ruff.exe` 不可用**（任何文件都报 `E902 OS Error 5`，属 Windows ACL 问题，与代码无关）。
-   需要静态检查时可改用 `py_compile` + AST 自检，或依赖 pytest 的导入覆盖。
-
-4. `reports/api-test-report.html` 是某次运行的历史产物，其中的通过数不代表当前测试总数。
+2. **数据库迁移尚未落地**：建表由应用在导入期执行（`crud.init_db`，幂等），
+   未接入 Alembic 迁移脚本；切换到 MySQL 后的生产部署配置也待完善。
