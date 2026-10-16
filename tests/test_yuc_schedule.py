@@ -23,6 +23,7 @@ from app import crud
 from app.database import Base, build_engine, get_db
 from app.main import app
 from app.models import AnimeSchedule, Content, ScheduleSyncRun
+from auth_helpers import create_accounts, login_as_admin
 
 # scripts/ 不是包，按文件路径加载被测模块（与直接运行脚本等价）。
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -639,6 +640,7 @@ class TestScheduleApi:
     def seeded(self, tmp_path):
         """临时库：202610 两条（周 6 / 无星期）、202607 一条，两条运行记录。"""
         factory = make_db(tmp_path)
+        create_accounts(factory, admin=True, user=False)  # 同步记录接口仅管理员可访问
         db = factory()
         try:
             upsert_sample(db, season="202610", source_key="银翼骑士", title_main="银翼骑士",
@@ -666,6 +668,7 @@ class TestScheduleApi:
 
         client = TestClient(app)
         app.dependency_overrides[get_db] = override_get_db
+        login_as_admin(client)
         yield client
         app.dependency_overrides.pop(get_db, None)
 
@@ -734,6 +737,7 @@ class TestSchedulePages:
     def seeded(self, tmp_path):
         """临时库：两个档期各一条 + 一条 dry-run 运行记录。"""
         factory = make_db(tmp_path)
+        create_accounts(factory, admin=True, user=False)  # 同步历史页面仅管理员可访问
         db = factory()
         try:
             upsert_sample(db, season="202610", source_key="银翼骑士", title_main="银翼骑士",
@@ -754,6 +758,7 @@ class TestSchedulePages:
 
         client = TestClient(app)
         app.dependency_overrides[get_db] = override_get_db
+        login_as_admin(client)
         yield client
         app.dependency_overrides.pop(get_db, None)
 
@@ -780,6 +785,7 @@ class TestSchedulePages:
 
     def test_schedule_page_empty_database(self, tmp_path):
         factory = make_db(tmp_path)
+        create_accounts(factory, admin=True, user=False)  # 同步历史页面仅管理员可访问
 
         def override_get_db():
             session = factory()
@@ -790,6 +796,7 @@ class TestSchedulePages:
 
         client = TestClient(app)
         app.dependency_overrides[get_db] = override_get_db
+        login_as_admin(client)
         try:
             resp = client.get("/schedule")
             assert resp.status_code == 200

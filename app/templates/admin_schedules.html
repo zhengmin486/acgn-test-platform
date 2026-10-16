@@ -1,0 +1,135 @@
+{% extends "base_admin.html" %}
+{% from "_pager.html" import pager %}
+{# 新番档期管理：查看 / 删除 / 按档期重新同步（复用既有 Yuc 同步流程） #}
+{% block title %}新番档期 - 测试管理平台{% endblock %}
+{% block content %}
+<div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-1">
+    <div>
+        <h1 class="h3 mb-1 section-heading">新番档期</h1>
+        <p class="text-muted small mb-0">
+            共 {{ total }} 条档期作品。删除只清理本地记录；重新同步按档期从源站拉取并写回。
+        </p>
+    </div>
+    {% if current_season %}
+    <button class="btn btn-sm btn-outline-primary" type="submit" form="resync-current">
+        重新同步档期 {{ current_season }}
+    </button>
+    {% endif %}
+</div>
+{% include "_data_nav.html" %}
+
+{# 当前筛选档期的重新同步表单（按钮通过 form 属性引用，避免表单嵌套） #}
+<form id="resync-current" method="post" action="/admin/data/schedules/resync">
+    <input type="hidden" name="season_code" value="{{ current_season or '' }}">
+    <input type="hidden" name="season" value="{{ current_season or '' }}">
+    <input type="hidden" name="q" value="{{ q }}">
+    <input type="hidden" name="page" value="{{ page }}">
+</form>
+
+{% if deleted is not none %}
+<div class="alert {% if deleted > 0 %}alert-success{% else %}alert-warning{% endif %} py-2">
+    {% if deleted > 0 %}已删除 {{ deleted }} 条档期作品。{% else %}未删除任何条目（条目已不存在）。{% endif %}
+</div>
+{% endif %}
+
+{% if resync == 'ok' %}
+<div class="alert alert-success py-2">
+    重新同步完成：新增 {{ resync_added }}、更新 {{ resync_updated }}、不变 {{ resync_unchanged }}、失败 {{ resync_failed }}。
+</div>
+{% elif resync == 'error' %}
+<div class="alert alert-danger py-2">
+    重新同步未完成：{{ resync_reason or '未知原因' }}
+</div>
+{% endif %}
+
+<form class="row g-2 align-items-end mb-3" method="get" action="/admin/data/schedules">
+    <div class="col-sm-4 col-md-3">
+        <label class="form-label" for="season">档期</label>
+        <select class="form-select form-select-sm" id="season" name="season">
+            <option value="">全部档期</option>
+            {% for s in seasons %}
+            <option value="{{ s.season_code }}"{% if current_season == s.season_code %} selected{% endif %}>
+                {{ s.season_code }}（{{ s.count }}）
+            </option>
+            {% endfor %}
+        </select>
+    </div>
+    <div class="col-sm-5 col-md-4">
+        <label class="form-label" for="q">关键词</label>
+        <input class="form-control form-control-sm" id="q" name="q" value="{{ q }}"
+               placeholder="标题或播出说明">
+    </div>
+    <div class="col-auto">
+        <button class="btn btn-sm btn-primary" type="submit">筛选</button>
+        <a class="btn btn-sm btn-outline-secondary" href="/admin/data/schedules">重置</a>
+    </div>
+</form>
+
+{% if not works %}
+<div class="detail-empty">没有符合条件的档期作品。</div>
+{% else %}
+<div class="table-responsive table-card">
+    <table class="table table-hover align-middle">
+        <thead>
+        <tr>
+            <th>ID</th>
+            <th>档期</th>
+            <th>标题</th>
+            <th>星期</th>
+            <th>播出</th>
+            <th>平台</th>
+            <th>最近同步</th>
+            <th>操作</th>
+        </tr>
+        </thead>
+        <tbody>
+        {% for w in works %}
+        <tr>
+            <td>{{ w.id }}</td>
+            <td><span class="badge bg-info text-dark">{{ w.season_code }}</span></td>
+            <td>
+                <div>{{ w.title_main }}</div>
+                {% if w.title_jp and w.title_jp != w.title_main %}
+                <div class="small text-muted">{{ w.title_jp }}</div>
+                {% endif %}
+                {% if w.title_cn and w.title_cn != w.title_main %}
+                <div class="small text-muted">{{ w.title_cn }}</div>
+                {% endif %}
+            </td>
+            <td>{{ weekday_names.get(w.weekday, '待定') }}</td>
+            <td class="small">{{ w.broadcast_time or '—' }}</td>
+            <td>
+                {% if w.platforms %}
+                <span class="badge bg-secondary">{{ w.platforms|length }} 个</span>
+                {% else %}
+                <span class="text-muted small">—</span>
+                {% endif %}
+            </td>
+            <td class="text-muted small">{{ w.last_synced_at.strftime('%Y-%m-%d %H:%M') }}</td>
+            <td class="text-nowrap">
+                <a class="btn btn-sm btn-outline-secondary" href="/schedule?season={{ w.season_code }}">查看</a>
+                <form method="post" action="/admin/data/schedules/resync" class="d-inline">
+                    <input type="hidden" name="season_code" value="{{ w.season_code }}">
+                    <input type="hidden" name="season" value="{{ current_season or '' }}">
+                    <input type="hidden" name="q" value="{{ q }}">
+                    <input type="hidden" name="page" value="{{ page }}">
+                    <button class="btn btn-sm btn-outline-primary" type="submit">重新同步</button>
+                </form>
+                <form method="post" action="/admin/data/schedules/{{ w.id }}/delete" class="d-inline">
+                    <input type="hidden" name="season" value="{{ current_season or '' }}">
+                    <input type="hidden" name="q" value="{{ q }}">
+                    <input type="hidden" name="page" value="{{ page }}">
+                    <button class="btn btn-sm btn-outline-danger" type="submit">删除</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<div class="d-flex flex-wrap justify-content-end align-items-center gap-2 mt-3">
+    {{ pager('/admin/data/schedules?season=' ~ (current_season or '')|urlencode ~ '&q=' ~ (q|urlencode) ~ '&', page, total_pages) }}
+</div>
+{% endif %}
+{% endblock %}

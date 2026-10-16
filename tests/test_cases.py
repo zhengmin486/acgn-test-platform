@@ -10,6 +10,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.database import Base, get_db
 from app.main import app
+from auth_helpers import create_accounts, login_as_admin
 
 VALID_PAYLOAD = {
     "name": "健康检查用例",
@@ -22,13 +23,14 @@ VALID_PAYLOAD = {
 
 @pytest.fixture
 def case_client(tmp_path):
-    """独立临时数据库 + get_db 覆盖，用例结束还原依赖。"""
+    """独立临时数据库 + get_db 覆盖，并以管理员身份登录（测试管理平台需管理员）。"""
     engine = create_engine(
         f"sqlite:///{tmp_path / 'cases.db'}",
         connect_args={"check_same_thread": False},
     )
     Base.metadata.create_all(engine)
     TestingSession = sessionmaker(bind=engine, expire_on_commit=False)
+    create_accounts(TestingSession, admin=True, user=False)
 
     def override_get_db():
         db = TestingSession()
@@ -38,7 +40,9 @@ def case_client(tmp_path):
             db.close()
 
     app.dependency_overrides[get_db] = override_get_db
-    yield TestClient(app)
+    client = TestClient(app)
+    login_as_admin(client)
+    yield client
     app.dependency_overrides.pop(get_db, None)
 
 

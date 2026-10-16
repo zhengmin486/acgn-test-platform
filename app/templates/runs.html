@@ -2,7 +2,7 @@
 {% block title %}{{ title }} - 测试管理平台{% endblock %}
 {% block content %}
 <div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-1">
-    <h1 class="h3 mb-0">{{ title }}</h1>
+    <h1 class="h3 mb-0 section-heading">{{ title }}</h1>
     {% if case_id %}<a class="btn btn-outline-secondary btn-sm" href="/testcases">返回用例列表</a>{% endif %}
 </div>
 <p class="text-muted small mb-3">{% if case_id %}仅显示该用例的执行记录。{% else %}全部用例的执行记录，可在测试用例页发起执行。{% endif %}</p>

@@ -1,9 +1,14 @@
-"""业务页面路由：ACGN 内容列表/详情、资讯、新番档期与同步历史（数据来源：数据库访问层）。"""
+"""业务页面路由：ACGN 内容列表/详情、资讯、新番档期与同步历史（数据来源：数据库访问层）。
 
-from fastapi import APIRouter, Query, Request
+其中「同步历史」属于管理性质功能，随测试管理平台一起仅对管理员开放；
+其它内容页面（首页 / 资讯 / 新番档期 / 详情）对所有人开放。
+"""
+
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import HTMLResponse
 
 from app import crud
+from app.auth import require_admin_page
 from app.page_common import DbSession, render_missing, templates
 
 router = APIRouter(tags=["pages"])
@@ -216,9 +221,10 @@ def schedule_page(
     )
 
 
-@router.get("/schedule/runs", response_class=HTMLResponse)
+@router.get("/schedule/runs", response_class=HTMLResponse,
+            dependencies=[Depends(require_admin_page)])
 def schedule_runs_page(request: Request, db: DbSession):
-    """同步历史页：每次同步（含 dry-run 预览）的运行结果。"""
+    """同步历史页（管理功能，仅管理员）：每次同步（含 dry-run 预览）的运行结果。"""
     total, runs = crud.list_sync_runs(db, limit=100)
     return templates.TemplateResponse(
         request=request,

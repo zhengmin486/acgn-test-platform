@@ -10,7 +10,7 @@
     ("新番档期", "/schedule", nav_path == "/schedule" or nav_path == "/schedule/")
 ] %}
 <nav class="navbar navbar-expand-lg navbar-dark sticky-top site-navbar content-navbar px-3">
-    <a class="navbar-brand" href="/">ACGN 内容平台</a>
+    <a class="navbar-brand" href="/"><span class="brand-mark" aria-hidden="true"></span>ACGN 内容平台</a>
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#content-nav"
             aria-controls="content-nav" aria-expanded="false" aria-label="切换导航">
         <span class="navbar-toggler-icon"></span>
@@ -24,8 +24,23 @@
             </li>
             {% endfor %}
         </ul>
-        {# 跨区入口：内容平台 → 测试管理平台（不占用内容导航位置） #}
-        <a class="btn btn-sm nav-cta" href="/testcases">测试管理 &rarr;</a>
+        {# 未登录：提供登录入口；普通用户：仅内容导航 + 账号与退出；
+           管理员：额外显示跨区入口「测试管理」（不占用内容导航位置）。 #}
+        <div class="d-flex flex-wrap align-items-center gap-2">
+            {% if current_user %}
+            {% if current_user.is_admin %}
+            <a class="btn btn-sm nav-cta" href="/testcases">测试管理 &rarr;</a>
+            {% endif %}
+            <span class="navbar-user">
+                <span class="navbar-user-name">{{ current_user.username }}</span>
+                <span class="navbar-user-role">{{ current_user.role_label }}</span>
+            </span>
+            <a class="btn btn-sm navbar-action" href="/logout">退出</a>
+            {% else %}
+            <span class="navbar-user navbar-user-guest">未登录</span>
+            <a class="btn btn-sm nav-cta" href="/login">登录</a>
+            {% endif %}
+        </div>
     </div>
 </nav>
 {% endblock %}

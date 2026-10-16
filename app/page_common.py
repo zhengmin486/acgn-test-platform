@@ -17,7 +17,21 @@ from app.database import get_db
 DbSession = Annotated[Session, Depends(get_db)]
 
 BASE_DIR = Path(__file__).resolve().parent
-templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+
+
+def _inject_current_user(request: Request) -> dict:
+    """模板上下文注入当前登录用户，供两套布局渲染登录状态。
+
+    当前用户由应用级依赖（app.auth.load_current_user）解析并写入
+    request.state，这里只做读取，不重复查库、也不引入模块间循环依赖。
+    """
+    return {"current_user": getattr(request.state, "current_user", None)}
+
+
+templates = Jinja2Templates(
+    directory=str(BASE_DIR / "templates"),
+    context_processors=[_inject_current_user],
+)
 
 
 # 按 404 主体归属选择所属区域的布局与返回入口：
@@ -33,6 +47,13 @@ _MISSING_SECTIONS = {
                "back_href": "/runs", "back_label": "返回执行历史"},
     "执行批次": {"layout": "base_admin.html", "platform": "测试管理平台",
                "back_href": "/batches", "back_label": "返回批次列表"},
+    # 数据管理（测试管理平台 → 数据管理）下的主体
+    "作品数据": {"layout": "base_admin.html", "platform": "测试管理平台",
+               "back_href": "/admin/data/contents", "back_label": "返回作品数据"},
+    "资讯数据": {"layout": "base_admin.html", "platform": "测试管理平台",
+               "back_href": "/admin/data/articles", "back_label": "返回资讯数据"},
+    "档期作品": {"layout": "base_admin.html", "platform": "测试管理平台",
+               "back_href": "/admin/data/schedules", "back_label": "返回新番档期"},
 }
 _MISSING_DEFAULT = {"layout": "base_content.html", "platform": "ACGN 内容平台",
                     "back_href": "/", "back_label": "返回列表"}

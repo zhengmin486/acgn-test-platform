@@ -1,0 +1,244 @@
+{% extends "base_admin.html" %}
+{# 数据同步：选择数据源与范围 → 预览 → 确认写入。
+   预览与正式走同一条执行路径，确认按钮只在预览结果上出现；
+   表单之间不嵌套（预览表单与确认表单是并列的两个 <form>）。 #}
+{% block title %}数据同步 - 测试管理平台{% endblock %}
+
+{# 确认写入区块：预览后必须在结果面板顶部就近出现，否则会被下方很长的「逐条结果」
+   明细表推到页面底部、难以发现。同一区块在明细表下方再出现一次（滚到底也能点）。
+   两处是并列的表单，不嵌套在预览表单内。 #}
+{% macro confirm_block(prominent) %}
+{% if can_confirm %}
+<form method="post" action="/admin/data/sync/apply"
+      class="sync-confirm{% if prominent %} sync-confirm-prominent{% endif %}">
+    <input type="hidden" name="task" value="{{ result.task_key }}">
+    <input type="hidden" name="scope" value="{{ form_scope }}">
+    <input type="hidden" name="limit" value="{{ form_limit }}">
+    <div class="d-flex flex-wrap align-items-center gap-2">
+        <button class="btn {% if prominent %}btn-success{% else %}btn-sm btn-outline-success{% endif %}"
+                type="submit">确认写入</button>
+        <span class="small text-secondary">
+            {% if result.pending %}
+            <strong class="text-success">预览到 {{ result.pending }} 条待写入内容</strong>，
+            确认后按同一范围重新拉取源数据并写入。
+            {% else %}
+            本次预览没有待写入的新条目，确认写入不会产生变化（已有数据不会被覆盖）。
+            {% endif %}
+        </span>
+    </div>
+    {% if not prominent %}
+    <div class="small text-muted mt-1">
+        按同一范围重新拉取源数据并以最新结果写入；重复条目按各自规则处理，不会产生重复数据。
+    </div>
+    {% endif %}
+</form>
+{% endif %}
+{% endmacro %}
+
+{% block content %}
+<h1 class="h3 mb-1 section-heading">数据同步</h1>
+<p class="text-muted small mb-3">
+    选择数据源与同步范围，先预览再确认写入。预览只读取源数据并汇总结果，不写业务数据；
+    确认后按同一范围正式同步（重复数据按各自规则跳过或更新，不覆盖本地不应覆盖的内容）。
+</p>
+{% include "_data_nav.html" %}
+
+{% if error %}
+<div class="alert alert-danger py-2 small mb-3" role="alert">{{ error }}</div>
+{% endif %}
+
+{# 数据源切换（无 JS：用链接切换 ?task=...） #}
+<ul class="nav data-subnav mb-3">
+    {% for t in tasks %}
+    <li class="nav-item">
+        <a class="nav-link{% if t.key == spec.key %} active{% endif %}"
+           href="/admin/data/sync?task={{ t.key }}">{{ t.label }}</a>
+    </li>
+    {% endfor %}
+</ul>
+
+<div class="row g-3">
+    <div class="col-lg-7">
+        {# ---------- 范围表单 ---------- #}
+        <div class="card app-card mb-3">
+            <div class="card-body">
+                <h2 class="h5 mb-1">{{ spec.label }}</h2>
+                <p class="text-secondary small mb-3">数据源：{{ spec.source }}</p>
+
+                <form method="post" action="/admin/data/sync/preview">
+                    <input type="hidden" name="task" value="{{ spec.key }}">
+
+                    {% if spec.scope_kind == "ids" %}
+                    <div class="mb-3">
+                        <label class="form-label small mb-1" for="sync-scope">{{ spec.scope_label }}</label>
+                        <textarea class="form-control form-control-sm" id="sync-scope" name="scope"
+                                  rows="3" placeholder="{{ spec.scope_placeholder }}">{{ form_scope }}</textarea>
+                        <div class="form-text">{{ spec.scope_help }}；已存在的条目按 bangumi_id 跳过，不覆盖本地数据。</div>
+                    </div>
+                    {% elif spec.scope_kind == "season" %}
+                    <div class="mb-3">
+                        <label class="form-label small mb-1" for="sync-scope">{{ spec.scope_label }}</label>
+                        {% if seasons %}
+                        <select class="form-select form-select-sm" id="sync-scope" name="scope">
+                            {% for s in seasons %}
+                            <option value="{{ s.season_code }}"
+                                    {% if s.season_code == form_scope %}selected{% endif %}>
+                                {{ s.season_code }}（本地 {{ s.count }} 条）
+                            </option>
+                            {% endfor %}
+                        </select>
+                        <div class="form-text">{{ spec.scope_help }}；可选档期来自本地已同步数据。</div>
+                        {% else %}
+                        <input class="form-control form-control-sm" id="sync-scope" name="scope"
+                               value="{{ form_scope }}" placeholder="{{ spec.scope_placeholder }}">
+                        <div class="form-text">本地暂无档期，请填写档期码（YYYYMM）后同步。</div>
+                        {% endif %}
+                    </div>
+                    {% else %}
+                    <div class="row g-2 mb-3">
+                        <div class="col-sm-7">
+                            <label class="form-label small mb-1" for="sync-scope">分类</label>
+                            <select class="form-select form-select-sm" id="sync-scope" name="scope">
+                                <option value=""{% if not form_scope %} selected{% endif %}>全部分类</option>
+                                {% for c in categories %}
+                                <option value="{{ c }}"{% if c == form_scope %} selected{% endif %}>{{ c }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="col-sm-5">
+                            <label class="form-label small mb-1" for="sync-limit">最多条数</label>
+                            <input class="form-control form-control-sm" id="sync-limit" name="limit"
+                                   value="{{ form_limit }}" placeholder="不限">
+                        </div>
+                    </div>
+                    <div class="form-text mb-3">
+                        {{ spec.scope_help }}，本页最多 {{ max_article_limit }} 条；
+                        每条都要抓一次官方详情页，条数越多等待越久，也可以先抓少量再逐批补齐。
+                        库中已有同 URL 或同标题的资讯会被跳过，不覆盖本地数据。
+                    </div>
+                    {% endif %}
+
+                    <button class="btn btn-sm btn-primary" type="submit">预览</button>
+                    <span class="text-muted small ms-2">预览不会写入任何数据</span>
+                </form>
+            </div>
+        </div>
+
+        {# ---------- 结果面板：预览结果 或 历史某次结果 ---------- #}
+        {% if result %}
+        <div class="card app-card mb-3">
+            <div class="card-body">
+                <h2 class="h5 mb-2">
+                    同步结果
+                    <span class="badge bg-secondary">{{ mode_labels.get(result.mode, result.mode) }}</span>
+                    <span class="badge {{ status_badges.get(result.status, 'bg-secondary') }}">
+                        {{ status_labels.get(result.status, result.status) }}
+                    </span>
+                </h2>
+                <p class="small text-secondary mb-2">
+                    数据源：{{ task_labels.get(result.task_key, result.task_key) }} ·
+                    范围：{{ result.scope }}
+                    {% if result.finished_at %} · 完成于 {{ result.finished_at.strftime("%Y-%m-%d %H:%M:%S") }}{% endif %}
+                </p>
+                {% if result.message %}
+                <p class="small mb-3">{{ result.message }}</p>
+                {% endif %}
+
+                {# 确认写入：放在计数表与逐条明细之前，预览完第一眼就能看到 #}
+                {{ confirm_block(true) }}
+
+                <div class="table-responsive mb-3">
+                    <table class="table table-sm table-bordered small mb-0">
+                        <thead class="table-light">
+                            <tr>
+                                <th>新增</th><th>更新</th><th>无变化</th>
+                                <th>重复跳过</th><th>跳过</th><th>待写入</th><th>失败</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td>{{ result.added }}</td>
+                                <td>{{ result.updated }}</td>
+                                <td>{{ result.unchanged }}</td>
+                                <td>{{ result.duplicates }}</td>
+                                <td>{{ result.skipped }}</td>
+                                <td>{{ result.pending }}</td>
+                                <td{% if result.failed %} class="text-danger fw-semibold"{% endif %}>{{ result.failed }}</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                {% if result.details %}
+                <h3 class="h6 mb-1">逐条结果</h3>
+                <div class="table-responsive mb-2">
+                    <table class="table table-sm small mb-0">
+                        <thead class="table-light">
+                            <tr><th style="width: 6rem;">状态</th><th>条目</th><th>说明</th></tr>
+                        </thead>
+                        <tbody>
+                            {% for item in result.details %}
+                            <tr>
+                                <td>{{ detail_labels.get(item.status, item.status) }}</td>
+                                <td>{{ item.title }}</td>
+                                <td class="text-secondary">{{ item.reason or "—" }}</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                <p class="text-muted small mb-3">共 {{ result.details|length }} 条明细。</p>
+                {% endif %}
+
+                {# 明细表可能很长，滚到底也能直接确认；参数同样沿用预览时提交的原始范围值 #}
+                {{ confirm_block(false) }}
+                {% if not can_confirm and result.mode == mode_apply %}
+                <p class="text-muted small mb-0">本次为正式写入结果，已记录到同步历史。</p>
+                {% endif %}
+            </div>
+        </div>
+        {% endif %}
+    </div>
+
+    {# ---------- 同步历史 ---------- #}
+    <div class="col-lg-5">
+        <div class="card app-card">
+            <div class="card-body">
+                <h2 class="h5 mb-2">同步历史</h2>
+                <p class="text-muted small mb-2">最近 {{ runs|length }} 条（共 {{ runs_total }} 条），最新在前。</p>
+                {% if runs %}
+                <div class="table-responsive">
+                    <table class="table table-sm align-middle small mb-0">
+                        <thead class="table-light">
+                            <tr>
+                                <th>时间</th><th>数据源</th><th>模式</th><th>状态</th><th>范围</th><th></th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for r in runs %}
+                            <tr>
+                                <td class="text-nowrap">{{ r.started_at.strftime("%m-%d %H:%M") }}</td>
+                                <td class="text-nowrap">{{ task_labels.get(r.task_key, r.task_key) }}</td>
+                                <td>{{ mode_labels.get(r.mode, r.mode) }}</td>
+                                <td>
+                                    <span class="badge {{ status_badges.get(r.status, 'bg-secondary') }}">
+                                        {{ status_labels.get(r.status, r.status) }}
+                                    </span>
+                                </td>
+                                <td class="text-truncate" style="max-width: 8rem;" title="{{ r.scope }}">{{ r.scope }}</td>
+                                <td class="text-nowrap">
+                                    <a href="/admin/data/sync?task={{ r.task_key }}&run={{ r.id }}">查看</a>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                {% else %}
+                <p class="text-muted small mb-0">暂无同步记录。完成一次预览或正式同步后会在此显示。</p>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

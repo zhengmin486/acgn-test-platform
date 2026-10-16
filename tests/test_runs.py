@@ -14,6 +14,7 @@ from sqlalchemy.orm import sessionmaker
 from app.database import Base, get_db
 from app.main import app
 from app.models import TestCase
+from auth_helpers import create_accounts, login_as_admin
 
 VALID_PAYLOAD = {
     "name": "健康检查用例",
@@ -26,13 +27,14 @@ VALID_PAYLOAD = {
 
 @pytest.fixture
 def run_env(tmp_path):
-    """独立临时数据库 + get_db 覆盖；暴露会话工厂供绕过校验的用例构造。"""
+    """独立临时数据库 + get_db 覆盖；以管理员登录，暴露会话工厂供绕过校验的用例构造。"""
     engine = create_engine(
         f"sqlite:///{tmp_path / 'runs.db'}",
         connect_args={"check_same_thread": False},
     )
     Base.metadata.create_all(engine)
     TestingSession = sessionmaker(bind=engine, expire_on_commit=False)
+    create_accounts(TestingSession, admin=True, user=False)
 
     def override_get_db():
         db = TestingSession()
@@ -42,7 +44,9 @@ def run_env(tmp_path):
             db.close()
 
     app.dependency_overrides[get_db] = override_get_db
-    yield SimpleNamespace(client=TestClient(app), session_factory=TestingSession)
+    client = TestClient(app)
+    login_as_admin(client)
+    yield SimpleNamespace(client=client, session_factory=TestingSession)
     app.dependency_overrides.pop(get_db, None)
 
 

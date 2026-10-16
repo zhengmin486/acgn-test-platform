@@ -7,18 +7,24 @@
     <div class="card-body p-4">
         <p class="small mb-3"><a href="/">&larr; 返回内容列表</a></p>
 
-        <div class="d-flex flex-wrap align-items-start justify-content-between gap-2">
-            <h1 class="h3 mb-0">{{ content.title }}</h1>
-            <span class="badge detail-type-badge">{{ type_label }}</span>
-        </div>
+        {# 条目头图：无外部图片素材，用品牌渐变封面 + 标题首字占位 #}
+        <div class="d-flex flex-wrap flex-sm-nowrap align-items-start gap-3">
+            <div class="detail-cover" aria-hidden="true">{{ content.title[:1] }}</div>
+            <div class="flex-grow-1">
+                <div class="d-flex flex-wrap align-items-start justify-content-between gap-2">
+                    <h1 class="h3 mb-0">{{ content.title }}</h1>
+                    <span class="badge detail-type-badge">{{ type_label }}</span>
+                </div>
 
-        <div class="d-flex flex-wrap align-items-center gap-3 mt-2">
-            <span class="detail-stars" aria-hidden="true">{% for i in range(1, 6) %}<span class="{{ 'star-on' if i <= star_count else 'star-off' }}">★</span>{% endfor %}</span>
-            <span class="detail-rating-num">{{ '%.1f' % content.rating }}<small class="text-muted fw-normal"> / 10</small></span>
-            <span class="text-muted small">条目 ID：{{ content.id }}</span>
-            {% if content.bangumi_id %}
-            <span class="text-muted small">Bangumi ID：{{ content.bangumi_id }}</span>
-            {% endif %}
+                <div class="d-flex flex-wrap align-items-center gap-3 mt-2">
+                    <span class="detail-stars" aria-hidden="true">{% for i in range(1, 6) %}<span class="{{ 'star-on' if i <= star_count else 'star-off' }}">★</span>{% endfor %}</span>
+                    <span class="detail-rating-num">{{ '%.1f' % content.rating }}<small class="text-muted fw-normal"> / 10</small></span>
+                    <span class="text-muted small">条目 ID：{{ content.id }}</span>
+                    {% if content.bangumi_id %}
+                    <span class="text-muted small">Bangumi ID：{{ content.bangumi_id }}</span>
+                    {% endif %}
+                </div>
+            </div>
         </div>
 
         <p class="detail-summary mt-3 mb-0">{{ content.summary }}</p>
