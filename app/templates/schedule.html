@@ -8,6 +8,9 @@
         <a href="{{ item.source_url }}" target="_blank" rel="noopener noreferrer">
             <img src="{{ item.image_url }}" referrerpolicy="no-referrer" loading="lazy" class="card-img-top schedule-poster" alt="{{ item.title_main }}">
         </a>
+        {% else %}
+        {# 无海报图：渐变占位，保持卡片视觉统一（不下载外部图片） #}
+        <div class="card-img-top schedule-poster schedule-poster-empty" aria-hidden="true"><span>📺</span></div>
         {% endif %}
         <div class="card-body">
             <div class="d-flex flex-wrap align-items-center gap-1 mb-1">
@@ -43,7 +46,7 @@
 {% block content %}
 <div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-3">
     <div>
-        <h1 class="h3 mb-1">新番档期</h1>
+        <h1 class="h3 mb-1 section-heading">新番档期</h1>
         {% if seasons %}
         <p class="text-muted small mb-0">数据来自 Yuc.wiki 档期同步，仅展示已同步的真实信息。</p>
         {% endif %}

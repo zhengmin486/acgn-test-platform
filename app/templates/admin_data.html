@@ -1,0 +1,71 @@
+{% extends "base_admin.html" %}
+{# 数据管理总览：三个数据域（作品 / 资讯 / 新番档期）的规模与入口 #}
+{% block title %}数据管理 - 测试管理平台{% endblock %}
+{% block content %}
+<h1 class="h3 mb-1 section-heading">数据管理</h1>
+<p class="text-muted small mb-3">
+    维护内容平台的三类数据。删除为真实写库操作，只删除所选条目，不做级联清理。
+</p>
+{% include "_data_nav.html" %}
+
+<div class="row g-3">
+    <div class="col-md-4">
+        <div class="card app-card h-100">
+            <div class="card-body d-flex flex-column">
+                <h2 class="h5 mb-1">作品数据</h2>
+                <p class="text-muted small mb-3">
+                    共 <strong>{{ content_total }}</strong> 条作品（动画 / 漫画 / 游戏 / 轻小说）。
+                </p>
+                <p class="small text-secondary mb-3">支持查看、删除与批量删除。</p>
+                <a class="btn btn-sm btn-outline-primary mt-auto align-self-start"
+                   href="/admin/data/contents">进入管理</a>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card app-card h-100">
+            <div class="card-body d-flex flex-column">
+                <h2 class="h5 mb-1">资讯数据</h2>
+                <p class="text-muted small mb-3">
+                    共 <strong>{{ article_total }}</strong> 篇文章（含未发布）。
+                </p>
+                <p class="small text-secondary mb-3">支持查看与删除。</p>
+                <a class="btn btn-sm btn-outline-primary mt-auto align-self-start"
+                   href="/admin/data/articles">进入管理</a>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card app-card h-100">
+            <div class="card-body d-flex flex-column">
+                <h2 class="h5 mb-1">新番档期</h2>
+                <p class="text-muted small mb-3">
+                    共 <strong>{{ schedule_total }}</strong> 条档期作品，覆盖
+                    <strong>{{ season_total }}</strong> 个档期。
+                </p>
+                <p class="small text-secondary mb-3">支持查看、删除与按档期重新同步。</p>
+                <a class="btn btn-sm btn-outline-primary mt-auto align-self-start"
+                   href="/admin/data/schedules">进入管理</a>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row g-3 mt-1">
+    <div class="col-md-12">
+        <div class="card app-card">
+            <div class="card-body d-flex flex-wrap align-items-center gap-3">
+                <div class="flex-grow-1">
+                    <h2 class="h5 mb-1">数据同步</h2>
+                    <p class="text-muted small mb-0">
+                        统一的数据同步入口：选择数据源（Bangumi 条目 / 新番档期 / 官方资讯）与同步范围，
+                        先预览再确认写入；结果与最近同步历史一并展示。重复数据按各自规则跳过或更新，
+                        不覆盖本地不应覆盖的内容。
+                    </p>
+                </div>
+                <a class="btn btn-sm btn-primary" href="/admin/data/sync">进入数据同步</a>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

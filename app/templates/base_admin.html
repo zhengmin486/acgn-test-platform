@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 {# 测试管理平台布局（面向管理员）：独立的管理后台导航
-   （测试用例 / 执行历史 / 回归批次 / 数据同步）+ “返回内容平台”入口。
+   （测试用例 / 执行历史 / 回归批次 / 数据同步 / 数据管理）+ “返回内容平台”入口。
    测试/管理页面统一继承本布局，自带返回内容平台入口。 #}
 {% block body_class %}admin-body{% endblock %}
 
@@ -12,10 +12,11 @@
     ("回归批次", "/batches", nav_path.startswith("/batches")),
     ("数据同步", "/schedule/runs", nav_path.startswith("/schedule/runs"))
 ] %}
+{% set data_path = nav_path.startswith("/admin/data") %}
 <header class="admin-header sticky-top">
     <nav class="navbar navbar-expand-lg navbar-dark admin-navbar px-3">
         <a class="navbar-brand" href="/testcases">
-            <span class="admin-brand-badge">测试</span>测试管理平台
+            <span class="brand-mark" aria-hidden="true"></span><span class="admin-brand-badge">测试</span>测试管理平台
         </a>
         <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#admin-nav"
                 aria-controls="admin-nav" aria-expanded="false" aria-label="切换导航">
@@ -29,9 +30,44 @@
                        {% if is_active %}aria-current="page"{% endif %}>{{ label }}</a>
                 </li>
                 {% endfor %}
+                {# 数据管理：内容平台三类数据（作品 / 资讯 / 新番档期）的维护入口 #}
+                <li class="nav-item dropdown">
+                    <a class="nav-link dropdown-toggle{% if data_path %} active{% endif %}" href="#"
+                       role="button" data-bs-toggle="dropdown" aria-expanded="false">数据管理</a>
+                    <ul class="dropdown-menu admin-dropdown">
+                        <li>
+                            <a class="dropdown-item{% if nav_path == '/admin/data' %} active{% endif %}"
+                               href="/admin/data">数据管理总览</a>
+                        </li>
+                        <li><hr class="dropdown-divider"></li>
+                        <li>
+                            <a class="dropdown-item{% if nav_path.startswith('/admin/data/contents') %} active{% endif %}"
+                               href="/admin/data/contents">作品数据</a>
+                        </li>
+                        <li>
+                            <a class="dropdown-item{% if nav_path.startswith('/admin/data/articles') %} active{% endif %}"
+                               href="/admin/data/articles">资讯数据</a>
+                        </li>
+                        <li>
+                            <a class="dropdown-item{% if nav_path.startswith('/admin/data/schedules') %} active{% endif %}"
+                               href="/admin/data/schedules">新番档期</a>
+                        </li>
+                    </ul>
+                </li>
             </ul>
-            {# 跨区入口：测试管理平台 → 内容平台（每个管理页面均可见） #}
-            <a class="btn btn-sm btn-back-content" href="/">&larr; 返回内容平台</a>
+            {# 当前管理员信息与退出；跨区入口：测试管理平台 → 内容平台 #}
+            <div class="d-flex flex-wrap align-items-center gap-2">
+                {% if current_user %}
+                <span class="navbar-user navbar-user-admin">
+                    <span class="navbar-user-name">{{ current_user.username }}</span>
+                    <span class="navbar-user-role">{{ current_user.role_label }}</span>
+                </span>
+                <a class="btn btn-sm navbar-action" href="/logout">退出</a>
+                {% else %}
+                <a class="btn btn-sm navbar-action" href="/login">登录</a>
+                {% endif %}
+                <a class="btn btn-sm btn-back-content" href="/">&larr; 返回内容平台</a>
+            </div>
         </div>
     </nav>
     <div class="admin-subbar">

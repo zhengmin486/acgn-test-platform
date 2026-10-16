@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}登录 - ACGN 内容服务平台{% endblock %}
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-12 col-md-8 col-lg-5">
+        <div class="card app-card auth-card mt-4">
+            <div class="card-body p-4">
+                <div class="auth-band mb-4">
+                    <span class="brand-mark" aria-hidden="true"></span>
+                    <h1 class="h4 mb-1">ACGN 内容服务平台</h1>
+                    <p class="small mb-0" style="color: rgba(255,255,255,.85);">登录后可作为管理员进入测试管理平台</p>
+                </div>
+
+                {% if error %}<div class="alert alert-danger py-2 mb-3">{{ error }}</div>{% endif %}
+
+                <form method="post" action="/login">
+                    <input type="hidden" name="next" value="{{ next }}">
+                    <div class="mb-3">
+                        <label class="form-label" for="login-username">用户名</label>
+                        <input class="form-control" id="login-username" name="username"
+                               value="{{ username }}" required autofocus autocomplete="username">
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label" for="login-password">密码</label>
+                        <input class="form-control" id="login-password" name="password"
+                               type="password" required autocomplete="current-password">
+                    </div>
+                    <div class="d-grid">
+                        <button class="btn btn-primary" type="submit">登录</button>
+                    </div>
+                </form>
+
+                <hr class="my-4">
+                <p class="small text-muted mb-0">
+                    普通用户登录后只能使用 ACGN 内容平台；管理员额外可进入测试管理平台。<br>
+                    未登录也可正常浏览内容平台（首页 / ACGN 资讯 / 新番档期）。
+                </p>
+            </div>
+        </div>
+        <div class="text-center mt-3 mb-4">
+            <a class="small" href="/">&larr; 返回内容平台首页</a>
+        </div>
+    </div>
+</div>
+{% endblock %}

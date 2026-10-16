@@ -1,0 +1,18 @@
+{# 分页控件：调用方传入 base（已拼好除 page 外的查询串，以 ? 或 &amp; 结尾） #}
+{% macro pager(base, page, total_pages) %}
+{% if total_pages > 1 %}
+<nav aria-label="分页">
+    <ul class="pagination pagination-sm mb-0">
+        <li class="page-item{% if page <= 1 %} disabled{% endif %}">
+            <a class="page-link" href="{{ base }}page={{ page - 1 }}">上一页</a>
+        </li>
+        <li class="page-item disabled">
+            <span class="page-link">第 {{ page }} / {{ total_pages }} 页</span>
+        </li>
+        <li class="page-item{% if page >= total_pages %} disabled{% endif %}">
+            <a class="page-link" href="{{ base }}page={{ page + 1 }}">下一页</a>
+        </li>
+    </ul>
+</nav>
+{% endif %}
+{% endmacro %}

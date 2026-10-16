@@ -227,6 +227,90 @@ class AnimeSchedule(Base):
         }
 
 
+class SyncTaskRun(Base):
+    """统一「数据同步」任务运行记录（测试管理平台 → 数据管理 → 数据同步）。
+
+    一次手动同步（预览或正式）写一条记录，用于结果展示与历史审计：
+
+    - task_key：数据源标识（bangumi / yuc_schedule / articles）；
+    - mode：preview（只预览，不写业务数据）/ apply（正式写入业务数据）；
+    - trigger：触发来源，当前固定 manual，将来接入定时任务后写 scheduled；
+    - details：逐条结果快照 [{status, title, reason}]，便于回看本次究竟做了什么；
+    - actor_id：发起人（管理员）主键，弱关联不设外键，账号删除后记录仍可解读。
+
+    本表只记录同步过程，不参与业务数据读写，与 ScheduleSyncRun（档期专用同步记录）
+    互不影响；新增本表不改动任何既有表结构与数据。
+    """
+
+    __tablename__ = "sync_task_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    task_key: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    source_label: Mapped[str] = mapped_column(String(120), nullable=False, default="")
+    scope: Mapped[str] = mapped_column(String(200), nullable=False, default="")
+    mode: Mapped[str] = mapped_column(String(10), nullable=False)
+    trigger: Mapped[str] = mapped_column(String(20), nullable=False, default="manual")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="running")
+    started_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    added: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    unchanged: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    duplicates: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    skipped: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    pending: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    failed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    details: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    actor_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    def as_dict(self) -> dict:
+        """序列化为 JSON 结构；时间为秒级 ISO 字符串。"""
+        return {
+            "id": self.id,
+            "task_key": self.task_key,
+            "source_label": self.source_label,
+            "scope": self.scope,
+            "mode": self.mode,
+            "trigger": self.trigger,
+            "status": self.status,
+            "started_at": self.started_at.isoformat(sep=" ", timespec="seconds"),
+            "finished_at": self.finished_at.isoformat(sep=" ", timespec="seconds")
+            if self.finished_at
+            else None,
+            "added": self.added,
+            "updated": self.updated,
+            "unchanged": self.unchanged,
+            "duplicates": self.duplicates,
+            "skipped": self.skipped,
+            "pending": self.pending,
+            "failed": self.failed,
+            "message": self.message,
+            "details": list(self.details or []),
+            "actor_id": self.actor_id,
+        }
+
+
+class User(Base):
+    """平台账号：普通用户（user）与管理员（admin）。
+
+    - password_hash 保存 PBKDF2-HMAC-SHA256 哈希，明文密码不落库；
+    - role 只有 user / admin 两种取值，访问控制据此判断；
+    - 新增本表不影响既有内容/测试数据，历史数据无需迁移。
+    """
+
+    __tablename__ = "users"
+    __table_args__ = (
+        Index("uq_users_username", "username", unique=True),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    username: Mapped[str] = mapped_column(String(50), nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(200), nullable=False)
+    role: Mapped[str] = mapped_column(String(20), nullable=False, default="user")
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
+
+
 class ScheduleSyncRun(Base):
     """新番档期同步运行记录（独立于作品数据，dry-run 与 apply 均记录）。
 

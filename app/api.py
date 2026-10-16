@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app import crud
+from app.auth import require_admin_api
 from app.database import get_db
 
 # 复用的依赖注解：模块级定义一次，各端点签名直接引用（FastAPI 推荐写法）。
@@ -143,12 +144,15 @@ def list_schedule_seasons(db: DbSession) -> dict:
     return {"total": len(seasons), "seasons": seasons}
 
 
-@router.get("/schedule/runs")
+@router.get("/schedule/runs", dependencies=[Depends(require_admin_api)])
 def list_schedule_runs(
     db: DbSession,
     limit: int = Query(default=50, ge=1, le=200),
 ) -> dict:
-    """只读查询同步运行记录（最新在前）；dry-run 与 apply 记录同表区分。"""
+    """只读查询同步运行记录（最新在前）；dry-run 与 apply 记录同表区分。
+
+    同步记录属于管理数据，仅管理员可访问（未登录 401 / 越权 403）。
+    """
     total, runs = crud.list_sync_runs(db, limit=limit)
     return {"total": total, "limit": limit, "runs": [run.as_dict() for run in runs]}
 

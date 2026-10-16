@@ -1,0 +1,96 @@
+{% extends "base_admin.html" %}
+{% from "_pager.html" import pager %}
+{# 作品数据管理：查看 / 删除 / 批量删除 #}
+{% block title %}作品数据 - 测试管理平台{% endblock %}
+{% block content %}
+<h1 class="h3 mb-1 section-heading">作品数据</h1>
+<p class="text-muted small mb-3">共 {{ total }} 条作品。删除为真实写库操作，只删除所选条目。</p>
+{% include "_data_nav.html" %}
+
+{% if deleted is not none %}
+<div class="alert {% if deleted > 0 %}alert-success{% else %}alert-warning{% endif %} py-2">
+    {% if deleted > 0 %}已删除 {{ deleted }} 条作品。{% else %}未删除任何条目（未勾选，或条目已不存在）。{% endif %}
+</div>
+{% endif %}
+
+<form class="row g-2 align-items-end mb-3" method="get" action="/admin/data/contents">
+    <div class="col-sm-5 col-md-4">
+        <label class="form-label" for="q">关键词</label>
+        <input class="form-control form-control-sm" id="q" name="q" value="{{ q }}"
+               placeholder="标题或简介">
+    </div>
+    <div class="col-sm-4 col-md-3">
+        <label class="form-label" for="type">类型</label>
+        <select class="form-select form-select-sm" id="type" name="type">
+            <option value="">全部类型</option>
+            {% for value, label in type_labels.items() %}
+            <option value="{{ value }}"{% if content_type == value %} selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <div class="col-auto">
+        <button class="btn btn-sm btn-primary" type="submit">筛选</button>
+        <a class="btn btn-sm btn-outline-secondary" href="/admin/data/contents">重置</a>
+    </div>
+</form>
+
+{# 批量删除表单：只承载隐藏的筛选条件；勾选框与批量按钮用 form 属性归入本表单，
+   单条删除按钮各自使用所在单元格内的独立表单，避免出现嵌套表单。 #}
+<form id="bulk-delete" method="post" action="/admin/data/contents/delete">
+    <input type="hidden" name="q" value="{{ q }}">
+    <input type="hidden" name="type" value="{{ content_type }}">
+    <input type="hidden" name="page" value="{{ page }}">
+</form>
+
+{% if not contents %}
+<div class="detail-empty">没有符合条件的作品。</div>
+{% else %}
+<div class="table-responsive table-card">
+    <table class="table table-hover align-middle">
+        <thead>
+        <tr>
+            <th style="width: 2.25rem;"></th>
+            <th>ID</th>
+            <th>标题</th>
+            <th>类型</th>
+            <th>评分</th>
+            <th>简介</th>
+            <th>操作</th>
+        </tr>
+        </thead>
+        <tbody>
+        {% for c in contents %}
+        <tr>
+            <td>
+                <input class="form-check-input" type="checkbox" name="ids" value="{{ c.id }}"
+                       form="bulk-delete" aria-label="选择作品 {{ c.id }}">
+            </td>
+            <td>{{ c.id }}</td>
+            <td>{{ c.title }}</td>
+            <td><span class="badge bg-info text-dark">{{ type_labels.get(c.type, c.type) }}</span></td>
+            <td>{{ '%.1f'|format(c.rating) }}</td>
+            <td class="small text-muted" style="max-width: 360px;">
+                {{ c.summary[:60] }}{% if c.summary|length > 60 %}…{% endif %}
+            </td>
+            <td class="text-nowrap">
+                <a class="btn btn-sm btn-outline-secondary" href="/contents/{{ c.id }}">查看</a>
+                <form method="post" action="/admin/data/contents/delete" class="d-inline">
+                    <input type="hidden" name="ids" value="{{ c.id }}">
+                    <input type="hidden" name="q" value="{{ q }}">
+                    <input type="hidden" name="type" value="{{ content_type }}">
+                    <input type="hidden" name="page" value="{{ page }}">
+                    <button class="btn btn-sm btn-outline-danger" type="submit">删除</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mt-3">
+    <button class="btn btn-sm btn-danger" type="submit" form="bulk-delete">批量删除选中</button>
+    {{ pager('/admin/data/contents?q=' ~ (q|urlencode) ~ '&type=' ~ (content_type|urlencode) ~ '&', page, total_pages) }}
+</div>
+{% endif %}
+{% endblock %}

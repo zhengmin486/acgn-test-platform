@@ -1,0 +1,80 @@
+{% extends "base_admin.html" %}
+{% from "_pager.html" import pager %}
+{# 资讯数据管理：查看 / 删除（含未发布文章，便于核对） #}
+{% block title %}资讯数据 - 测试管理平台{% endblock %}
+{% block content %}
+<h1 class="h3 mb-1 section-heading">资讯数据</h1>
+<p class="text-muted small mb-3">共 {{ total }} 篇文章（含未发布）。删除为真实写库操作。</p>
+{% include "_data_nav.html" %}
+
+{% if deleted is not none %}
+<div class="alert {% if deleted > 0 %}alert-success{% else %}alert-warning{% endif %} py-2">
+    {% if deleted > 0 %}已删除 {{ deleted }} 篇文章。{% else %}未删除任何条目（条目已不存在）。{% endif %}
+</div>
+{% endif %}
+
+<form class="row g-2 align-items-end mb-3" method="get" action="/admin/data/articles">
+    <div class="col-sm-6 col-md-4">
+        <label class="form-label" for="q">关键词</label>
+        <input class="form-control form-control-sm" id="q" name="q" value="{{ q }}"
+               placeholder="标题、摘要或正文">
+    </div>
+    <div class="col-auto">
+        <button class="btn btn-sm btn-primary" type="submit">筛选</button>
+        <a class="btn btn-sm btn-outline-secondary" href="/admin/data/articles">重置</a>
+    </div>
+</form>
+
+{% if not articles %}
+<div class="detail-empty">没有符合条件的资讯。</div>
+{% else %}
+<div class="table-responsive table-card">
+    <table class="table table-hover align-middle">
+        <thead>
+        <tr>
+            <th>ID</th>
+            <th>标题</th>
+            <th>分类</th>
+            <th>状态</th>
+            <th>发布时间</th>
+            <th>操作</th>
+        </tr>
+        </thead>
+        <tbody>
+        {% for a in articles %}
+        <tr>
+            <td>{{ a.id }}</td>
+            <td>
+                <div>{{ a.title }}</div>
+                <div class="small text-muted">
+                    {{ a.summary[:50] }}{% if a.summary|length > 50 %}…{% endif %}
+                </div>
+            </td>
+            <td><span class="badge bg-secondary">{{ a.category }}</span></td>
+            <td>
+                {% if a.is_published %}
+                <span class="badge bg-success">已发布</span>
+                {% else %}
+                <span class="badge bg-secondary">未发布</span>
+                {% endif %}
+            </td>
+            <td class="text-muted small">{{ a.published_at.strftime('%Y-%m-%d %H:%M') }}</td>
+            <td class="text-nowrap">
+                <a class="btn btn-sm btn-outline-secondary" href="/articles/{{ a.id }}">查看</a>
+                <form method="post" action="/admin/data/articles/{{ a.id }}/delete" class="d-inline">
+                    <input type="hidden" name="q" value="{{ q }}">
+                    <input type="hidden" name="page" value="{{ page }}">
+                    <button class="btn btn-sm btn-outline-danger" type="submit">删除</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<div class="d-flex flex-wrap justify-content-end align-items-center gap-2 mt-3">
+    {{ pager('/admin/data/articles?q=' ~ (q|urlencode) ~ '&', page, total_pages) }}
+</div>
+{% endif %}
+{% endblock %}

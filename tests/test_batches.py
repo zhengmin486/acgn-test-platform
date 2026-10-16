@@ -13,17 +13,19 @@ from sqlalchemy.orm import sessionmaker
 
 from app.database import Base, get_db
 from app.main import app
+from auth_helpers import create_accounts, login_as_admin
 
 
 @pytest.fixture
 def batch_env(tmp_path):
-    """独立临时数据库 + get_db 覆盖，用例结束还原依赖。"""
+    """独立临时数据库 + get_db 覆盖，并以管理员身份登录（测试管理平台需管理员）。"""
     engine = create_engine(
         f"sqlite:///{tmp_path / 'batches.db'}",
         connect_args={"check_same_thread": False},
     )
     Base.metadata.create_all(engine)
     TestingSession = sessionmaker(bind=engine, expire_on_commit=False)
+    create_accounts(TestingSession, admin=True, user=False)
 
     def override_get_db():
         db = TestingSession()
@@ -33,7 +35,9 @@ def batch_env(tmp_path):
             db.close()
 
     app.dependency_overrides[get_db] = override_get_db
-    yield SimpleNamespace(client=TestClient(app), session_factory=TestingSession)
+    client = TestClient(app)
+    login_as_admin(client)
+    yield SimpleNamespace(client=client, session_factory=TestingSession)
     app.dependency_overrides.pop(get_db, None)
 
 
@@ -205,6 +209,125 @@ def test_regression_added_and_missing(batch_env):
     assert "不计为通过" in changes[old_case]["detail"]
     assert changes[2]["change"] == "added"
     assert changes[2]["previous_passed"] is None
+
+
+def test_regression_summary_counts_and_pass_rate(batch_env):
+    """四类核心分类计数、通过率变化与失败数变化均与实际执行记录一致。"""
+    client = batch_env.client
+    _create(client, name="始终通过", expected_status=200)          # id=1
+    fail_to_pass = _create(client, name="由通过转失败", expected_status=200).json()["id"]  # id=2
+    pass_to_pass = _create(client, name="由失败转通过", expected_status=500).json()["id"]  # id=3
+    _create(client, name="始终失败", expected_status=500)          # id=4
+    also_fixed = _create(client, name="本次修复", expected_status=500).json()["id"]        # id=5
+
+    first = client.post("/api/batches").json()
+    assert first["total"] == 5 and first["passed"] == 2 and first["failed"] == 3
+    assert first["pass_rate"] == 40.0
+
+    client.put(f"/api/testcases/{fail_to_pass}", json={
+        "name": "由通过转失败", "method": "GET", "path": "/api/health",
+        "expected_status": 500, "enabled": True})
+    client.put(f"/api/testcases/{pass_to_pass}", json={
+        "name": "由失败转通过", "method": "GET", "path": "/api/health",
+        "expected_status": 200, "enabled": True})
+    client.put(f"/api/testcases/{also_fixed}", json={
+        "name": "本次修复", "method": "GET", "path": "/api/health",
+        "expected_status": 200, "enabled": True})
+
+    second = client.post("/api/batches").json()
+    assert second["total"] == 5 and second["passed"] == 3 and second["failed"] == 2
+    assert second["pass_rate"] == 60.0
+
+    reg = client.get("/api/batches/2/regression").json()
+    assert reg["comparable"] is True
+    assert reg["previous_batch_id"] == 1
+    assert reg["current_batch_id"] == 2
+    assert reg["summary"] == {
+        "regression": 1, "fixed": 2, "unchanged_fail": 1,
+        "unchanged_pass": 1, "added": 0, "missing": 0,
+    }
+    assert reg["pass_rate"] == {"current": 60.0, "previous": 40.0, "delta": 20.0}
+    assert reg["failure_change"] == {"current": 2, "previous": 3, "delta": -1}
+
+    changes = {i["case_id"]: i["change"] for i in reg["items"]}
+    assert changes == {
+        fail_to_pass: "regression",
+        pass_to_pass: "fixed",
+        also_fixed: "fixed",
+        1: "unchanged_pass",
+        4: "unchanged_fail",
+    }
+
+
+def test_regression_case_set_inconsistent_summary(batch_env):
+    """用例集合不一致：停用用例记为缺失、新用例记为新增，均不计入四类核心分类。"""
+    client = batch_env.client
+    old_case = _create(client, name="旧用例", expected_status=200).json()["id"]
+    client.post("/api/batches")
+
+    client.put(f"/api/testcases/{old_case}", json={
+        "name": "旧用例", "method": "GET", "path": "/api/health",
+        "expected_status": 200, "enabled": False})
+    new_case = _create(client, name="新增用例", path="/api/contents").json()["id"]
+    client.post("/api/batches")
+
+    reg = client.get("/api/batches/2/regression").json()
+    assert reg["comparable"] is True
+    assert reg["summary"] == {
+        "regression": 0, "fixed": 0, "unchanged_fail": 0,
+        "unchanged_pass": 0, "added": 1, "missing": 1,
+    }
+    assert reg["pass_rate"] == {"current": 100.0, "previous": 100.0, "delta": 0.0}
+
+    items = {i["case_id"]: i for i in reg["items"]}
+    assert items[old_case]["change"] == "missing"
+    assert items[old_case]["current_passed"] is None
+    assert items[new_case]["change"] == "added"
+    assert items[new_case]["previous_passed"] is None
+
+
+def test_regression_no_history_and_empty_batch_summary(batch_env):
+    """无历史批次 / 当前批次为空：不可对比，items 为空且汇总为零值结构。"""
+    client = batch_env.client
+
+    empty = client.post("/api/batches").json()
+    assert empty["total"] == 0
+    reg_empty = client.get("/api/batches/1/regression").json()
+    assert reg_empty["comparable"] is False
+    assert "没有用例" in reg_empty["reason"]
+    assert reg_empty["items"] == []
+    assert reg_empty["summary"] == {
+        "regression": 0, "fixed": 0, "unchanged_fail": 0,
+        "unchanged_pass": 0, "added": 0, "missing": 0,
+    }
+
+    _create(client)
+    client.post("/api/batches")
+    reg_first = client.get("/api/batches/2/regression").json()
+    assert reg_first["comparable"] is False
+    assert "没有更早的有效批次" in reg_first["reason"]
+    assert reg_first["items"] == []
+    assert all(v == 0 for v in reg_first["summary"].values())
+
+
+def test_batch_detail_page_shows_regression_summary(batch_env):
+    """批次详情页展示通过率变化、失败数变化与四类分类计数。"""
+    client = batch_env.client
+    _create(client, name="通过用例", expected_status=200)
+    regression_case = _create(client, name="回归用例", expected_status=200).json()["id"]
+    client.post("/api/batches")
+
+    client.put(f"/api/testcases/{regression_case}", json={
+        "name": "回归用例", "method": "GET", "path": "/api/health",
+        "expected_status": 500, "enabled": True})
+    client.post("/api/batches")
+
+    page = client.get("/batches/2")
+    assert page.status_code == 200
+    for text in ("通过率变化", "失败用例数变化", "新增失败", "已修复失败",
+                 "持续失败", "持续通过", "新增用例", "缺失用例"):
+        assert text in page.text
+    assert "与批次 #1 对比" in page.text
 
 
 def test_batches_list_and_missing_404(batch_env):

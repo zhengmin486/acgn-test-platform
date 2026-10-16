@@ -36,7 +36,7 @@
 
 {# ===== 分类浏览（数量来自库内真实统计） ===== #}
 <section class="mb-4">
-    <h2 class="h5 mb-3">分类浏览</h2>
+    <h2 class="h5 mb-3 section-heading">分类浏览</h2>
     <div class="row g-3">
         {% for code, label in type_labels.items() %}
         <div class="col-6 col-md-3">
@@ -54,7 +54,7 @@
 <div class="row g-4 mb-4">
     <section class="col-12 col-lg-8">
         <div class="d-flex justify-content-between align-items-center mb-3">
-            <h2 class="h5 mb-0">推荐作品</h2>
+            <h2 class="h5 mb-0 section-heading">推荐作品</h2>
             <span class="text-muted small">按评分排序 · 取自库内真实数据</span>
         </div>
         {% if top_contents %}
@@ -83,7 +83,7 @@
 
     <section class="col-12 col-lg-4">
         <div class="d-flex justify-content-between align-items-center mb-3">
-            <h2 class="h5 mb-0">最新资讯</h2>
+            <h2 class="h5 mb-0 section-heading">最新资讯</h2>
             <a class="small" href="/articles">全部资讯 &rarr;</a>
         </div>
         {% if latest_articles %}
@@ -109,7 +109,7 @@
 {# ===== 内容列表（浏览模式=全量列表；搜索模式=搜索结果） ===== #}
 <section>
     {% if not search_mode %}
-    <h2 class="h5 mb-2">内容列表</h2>
+    <h2 class="h5 mb-2 section-heading">内容列表</h2>
     <p class="text-muted small">数据库内容共 {{ total }} 条，可按类型筛选或输入关键词搜索标题/简介。</p>
     {% endif %}
 

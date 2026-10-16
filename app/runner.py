@@ -120,24 +120,60 @@ def run_batch(db: Session) -> ExecutionBatch:
     return batch
 
 
+# 回归对比的变化类型全集；前四项为核心分类（新增失败/已修复失败/持续失败/持续通过），
+# 后两项用于表达两次批次间用例集合不一致的情况（新增用例/缺失用例）。
+CHANGE_TYPES = (
+    "regression",
+    "fixed",
+    "unchanged_fail",
+    "unchanged_pass",
+    "added",
+    "missing",
+)
+
+
+def _batch_pass_rate(batch: ExecutionBatch) -> float | None:
+    """批次通过率（百分比，保留 1 位小数）；无用例时为 None。"""
+    return round(batch.passed / batch.total * 100, 1) if batch.total else None
+
+
+def _empty_summary() -> dict:
+    """六类变化的零值计数，保证汇总键结构稳定（无可比较批次时同构返回）。"""
+    return {change: 0 for change in CHANGE_TYPES}
+
+
 def compare_batches(db: Session, current: ExecutionBatch) -> dict:
     """当前批次与之前最近的有效批次（非空）做回归对比。
 
-    以稳定的 case_id 为主键对齐：
+    以稳定的 case_id 为主键对齐（用例集合不一致时逐条判定）：
     - missing：当前批次没有该用例记录（不算通过）；
     - added：上一批没有该用例记录（视为新增）；
-    - regression/fixed/unchanged_*：通过变失败/失败变通过/状态不变；
-    无可比较批次或当前批次为空时 comparable=False 并给出原因。
+    - regression：上批通过、本批失败（新增失败）；
+    - fixed：上批失败、本批通过（已修复失败）；
+    - unchanged_fail：两次均失败（持续失败）；
+    - unchanged_pass：两次均通过（持续通过）。
+
+    返回结构：
+    - comparable / reason：是否可对比及原因（当前批次为空、无更早有效批次）；
+    - pass_rate：上批/本批通过率及变化（百分点，保留 1 位小数）；
+    - failure_change：上批/本批失败数及变化（正数代表失败变多）；
+    - summary：六类变化的计数，直接对应四个核心分类；
+    - items：逐用例差异明细（无论是否可对比，items 恒为列表）。
+    无可比较批次或当前批次为空时 comparable=False，items 为空、summary 全零，
+    不编造任何对比数据。
     """
     if current.total == 0:
-        return {"comparable": False, "reason": "当前批次没有用例，无法对比", "items": []}
+        return {"comparable": False, "reason": "当前批次没有用例，无法对比",
+                "items": [], "summary": _empty_summary()}
     previous = crud.get_previous_valid_batch(db, current.id)
     if previous is None:
-        return {"comparable": False, "reason": "没有更早的有效批次可供对比", "items": []}
+        return {"comparable": False, "reason": "没有更早的有效批次可供对比",
+                "items": [], "summary": _empty_summary()}
 
     current_runs = {r.case_id: r for r in crud.list_runs_for_batch(db, current.id)}
     previous_runs = {r.case_id: r for r in crud.list_runs_for_batch(db, previous.id)}
     items = []
+    summary = _empty_summary()
     for case_id in sorted(set(current_runs) | set(previous_runs)):
         current_run = current_runs.get(case_id)
         previous_run = previous_runs.get(case_id)
@@ -159,6 +195,7 @@ def compare_batches(db: Session, current: ExecutionBatch) -> dict:
         else:
             change = "unchanged_fail"
             detail = "两次均失败，状态不变"
+        summary[change] += 1
         items.append({
             "case_id": case_id,
             "case_name": (current_run or previous_run).case_name,
@@ -167,4 +204,28 @@ def compare_batches(db: Session, current: ExecutionBatch) -> dict:
             "previous_passed": previous_run.passed if previous_run else None,
             "detail": detail,
         })
-    return {"comparable": True, "previous_batch_id": previous.id, "items": items}
+
+    current_rate = _batch_pass_rate(current)
+    previous_rate = _batch_pass_rate(previous)
+    delta = (
+        round(current_rate - previous_rate, 1)
+        if current_rate is not None and previous_rate is not None
+        else None
+    )
+    return {
+        "comparable": True,
+        "previous_batch_id": previous.id,
+        "current_batch_id": current.id,
+        "pass_rate": {
+            "current": current_rate,
+            "previous": previous_rate,
+            "delta": delta,
+        },
+        "failure_change": {
+            "current": current.failed,
+            "previous": previous.failed,
+            "delta": current.failed - previous.failed,
+        },
+        "summary": summary,
+        "items": items,
+    }
