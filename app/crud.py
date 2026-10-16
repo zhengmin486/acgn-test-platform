@@ -1,12 +1,13 @@
 """数据库访问层：内容表查询、搜索与初始化播种。
 
-本阶段 API 只读；建/改/删由测试用独立临时 SQLite 覆盖，
-MySQL 接入与 Alembic 迁移留待下一阶段。
+当前 API 只读；建/改/删由测试用独立临时 SQLite 覆盖，
+MySQL 接入与 Alembic 迁移尚未落地。
 """
 
+import secrets
 from datetime import datetime, timedelta
 
-from sqlalchemy import Engine, delete as sa_delete, func, or_, select
+from sqlalchemy import Engine, delete as sa_delete, func, inspect, or_, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import settings
@@ -16,15 +17,19 @@ from app.models import (
     AnimeSchedule,
     Article,
     Content,
+    ContentFavorite,
+    ContentViewHistory,
+    EmailVerificationToken,
     ExecutionBatch,
     ExecutionRecord,
+    PasswordResetToken,
     ScheduleSyncRun,
     SyncTaskRun,
     TestCase,
     User,
 )
 from app.schemas import TestCaseCreate
-from app.security import hash_password
+from app.security import hash_password, hash_token
 
 
 def list_contents(
@@ -154,7 +159,7 @@ def get_article(
 def _content_search_stmt(keyword: str, content_type: str | None):
     """内容搜索的共享查询：标题/简介不区分大小写包含匹配，可叠加类型筛选。
 
-    语义与第一阶段一致（lower 后包含匹配）；分页与不分页的调用方共用本构造，
+    匹配语义保持原样（lower 后包含匹配）；分页与不分页的调用方共用本构造，
     避免两套搜索实现漂移。
     """
     stmt = select(Content)
@@ -172,7 +177,7 @@ def _content_search_stmt(keyword: str, content_type: str | None):
 
 
 def search_contents(db: Session, keyword: str) -> list[Content]:
-    """标题/简介不区分大小写的包含匹配，语义与第一阶段一致。
+    """标题/简介不区分大小写的包含匹配，与分页版本语义一致。
 
     不分页、按 id 排序返回全部匹配；分页需求用 search_contents_page。
     """
@@ -209,6 +214,78 @@ def seed_if_empty(db: Session) -> int:
     return len(FAKE_CONTENTS)
 
 
+# 启动时按需补齐的 users 列：``(列名, DDL 片段)``，SQLite 与 MySQL 通用。
+# 包含邮箱验证与找回密码两组字段——项目没有 Alembic，历史库只能这样平滑加列。
+_USER_EMAIL_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("email", "VARCHAR(200)"),
+    ("email_verified", "BOOLEAN NOT NULL DEFAULT 0"),
+    ("email_verified_at", "DATETIME"),
+    ("password_changed_at", "DATETIME"),
+)
+
+
+def ensure_user_email_columns(engine: Engine) -> list[str]:
+    """为已存在的 users 表补齐邮箱验证列与邮箱唯一索引（幂等，返回新增列名）。
+
+    ``create_all`` 不会给已存在的表追加列，历史库（SQLite / MySQL）在启用邮箱验证后
+    会因「缺少 email_verified 列」直接报错，这里在启动时按需 ALTER TABLE。
+    补列后把既有行统一回填为「已验证」——它们是加该功能之前的账号（脚本创建的管理员等），
+    不应该因为启用邮箱验证而被挡在登录之外。
+    """
+    inspector = inspect(engine)
+    if "users" not in inspector.get_table_names():
+        return []
+
+    existing = {column["name"] for column in inspector.get_columns("users")}
+    added: list[str] = []
+    for name, ddl in _USER_EMAIL_COLUMNS:
+        if name in existing:
+            continue
+        with engine.begin() as connection:
+            connection.execute(text(f"ALTER TABLE users ADD COLUMN {name} {ddl}"))
+        added.append(name)
+
+    # 只有 email_verified 这一列本身是新增时才回填：后续再加别的新列（例如
+    # password_changed_at）不能顺带把「已注册但尚未验证」的账号改成已验证。
+    if "email_verified" in added:
+        with engine.begin() as connection:
+            connection.execute(text("UPDATE users SET email_verified = 1"))
+
+    inspector = inspect(engine)
+    if "uq_users_email" not in {index["name"] for index in inspector.get_indexes("users")}:
+        with engine.begin() as connection:
+            connection.execute(text("CREATE UNIQUE INDEX uq_users_email ON users (email)"))
+    return added
+
+
+# 启动时按需补齐的 users「个人空间」列（简介）。历史库同样只能幂等 ALTER，
+# 不回填任何值——简介默认为空，由用户自行填写。
+_USER_PROFILE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("bio", "TEXT"),
+)
+
+
+def ensure_user_profile_columns(engine: Engine) -> list[str]:
+    """为已存在的 users 表补齐个人空间列（简介 bio），幂等，返回新增列名。
+
+    与 ensure_user_email_columns 同一模式：create_all 只建新表、不给已有表加列，
+    个人空间功能上线前创建的库需要在启动时补列，否则查询 bio 直接报错。
+    """
+    inspector = inspect(engine)
+    if "users" not in inspector.get_table_names():
+        return []
+
+    existing = {column["name"] for column in inspector.get_columns("users")}
+    added: list[str] = []
+    for name, ddl in _USER_PROFILE_COLUMNS:
+        if name in existing:
+            continue
+        with engine.begin() as connection:
+            connection.execute(text(f"ALTER TABLE users ADD COLUMN {name} {ddl}"))
+        added.append(name)
+    return added
+
+
 def init_db(engine: Engine) -> int:
     """建表（如无）并播种，返回播种行数。
 
@@ -218,6 +295,9 @@ def init_db(engine: Engine) -> int:
     生产化时换 Alembic 版本管理。
     """
     Base.metadata.create_all(bind=engine)
+    # 历史库补列：create_all 只建新表、不给已有表加列，老库需按需 ALTER TABLE。
+    ensure_user_email_columns(engine)
+    ensure_user_profile_columns(engine)
     db = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
     try:
         seeded = seed_if_empty(db)
@@ -250,8 +330,36 @@ def get_user_by_username(db: Session, username: str) -> User | None:
     return db.scalar(select(User).where(User.username == username))
 
 
-def create_user(db: Session, *, username: str, password: str, role: str = ROLE_USER) -> User:
-    """创建账号：校验角色与用户名，密码只存哈希，明文不落库。"""
+def get_user_by_email(db: Session, email: str) -> User | None:
+    """按邮箱查询账号（邮箱唯一时使用）；空邮箱返回 None。"""
+    address = normalize_email(email)
+    if not address:
+        return None
+    return db.scalar(select(User).where(User.email == address))
+
+
+def normalize_email(email: str | None) -> str | None:
+    """清理邮箱：去首尾空格并转小写；空串统一视为 None。"""
+    address = (email or "").strip().lower()
+    return address or None
+
+
+def create_user(
+    db: Session,
+    *,
+    username: str,
+    password: str,
+    role: str = ROLE_USER,
+    email: str | None = None,
+    require_verification: bool | None = None,
+) -> User:
+    """创建账号：校验角色与用户名，密码只存哈希，明文不落库。
+
+    - ``email`` 为空表示该账号不参与邮箱验证（脚本创建的管理员、历史账号），
+      落地时 ``email_verified=True``，启用验证功能后也不会被挡在登录之外；
+    - ``require_verification`` 为 None 时自动判断：带邮箱且功能开启 -> 需要验证，
+      否则不需要；调用方也可显式指定（测试与管理入口用）。
+    """
     name = username.strip()
     if not name:
         raise ValueError("用户名不能为空")
@@ -259,8 +367,380 @@ def create_user(db: Session, *, username: str, password: str, role: str = ROLE_U
         raise ValueError(f"角色不合法，可选值：{'、'.join(VALID_ROLES)}")
     if get_user_by_username(db, name) is not None:
         raise ValueError(f"用户名已存在：{name}")
-    user = User(username=name, password_hash=hash_password(password), role=role)
+    address = normalize_email(email)
+    if address is not None and get_user_by_email(db, address) is not None:
+        raise ValueError(f"邮箱已被注册：{address}")
+    if require_verification is None:
+        require_verification = bool(address) and settings.email_verification_enabled
+    user = User(
+        username=name,
+        password_hash=hash_password(password),
+        role=role,
+        email=address,
+        email_verified=not require_verification,
+    )
     db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+# ---------- 个人空间：简介 / 作品收藏 / 浏览记录 ----------
+
+# 简介长度上限：与用户名同级的常规约束，超限在路由层回显错误，不落库。
+MAX_BIO_LENGTH = 500
+
+# 每个用户的浏览记录上限：写入时按 viewed_at 倒序裁剪，保留最近 N 条，
+# 防止单账号记录无限增长；收藏不设上限（收藏是用户主动行为，量级可控）。
+VIEW_HISTORY_LIMIT = 100
+
+
+def set_user_bio(db: Session, user: User, bio: str | None) -> User:
+    """更新个人简介：去首尾空白，空串按未填写（None）处理；超长抛 ValueError。"""
+    text = (bio or "").strip()
+    if len(text) > MAX_BIO_LENGTH:
+        raise ValueError(f"简介长度不能超过 {MAX_BIO_LENGTH} 个字符")
+    user.bio = text or None
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+def count_favorites(db: Session, user_id: int) -> int:
+    """收藏作品数（个人空间统计卡）。"""
+    return (
+        db.scalar(
+            select(func.count())
+            .select_from(ContentFavorite)
+            .where(ContentFavorite.user_id == user_id)
+        )
+        or 0
+    )
+
+
+def is_favorite(db: Session, user_id: int, content_id: int) -> bool:
+    """是否已收藏该作品（详情页按钮状态）。"""
+    return (
+        db.scalar(
+            select(ContentFavorite.id).where(
+                ContentFavorite.user_id == user_id,
+                ContentFavorite.content_id == content_id,
+            )
+        )
+        is not None
+    )
+
+
+def add_favorite(db: Session, user_id: int, content_id: int) -> bool:
+    """收藏作品；已收藏时返回 False（幂等，不产生重复行）。"""
+    if is_favorite(db, user_id, content_id):
+        return False
+    db.add(ContentFavorite(user_id=user_id, content_id=content_id))
+    db.commit()
+    return True
+
+
+def remove_favorite(db: Session, user_id: int, content_id: int) -> bool:
+    """取消收藏；返回是否真的删除了一行（幂等）。"""
+    result = db.execute(
+        sa_delete(ContentFavorite).where(
+            ContentFavorite.user_id == user_id,
+            ContentFavorite.content_id == content_id,
+        )
+    )
+    db.commit()
+    return bool(result.rowcount)
+
+
+def clear_favorites(db: Session, user_id: int) -> int:
+    """清空收藏，返回删除行数。"""
+    result = db.execute(
+        sa_delete(ContentFavorite).where(ContentFavorite.user_id == user_id)
+    )
+    db.commit()
+    return result.rowcount or 0
+
+
+def list_favorites(
+    db: Session,
+    user_id: int,
+    page: int = 1,
+    page_size: int = 20,
+) -> tuple[int, list[Content]]:
+    """收藏作品分页（按收藏时间倒序）：内连接 contents，作品已删则不展示。"""
+    base = (
+        select(Content)
+        .join(ContentFavorite, ContentFavorite.content_id == Content.id)
+        .where(ContentFavorite.user_id == user_id)
+    )
+    total = (
+        db.scalar(select(func.count()).select_from(base.order_by(None).subquery())) or 0
+    )
+    items = list(
+        db.scalars(
+            base.order_by(
+                ContentFavorite.created_at.desc(),
+                Content.id.desc(),
+            )
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+    )
+    return total, items
+
+
+def count_view_history(db: Session, user_id: int) -> int:
+    """浏览记录条数（个人空间统计卡）。"""
+    return (
+        db.scalar(
+            select(func.count())
+            .select_from(ContentViewHistory)
+            .where(ContentViewHistory.user_id == user_id)
+        )
+        or 0
+    )
+
+
+def record_content_view(db: Session, user_id: int, content_id: int) -> None:
+    """记录一次浏览：已浏览过则只更新 viewed_at（不堆叠行）。
+
+    写入后按 viewed_at 倒序裁剪，每人最多保留 VIEW_HISTORY_LIMIT 条。
+    新写入/更新的记录一定是最新的，不会被误裁。
+    """
+    now = datetime.now()
+    row = db.scalar(
+        select(ContentViewHistory).where(
+            ContentViewHistory.user_id == user_id,
+            ContentViewHistory.content_id == content_id,
+        )
+    )
+    if row is None:
+        db.add(
+            ContentViewHistory(
+                user_id=user_id, content_id=content_id, viewed_at=now
+            )
+        )
+    else:
+        row.viewed_at = now
+    db.commit()
+
+    stale_ids = db.scalars(
+        select(ContentViewHistory.id)
+        .where(ContentViewHistory.user_id == user_id)
+        .order_by(ContentViewHistory.viewed_at.desc(), ContentViewHistory.id.desc())
+        .offset(VIEW_HISTORY_LIMIT)
+    ).all()
+    if stale_ids:
+        db.execute(
+            sa_delete(ContentViewHistory).where(ContentViewHistory.id.in_(stale_ids))
+        )
+        db.commit()
+
+
+def remove_view_history(db: Session, user_id: int, content_id: int) -> bool:
+    """删除一条浏览记录；返回是否真的删除了一行（幂等）。"""
+    result = db.execute(
+        sa_delete(ContentViewHistory).where(
+            ContentViewHistory.user_id == user_id,
+            ContentViewHistory.content_id == content_id,
+        )
+    )
+    db.commit()
+    return bool(result.rowcount)
+
+
+def clear_view_history(db: Session, user_id: int) -> int:
+    """清空浏览记录，返回删除行数。"""
+    result = db.execute(
+        sa_delete(ContentViewHistory).where(ContentViewHistory.user_id == user_id)
+    )
+    db.commit()
+    return result.rowcount or 0
+
+
+def list_view_history(
+    db: Session,
+    user_id: int,
+    page: int = 1,
+    page_size: int = 20,
+) -> tuple[int, list[tuple[Content, datetime]]]:
+    """浏览记录分页（按浏览时间倒序）：内连接 contents，作品已删则不展示。
+
+    返回 (总数, [(Content, viewed_at), ...])，模板按作品字段 + 浏览时间渲染。
+    """
+    base = (
+        select(Content, ContentViewHistory.viewed_at)
+        .join(ContentViewHistory, ContentViewHistory.content_id == Content.id)
+        .where(ContentViewHistory.user_id == user_id)
+    )
+    total = (
+        db.scalar(select(func.count()).select_from(base.order_by(None).subquery())) or 0
+    )
+    rows = db.execute(
+        base.order_by(
+            ContentViewHistory.viewed_at.desc(),
+            ContentViewHistory.id.desc(),
+        )
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+    return total, [(row.Content, row.viewed_at) for row in rows]
+
+
+# ---------- 邮箱验证 ----------
+
+
+def list_unverified_users(db: Session) -> list[User]:
+    """待验证账号（有邮箱且未验证），按注册时间倒序。"""
+    return list(
+        db.scalars(
+            select(User)
+            .where(User.email.is_not(None), User.email_verified.is_(False))
+            .order_by(User.created_at.desc(), User.id.desc())
+        )
+    )
+
+
+# ---------- 一次性令牌（邮箱验证 / 找回密码共用） ----------
+# 两类令牌结构完全一致：库中只存明文令牌的 SHA-256，明文只出现在邮件或页面链接里。
+# 这里抽成通用函数，避免「验证」与「重置」两套逻辑各写一遍后行为跑偏。
+
+
+def _issue_token(db: Session, model, user_id: int, ttl_seconds: int) -> str:
+    """签发一次性令牌：先作废该用户旧的未消费令牌，返回只出现一次的明文。"""
+    now = datetime.now()
+    for row in db.scalars(
+        select(model).where(model.user_id == user_id, model.consumed_at.is_(None))
+    ):
+        row.consumed_at = now
+    token = secrets.token_urlsafe(32)
+    db.add(
+        model(
+            user_id=user_id,
+            token_hash=hash_token(token),
+            expires_at=now + timedelta(seconds=ttl_seconds),
+            created_at=now,
+        )
+    )
+    db.commit()
+    return token
+
+
+def _lookup_token(db: Session, model, token: str):
+    """按哈希取回「未消费且未过期」的令牌记录；不存在或不可用返回 None。"""
+    candidate = (token or "").strip()
+    if not candidate:
+        return None
+    record = db.scalar(select(model).where(model.token_hash == hash_token(candidate)))
+    if record is None or record.consumed_at is not None:
+        return None
+    if record.expires_at < datetime.now():
+        return None
+    return record
+
+
+def _latest_token_created_at(db: Session, model, user_id: int) -> datetime | None:
+    """该账号最近一次签发该类令牌的时间（用于重发冷却判断）。"""
+    return db.scalar(
+        select(func.max(model.created_at)).where(model.user_id == user_id)
+    )
+
+
+def issue_email_token(db: Session, user: User) -> str:
+    """为账号签发新的验证令牌，明文只在本返回值中出现一次。
+
+    同一账号此前未消费的令牌会被作废，避免多链接并存；过期时间由
+    ``settings.email_verification_token_ttl_seconds`` 决定。
+    """
+    return _issue_token(
+        db,
+        EmailVerificationToken,
+        user.id,
+        settings.email_verification_token_ttl_seconds,
+    )
+
+
+def latest_token_created_at(db: Session, user_id: int) -> datetime | None:
+    """该账号最近一次签发验证令牌的时间（用于重发冷却判断）。"""
+    return _latest_token_created_at(db, EmailVerificationToken, user_id)
+
+
+def consume_email_token(db: Session, token: str) -> User | None:
+    """校验并消费验证令牌：成功返回账号并标记邮箱已验证，失败返回 None。
+
+    库中只比对哈希；令牌不存在、已消费或已过期一律返回 None。
+    """
+    record = _lookup_token(db, EmailVerificationToken, token)
+    if record is None:
+        return None
+    user = db.get(User, record.user_id)
+    if user is None:
+        return None
+    record.consumed_at = datetime.now()
+    return mark_email_verified(db, user)
+
+
+def issue_password_reset_token(db: Session, user: User) -> str:
+    """签发找回密码令牌（有效期比邮箱验证更短），明文只出现一次。"""
+    return _issue_token(
+        db, PasswordResetToken, user.id, settings.password_reset_token_ttl_seconds
+    )
+
+
+def latest_password_reset_created_at(db: Session, user_id: int) -> datetime | None:
+    """该账号最近一次签发重置令牌的时间（用于重发冷却判断）。"""
+    return _latest_token_created_at(db, PasswordResetToken, user_id)
+
+
+def mark_email_verified(db: Session, user: User) -> User:
+    """将账号标记为邮箱已验证（找回密码成功时顺带完成验证）。"""
+    now = datetime.now()
+    user.email_verified = True
+    user.email_verified_at = now
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+def verify_password_reset_token(db: Session, token: str) -> User | None:
+    """只校验重置令牌，不消费：用于渲染改密表单时先确认链接有效。
+
+    令牌不存在、已消费或已过期返回 None。真正改密时由 ``set_user_password``
+    统一消费，避免「打开表单」就把链接用掉。
+    """
+    record = _lookup_token(db, PasswordResetToken, token)
+    if record is None:
+        return None
+    return db.get(User, record.user_id)
+
+
+def set_user_password(db: Session, user: User, password: str, token: str) -> bool:
+    """消费重置令牌并改密；成功后让该用户此前签发的会话全部失效。
+
+    返回 False 表示令牌无效/已过期，此时不改动任何数据。改密成功后同时
+    作废该用户所有未消费的重置令牌，防止同一链接被重复使用。
+    """
+    record = _lookup_token(db, PasswordResetToken, token)
+    if record is None or record.user_id != user.id:
+        return False
+    now = datetime.now()
+    user.password_hash = hash_password(password)
+    user.password_changed_at = now
+    for row in db.scalars(
+        select(PasswordResetToken).where(
+            PasswordResetToken.user_id == user.id,
+            PasswordResetToken.consumed_at.is_(None),
+        )
+    ):
+        row.consumed_at = now
+    db.commit()
+    return True
+
+
+def mark_email_verified(db: Session, user: User) -> User:
+    """管理员手动放行：直接把账号标记为已验证。"""
+    user.email_verified = True
+    user.email_verified_at = datetime.now()
     db.commit()
     db.refresh(user)
     return user

@@ -270,7 +270,7 @@ def test_detail_failure_marks_failed_and_keeps_others(session_factory):
 
 
 def test_category_filter_and_limit(session_factory):
-    """分类决定抓哪个栏目；条数上限在采集阶段生效。"""
+    """分类决定抓哪个栏目；条数上限在抓取时生效。"""
     fetch = _news_site(detail_ids=(101, 102, 103))
     summary = ia.run_import_articles(
         session_factory, apply=True, category="动漫资讯", limit=2, fetch=fetch

@@ -43,7 +43,7 @@ class Content(Base):
 class TestCase(Base):
     """接口自动化测试用例定义。
 
-    本阶段只管理定义本身，不执行请求；请求路径经校验只允许本站本地路径。
+    只管理定义本身，不执行请求；请求路径经校验只允许本站本地路径。
     """
 
     __tablename__ = "test_cases"
@@ -296,18 +296,120 @@ class User(Base):
 
     - password_hash 保存 PBKDF2-HMAC-SHA256 哈希，明文密码不落库；
     - role 只有 user / admin 两种取值，访问控制据此判断；
-    - 新增本表不影响既有内容/测试数据，历史数据无需迁移。
+    - email / email_verified / email_verified_at 为邮箱验证字段：
+      * email 为 NULL 表示「历史账号」（脚本创建、无邮箱），一律视为已验证，
+        这样启用邮箱验证后不会把既有账号（含管理员）锁在门外；
+      * 注册带邮箱的新账号 email_verified 默认 False，必须验证后才能登录。
+    - password_changed_at 记录最近一次改密时间：会话 Cookie 只带签发时间（iat），
+      签发早于该时间的会话一律失效，这样「改密码」能把已登录的旧设备踢下线。
+      历史账号该列为 NULL，按「从未改密」处理，不受影响。
+    - bio 为个人空间「简介」：自由文本，NULL / 空串表示未填写；
+      历史库由 crud.ensure_user_profile_columns 幂等补列，不影响既有账号。
     """
 
     __tablename__ = "users"
     __table_args__ = (
         Index("uq_users_username", "username", unique=True),
+        Index("uq_users_email", "email", unique=True),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     username: Mapped[str] = mapped_column(String(50), nullable=False)
     password_hash: Mapped[str] = mapped_column(String(200), nullable=False)
     role: Mapped[str] = mapped_column(String(20), nullable=False, default="user")
+    email: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    email_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    email_verified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    password_changed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    bio: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
+
+
+class ContentFavorite(Base):
+    """个人空间「作品收藏」：登录用户对内容平台作品的收藏关系。
+
+    - (user_id, content_id) 联合唯一：重复收藏幂等，不会产生重复行；
+    - content_id 为弱关联（不设外键级联）：作品被管理员删除后，收藏行
+      仍保留（列表页内连接查不到即不展示），清理由用户显式操作触发；
+    - 查询一律带 user_id，保证收藏列表只属于当前登录账号。
+    """
+
+    __tablename__ = "content_favorites"
+    __table_args__ = (
+        UniqueConstraint("user_id", "content_id", name="uq_content_favorites_user_content"),
+        Index("ix_content_favorites_user", "user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    content_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
+
+
+class ContentViewHistory(Base):
+    """个人空间「浏览记录」：登录用户浏览内容平台作品留痕。
+
+    - (user_id, content_id) 联合唯一：同一用户重复浏览同一作品只更新
+      viewed_at，不堆叠多行，记录列表保持「最近浏览」语义；
+    - 每人最多保留 VIEW_HISTORY_LIMIT（crud 常量）条，写入时裁剪最旧记录，
+      避免无限增长；超限裁剪以 viewed_at 倒序为准；
+    - content_id 同为弱关联，作品删除后记录行保留但不展示。
+    """
+
+    __tablename__ = "content_view_history"
+    __table_args__ = (
+        UniqueConstraint("user_id", "content_id", name="uq_content_view_history_user_content"),
+        Index("ix_content_view_history_user", "user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    content_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    viewed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
+
+
+class EmailVerificationToken(Base):
+    """邮箱验证令牌：库中只保存令牌的 SHA-256 哈希，明文仅出现在邮件/页面链接里。
+
+    - 签发时用户旧的未消费令牌一律作废，保证「同一时刻只有一个有效链接」；
+    - expires_at 之前且 consumed_at 为空的令牌才可用，验证成功后两者落库；
+    - 新增本表不影响 users 及其余业务表。
+    """
+
+    __tablename__ = "email_verification_tokens"
+    __table_args__ = (
+        Index("uq_email_tokens_hash", "token_hash", unique=True),
+        Index("ix_email_tokens_user", "user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
+
+
+class PasswordResetToken(Base):
+    """找回密码令牌：与邮箱验证令牌同构（只存哈希、一次性、带过期时间），
+    但独立成表——两类令牌的用途、有效期与审计语义不同，分开便于分别清理。
+
+    - 签发时该用户旧的未消费令牌一律作废，保证同一时刻只有一个有效链接；
+    - 使用成功后 consumed_at 落库，并同步写入 users.password_changed_at；
+    - 新增本表不影响 users 及其余业务表。
+    """
+
+    __tablename__ = "password_reset_tokens"
+    __table_args__ = (
+        Index("uq_password_reset_tokens_hash", "token_hash", unique=True),
+        Index("ix_password_reset_tokens_user", "user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
 
 

@@ -11,7 +11,7 @@ from app.schemas import TestCaseCreate
 router = APIRouter(tags=["pages"])
 
 
-# ---------- 测试用例管理页面（本阶段仅管理定义，不执行请求） ----------
+# ---------- 测试用例管理页面（只管理定义，不执行请求） ----------
 
 
 def _parse_case_form(name: str, method: str, path: str,

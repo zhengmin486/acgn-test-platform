@@ -83,7 +83,7 @@ def auth_env(tmp_path):
         app.dependency_overrides.pop(get_db, None)
 
 
-# ---------- 阶段 1：登录 / 登出 ----------
+# ---------- 登录 / 登出 ----------
 
 
 class TestLogin:
@@ -192,7 +192,7 @@ class TestLogout:
         assert auth_env.client.get("/testcases", follow_redirects=False).status_code == 303
 
 
-# ---------- 阶段 2：管理页面保护 ----------
+# ---------- 管理页面保护 ----------
 
 
 class TestAdminPageGuard:
@@ -229,7 +229,7 @@ class TestAdminPageGuard:
         assert auth_env.client.get("/runs/1", follow_redirects=False).status_code == 403
 
 
-# ---------- 阶段 2：管理 API 保护 ----------
+# ---------- 管理 API 保护 ----------
 
 
 class TestAdminApiGuard:
@@ -257,7 +257,7 @@ class TestAdminApiGuard:
         assert resp.status_code != 403
 
 
-# ---------- 阶段 3：内容平台按角色可用 ----------
+# ---------- 内容平台按角色可用 ----------
 
 
 class TestContentPlatformAccess:
@@ -279,7 +279,8 @@ class TestContentPlatformAccess:
     def test_anonymous_sees_login_entry_only(self, auth_env):
         html = auth_env.client.get("/").text
         assert 'href="/login"' in html
-        assert "未登录" in html
+        assert 'href="/register"' in html
+        assert "未登录" not in html  # 导航不展示「未登录」状态提示
         assert 'href="/testcases"' not in html  # 不暴露测试管理入口
 
     def test_normal_user_hides_test_management_entry(self, auth_env):
@@ -306,7 +307,7 @@ class TestContentPlatformAccess:
         assert "返回内容平台" in html
 
 
-# ---------- 阶段 1：密码与会话底层行为 ----------
+# ---------- 密码与会话底层行为 ----------
 
 
 class TestSecurityPrimitives:

@@ -1,4 +1,4 @@
-"""业务页面路由：ACGN 内容列表/详情、资讯、新番档期与同步历史（数据来源：数据库访问层）。
+"""业务页面路由：ACGN 全部作品/详情、资讯、新番档期与同步历史（数据来源：数据库访问层）。
 
 其中「同步历史」属于管理性质功能，随测试管理平台一起仅对管理员开放；
 其它内容页面（首页 / 资讯 / 新番档期 / 详情）对所有人开放。
@@ -22,19 +22,37 @@ CONTENT_PAGE_SIZE = 20
 
 
 @router.get("/", response_class=HTMLResponse)
-def index(
+def index(request: Request, db: DbSession):
+    """首页（门户）：分类浏览 / 推荐作品 / 最新资讯。
+
+    本页只做「发现」：分类入口、高分推荐与最新资讯；
+    全量浏览与关键词/类型搜索统一落在「全部作品」页（/contents），
+    首页不再承载全量列表（无分页的全量表不适合门户页）。
+    """
+    return templates.TemplateResponse(
+        request=request,
+        name="index.html",
+        context={
+            "type_labels": CONTENT_TYPE_LABELS,
+            "type_counts": crud.count_contents_by_type(db),
+            "top_contents": crud.list_top_contents(db, limit=6),
+            "latest_articles": crud.list_articles(db, limit=5),
+        },
+    )
+
+
+@router.get("/contents", response_class=HTMLResponse)
+def contents_page(
     request: Request,
     db: DbSession,
     q: str = Query(default=""),
     content_type: str | None = Query(default=None, alias="type", max_length=20),
     page: int = Query(default=1, ge=1),
 ):
-    """首页：产品化首页（分类浏览/推荐作品/最新资讯）+ 内容列表与搜索。
+    """全部作品页：关键词/类型筛选 + 卡片网格 + 分页。
 
-    无任何筛选参数时展示完整首页：分类卡片、高分推荐、最新资讯与全量列表；
-    带 q 或 type 时进入搜索模式，直接展示搜索结果（复用原搜索交互）。
-    首页各区块全部来自库内真实数据，数据不足时由模板展示空态；
-    页面侧对非法类型宽容处理（忽略该条件），严格 400 校验由 API 负责。
+    与 /contents/{content_id}（详情页）是精确路径与路径参数的关系，互不冲突；
+    非法类型页面侧宽容忽略（严格 400 校验由 API 负责），与旧首页行为一致。
     """
     keyword = q.strip()
     if content_type is not None:
@@ -43,29 +61,18 @@ def index(
             content_type = None
     search_mode = bool(keyword) or content_type is not None
 
-    type_counts: dict = {}
-    top_contents: list = []
-    latest_articles: list = []
-    if search_mode:
-        total, contents = crud.search_contents_page(
-            db,
-            keyword=keyword,
-            content_type=content_type,
-            page=page,
-            page_size=CONTENT_PAGE_SIZE,
-        )
-        total_pages = max(1, (total + CONTENT_PAGE_SIZE - 1) // CONTENT_PAGE_SIZE)
-    else:
-        contents = crud.list_contents(db)
-        total = len(contents)
-        total_pages = 1
-        type_counts = crud.count_contents_by_type(db)
-        top_contents = crud.list_top_contents(db, limit=6)
-        latest_articles = crud.list_articles(db, limit=5)
+    total, contents = crud.search_contents_page(
+        db,
+        keyword=keyword,
+        content_type=content_type,
+        page=page,
+        page_size=CONTENT_PAGE_SIZE,
+    )
+    total_pages = max(1, (total + CONTENT_PAGE_SIZE - 1) // CONTENT_PAGE_SIZE)
 
     return templates.TemplateResponse(
         request=request,
-        name="index.html",
+        name="contents.html",
         context={
             "contents": contents,
             "q": q,
@@ -76,9 +83,6 @@ def index(
             "total": total,
             "page": page,
             "total_pages": total_pages,
-            "type_counts": type_counts,
-            "top_contents": top_contents,
-            "latest_articles": latest_articles,
         },
     )
 
@@ -89,10 +93,19 @@ def content_detail(request: Request, content_id: int, db: DbSession):
     页面信息全部来自库内真实数据：类型/评分/来源取自条目本身；
     相关内容为同类型高分条目，相关资讯为文本命中作品标题的已发布文章，
     两类关联数据缺失时由模板展示空态，不编造数据。
+
+    登录用户浏览时写入「浏览记录」（个人空间）：同一作品重复浏览只更新
+    时间、不堆叠行；未登录游客不记录（浏览记录属于登录账号）。
     """
     item = crud.get_content(db, content_id)
     if item is None:
         return render_missing(request, "内容", content_id)
+    current_user = getattr(request.state, "current_user", None)
+    if current_user is not None:
+        crud.record_content_view(db, current_user.id, content_id)
+        favorited = crud.is_favorite(db, current_user.id, content_id)
+    else:
+        favorited = False
     return templates.TemplateResponse(
         request=request,
         name="detail.html",
@@ -101,6 +114,7 @@ def content_detail(request: Request, content_id: int, db: DbSession):
             "type_label": CONTENT_TYPE_LABELS.get(item.type, item.type),
             "related_contents": crud.list_related_contents(db, item),
             "related_articles": crud.list_related_articles(db, item),
+            "is_favorited": favorited,
         },
     )
 @router.get("/articles", response_class=HTMLResponse)

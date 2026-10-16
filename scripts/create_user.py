@@ -5,6 +5,8 @@
     python scripts/create_user.py --username alice --role admin
     # 创建普通用户（密码从命令行读取，不落历史）
     python scripts/create_user.py --username bob --role user --password '你的密码'
+    # 创建时绑定邮箱（管理员创建的账号一律视为已验证，无需再走验证邮件）
+    python scripts/create_user.py --username carol --email carol@example.com
     # 重置已有账号密码
     python scripts/create_user.py --username alice --reset-password --password '新密码'
     # 仅列出账号（不显示密码哈希）
@@ -57,12 +59,16 @@ def _list_users(db) -> None:
         return
     print(f"共 {len(users)} 个账号：")
     for user in users:
-        print(f"  #{user.id}  {user.username}  角色={user.role}  创建于={user.created_at:%Y-%m-%d %H:%M:%S}")
+        mail = user.email or "（未绑定邮箱）"
+        state = "已验证" if user.email_verified else "待验证"
+        print(f"  #{user.id}  {user.username}  角色={user.role}  邮箱={mail}"
+              f"  {state}  创建于={user.created_at:%Y-%m-%d %H:%M:%S}")
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="创建或维护平台账号（user / admin）。")
     parser.add_argument("--username", help="账号用户名")
+    parser.add_argument("--email", help="可选：绑定邮箱；管理员创建的账号一律视为已验证")
     parser.add_argument("--role", choices=list(crud.VALID_ROLES), default=crud.ROLE_USER,
                         help="账号角色：user（默认）或 admin")
     parser.add_argument("--password", help="密码；不提供则交互输入（推荐）")
@@ -104,8 +110,12 @@ def main(argv: list[str] | None = None) -> int:
             username=args.username,
             password=_read_password(args),
             role=args.role,
+            email=args.email,
+            # 管理员亲自创建的账号无需再走验证邮件。
+            require_verification=False,
         )
-        print(f"已创建账号 {user.username}（角色={user.role}）。")
+        extra = f"  邮箱={user.email}" if user.email else ""
+        print(f"已创建账号 {user.username}（角色={user.role}{extra}）。")
         return 0
     except ValueError as exc:
         print(f"创建失败：{exc}")

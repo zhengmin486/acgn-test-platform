@@ -1,4 +1,4 @@
-"""测试用例管理 JSON API（本阶段仅管理定义，不执行请求）。"""
+"""测试用例管理 JSON API（只管理用例定义，不执行请求）。"""
 
 from typing import Annotated
 

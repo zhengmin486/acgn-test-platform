@@ -1,0 +1,76 @@
+{% extends "base.html" %}
+{% block title %}注册 - ACGN 内容服务平台{% endblock %}
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-12 col-md-8 col-lg-5">
+        <div class="card app-card auth-card mt-4">
+            <div class="card-body p-4">
+                <div class="auth-band mb-4">
+                    <span class="brand-mark" aria-hidden="true"></span>
+                    <h1 class="h4 mb-1">注册普通用户</h1>
+                    <p class="small mb-0" style="color: rgba(255,255,255,.85);">
+                        {% if require_email %}注册后需验证邮箱才能登录{% else %}注册后即可使用 ACGN 内容平台{% endif %}
+                    </p>
+                </div>
+
+                {% if error %}<div class="alert alert-danger py-2 mb-3">{{ error }}</div>{% endif %}
+
+                <form method="post" action="/register">
+                    <input type="hidden" name="next" value="{{ next }}">
+                    <div class="mb-3">
+                        <label class="form-label" for="register-username">用户名</label>
+                        <input class="form-control" id="register-username" name="username"
+                               value="{{ username }}" required autofocus autocomplete="username"
+                               minlength="{{ min_username_length }}" maxlength="{{ max_username_length }}">
+                        <div class="form-text">
+                            {{ min_username_length }}-{{ max_username_length }} 个字符，可使用字母、数字、下划线和连字符。
+                        </div>
+                    </div>
+                    {% if require_email %}
+                    <div class="mb-3">
+                        <label class="form-label" for="register-email">邮箱</label>
+                        <input class="form-control" id="register-email" name="email"
+                               type="email" value="{{ email }}" required autocomplete="email"
+                               maxlength="{{ max_email_length }}">
+                        <div class="form-text">用于接收验证邮件，一个邮箱只能注册一个账号。</div>
+                    </div>
+                    {% endif %}
+                    <div class="mb-3">
+                        <label class="form-label" for="register-password">密码</label>
+                        <input class="form-control" id="register-password" name="password"
+                               type="password" required autocomplete="new-password"
+                               minlength="{{ min_password_length }}" maxlength="{{ max_password_length }}">
+                        <div class="form-text">至少 {{ min_password_length }} 位。</div>
+                    </div>
+                    <div class="mb-3">
+                        <label class="form-label" for="register-confirm">确认密码</label>
+                        <input class="form-control" id="register-confirm" name="confirm"
+                               type="password" required autocomplete="new-password"
+                               minlength="{{ min_password_length }}" maxlength="{{ max_password_length }}">
+                    </div>
+                    <div class="d-grid">
+                        <button class="btn btn-primary" type="submit">
+                            {% if require_email %}注册并发送验证邮件{% else %}注册并登录{% endif %}
+                        </button>
+                    </div>
+                </form>
+
+                <hr class="my-4">
+                <p class="small text-muted mb-0">
+                    注册账号固定为<strong>普通用户</strong>，仅能浏览内容平台；
+                    管理员账号需由现有管理员通过 <code>scripts/create_user.py --role admin</code> 创建。<br>
+                    未登录也可正常浏览内容平台（首页 / ACGN 资讯 / 新番档期）。
+                    {% if require_email %}<br>验证邮件未收到时，可前往
+                    <a href="/verify/resend">重新发送</a>。{% endif %}
+                </p>
+                <p class="text-center mt-3 mb-0">
+                    <a class="small" href="/login{% if next and next != '/' %}?next={{ next }}{% endif %}">已有账号？去登录</a>
+                </p>
+            </div>
+        </div>
+        <div class="text-center mt-3 mb-4">
+            <a class="small" href="/">&larr; 返回内容平台首页</a>
+        </div>
+    </div>
+</div>
+{% endblock %}

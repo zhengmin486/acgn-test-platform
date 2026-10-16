@@ -829,6 +829,59 @@ hr {
 }
 
 /* ==========================================================================
+   内容平台 · 全部作品页（/contents）
+   ========================================================================== */
+
+/* 作品卡片：整卡可点；顶部渐变封面占位（标题首字，无外部图片素材） */
+.work-card {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    background-color: #fff;
+    border: 1px solid #e9e6f6;
+    border-radius: var(--radius-lg);
+    color: inherit;
+    text-decoration: none;
+    box-shadow: var(--shadow-sm);
+    overflow: hidden;
+    transition: transform 0.18s var(--ease), box-shadow 0.18s var(--ease),
+        border-color 0.18s var(--ease);
+}
+
+.work-card:hover {
+    transform: translateY(-3px);
+    border-color: var(--brand-300);
+    box-shadow: var(--shadow-md);
+    color: inherit;
+}
+
+.work-cover {
+    display: grid;
+    place-items: center;
+    height: 104px;
+    background: linear-gradient(160deg, var(--brand-400), var(--brand-700));
+    color: #fff;
+    font-size: 2.6rem;
+    font-weight: 800;
+    text-shadow: 0 2px 10px rgba(23, 20, 43, 0.3);
+    user-select: none;
+}
+
+.work-card-body {
+    display: flex;
+    flex-direction: column;
+    padding: 0.85rem 1rem 1rem;
+}
+
+/* 摘要最多两行，超出省略，保证卡片高度整齐 */
+.work-card-summary {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+}
+
+/* ==========================================================================
    内容平台 · 资讯频道
    ========================================================================== */
 
@@ -1201,10 +1254,6 @@ hr {
     color: #0f172a;
 }
 
-.navbar-user-guest {
-    background-color: rgba(255, 255, 255, 0.1);
-}
-
 /* 内容平台 → 测试管理 的跨区入口 */
 .content-navbar .nav-cta {
     border: 1px solid rgba(255, 255, 255, 0.6);
@@ -1306,11 +1355,63 @@ hr {
 }
 
 /* ==========================================================================
-   数据同步：确认写入区块
-   预览结果的「确认写入」必须就近显示——逐条明细表很长时会把它推到页面底部，
-   很容易被当成「只有预览、没有写入」。故结果面板顶部用醒目区块呈现，
-   明细表下方再给一个次要入口，滚到底也能直接确认。
+   个人空间（/me）：头像 / Tab / 简介
    ========================================================================== */
+
+/* 头像占位：品牌渐变圆 + 用户名首字，零外部图片素材 */
+.space-avatar {
+    width: 64px;
+    height: 64px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.75rem;
+    font-weight: 800;
+    color: #fff;
+    background: linear-gradient(135deg, var(--brand-400), var(--brand-700));
+    box-shadow: var(--shadow-sm);
+    flex-shrink: 0;
+    user-select: none;
+}
+
+/* Tab（作品收藏 / 浏览记录）：下划线式，与数据管理二级导航各自独立 */
+.space-tabs {
+    gap: 0.25rem;
+    border-bottom: 1px solid var(--surface-2);
+}
+
+.space-tabs .space-tab {
+    padding: 0.55rem 1rem;
+    font-weight: 600;
+    color: var(--ink-500);
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+    transition: color 0.15s var(--ease), border-color 0.15s var(--ease);
+}
+
+.space-tabs .space-tab:hover {
+    color: var(--brand-600);
+}
+
+.space-tabs .space-tab.active {
+    color: var(--brand-700);
+    border-bottom-color: var(--brand-600);
+}
+
+/* 简介展示：保留用户手动换行 */
+.space-bio-text {
+    white-space: pre-wrap;
+}
+
+/* ==========================================================================
+   数据同步：确认写入
+   「确认写入」主入口与「预览」按钮并排（.sync-actions 操作行），预览完一眼就能看到；
+   逐条明细表很长时，明细下方还保留一个次要入口，滚到底也能直接确认。
+   两个入口都是独立 <form>，与范围表单并列、不嵌套。
+   ========================================================================== */
+
+/* 明细下方的次要入口：柔色卡片区块 */
 .sync-confirm {
     padding: 0.85rem 1.1rem;
     margin-bottom: 1rem;
@@ -1319,14 +1420,29 @@ hr {
     background-color: var(--ok-bg);
 }
 
-.sync-confirm-prominent {
-    border-left: 4px solid var(--ok-fg);
-    box-shadow: var(--shadow-sm);
+/* 操作按钮行：预览与确认写入并排，窄屏自动换行 */
+.sync-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.75rem;
+    margin-top: 0.25rem;
 }
 
+/* 行内的确认表单：退化为内联，只保留按钮与说明文字 */
+.sync-actions .sync-confirm {
+    margin-bottom: 0;
+    padding: 0;
+    border: 0;
+    background-color: transparent;
+    box-shadow: none;
+}
+
+/* 主入口按钮：加宽的绿色主按钮，承载「待写入条数」徽标 */
 .sync-confirm-prominent .btn-success {
-    font-weight: 600;
-    padding-inline: 1.5rem;
+    font-weight: 700;
+    padding-inline: 1.4rem;
+    box-shadow: 0 2px 10px -2px rgba(25, 135, 84, 0.45);
 }
 
 /* ==========================================================================

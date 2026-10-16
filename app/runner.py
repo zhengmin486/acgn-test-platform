@@ -8,7 +8,7 @@
 
 已知限制：当前 starlette TestClient 构造器不支持 timeout 参数
 （TypeError），且进程内执行没有可超时的网络 I/O；超时保护待
-执行器接入真实 HTTP 服务（下一阶段）时以 httpx 原生超时启用。
+执行器接入真实 HTTP 服务时再以 httpx 原生超时启用。
 """
 
 import time

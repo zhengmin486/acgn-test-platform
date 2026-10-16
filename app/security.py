@@ -47,6 +47,15 @@ def verify_password(password: str, stored_hash: str) -> bool:
     return hmac.compare_digest(digest.hex(), expected)
 
 
+def hash_token(token: str) -> str:
+    """一次性令牌的 SHA-256 十六进制摘要。
+
+    邮箱验证等令牌只在邮件/页面链接里出现明文，库中只存本摘要，
+    数据库泄露也无法直接拼出可用链接。
+    """
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
 def _b64encode(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
@@ -73,14 +82,19 @@ def create_session_token(
     return f"{_b64encode(payload)}.{_sign(payload, secret_key)}"
 
 
-def read_session_token(
+def decode_session(
     token: str,
     secret_key: str,
     max_age_seconds: int,
     *,
     now: float | None = None,
-) -> int | None:
-    """校验会话令牌并返回用户 id；签名不符、格式错误或已过期返回 None。"""
+) -> dict | None:
+    """校验会话令牌并返回载荷 ``{"uid": ..., "iat": ...}``。
+
+    签名不符、格式错误或已过期一律返回 None。``iat`` 一并返回，供调用方
+    判断「签发时间是否早于最近一次改密时间」——会话 Cookie 无法在服务端
+    逐条吊销，只能靠这个时间戳把旧会话整体判死。
+    """
     try:
         encoded_payload, signature = token.split(".")
     except (AttributeError, ValueError):
@@ -93,13 +107,26 @@ def read_session_token(
         return None
     try:
         data = json.loads(payload)
-        user_id = int(data["uid"])
-        issued_at = int(data["iat"])
+        claims = {"uid": int(data["uid"]), "iat": int(data["iat"])}
     except (KeyError, TypeError, ValueError):
         return None
     current = int(time.time() if now is None else now)
-    if issued_at > current + _CLOCK_SKEW_SECONDS:
+    if claims["iat"] > current + _CLOCK_SKEW_SECONDS:
         return None
-    if max_age_seconds and current - issued_at > max_age_seconds:
+    if max_age_seconds and current - claims["iat"] > max_age_seconds:
         return None
-    return user_id
+    return claims
+
+
+def read_session_token(
+    token: str,
+    secret_key: str,
+    max_age_seconds: int,
+    *,
+    now: float | None = None,
+) -> int | None:
+    """校验会话令牌并返回用户 id；签名不符、格式错误或已过期返回 None。"""
+    claims = decode_session(
+        token, secret_key, max_age_seconds, now=now
+    )
+    return None if claims is None else claims["uid"]
