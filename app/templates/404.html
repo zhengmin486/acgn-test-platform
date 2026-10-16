@@ -1,8 +1,9 @@
-{% extends "base.html" %}
-{% block title %}未找到 - ACGN 内容平台{% endblock %}
+{% extends layout | default("base_content.html") %}
+{# 404 页面按主体归属的布局渲染：内容类主体走内容平台布局，测试类主体走测试管理平台布局 #}
+{% block title %}未找到 - {{ platform | default("ACGN 内容平台") }}{% endblock %}
 {% block content %}
 {% set subject = subject | default("内容") %}
 <h1 class="h3">404：{{ subject }}不存在</h1>
 <p class="text-muted">未找到 id={{ content_id }} 对应的{{ subject }}。</p>
-<a class="btn btn-outline-secondary btn-sm" href="/">返回列表</a>
+<a class="btn btn-outline-secondary btn-sm" href="{{ back_href | default('/') }}">{{ back_label | default("返回列表") }}</a>
 {% endblock %}

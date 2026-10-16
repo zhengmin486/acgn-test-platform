@@ -1,4 +1,4 @@
-{% extends "base.html" %}
+{% extends "base_content.html" %}
 {% block title %}新番档期 - ACGN 内容平台{% endblock %}
 
 {% macro work_card(item, weekday_names) %}
@@ -48,7 +48,6 @@
         <p class="text-muted small mb-0">数据来自 Yuc.wiki 档期同步，仅展示已同步的真实信息。</p>
         {% endif %}
     </div>
-    <a class="btn btn-outline-secondary btn-sm" href="/schedule/runs">同步历史</a>
 </div>
 
 {% if not seasons %}
@@ -138,4 +137,9 @@
 {% endif %}
 {% endif %}
 {% endif %}
+
+{# 管理性功能不在内容导航中；仅在页脚以“管理入口”形式提供跨区跳转 #}
+<p class="text-muted small mt-4 mb-0">
+    管理入口：<a href="/schedule/runs">数据同步历史</a> · <a href="/testcases">测试管理平台</a>
+</p>
 {% endblock %}
