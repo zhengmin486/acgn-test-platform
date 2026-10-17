@@ -14,6 +14,15 @@ class Content(Base):
     bangumi_id / source_url 为 Bangumi 导入脚本的溯源字段：
     - bangumi_id 唯一（对应库中已有索引 uq_contents_bangumi_id），重复导入据此跳过；
     - 旧示例数据两列均为 NULL，as_dict 不输出这两个字段，保持 API 契约不变。
+
+    image_url 为封面地址：Bangumi 导入时把远端图下载到本地
+    （cover_storage_dir，见 app/config.py），本列存站内相对地址
+    （/covers/cover_{bangumi_id}.jpg）；页面不直接引用原图，而是经
+    /media/thumb/ 与 /media/full/ 派生图端点取缩略图与压缩全图
+    （见 app/media.py）。NULL 表示该条目没有本地封面，模板回退到
+    渐变占位图。
+    与 bangumi_id 一样，image_url 也不进 as_dict：API 契约保持不变，
+    封面是页面展示关注点。
     """
 
     __tablename__ = "contents"
@@ -28,6 +37,7 @@ class Content(Base):
     rating: Mapped[float] = mapped_column(Float, nullable=False)
     bangumi_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     source_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    image_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     def as_dict(self) -> dict:
         """序列化为对外 JSON 结构，保持接口契约不变。"""

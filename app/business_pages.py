@@ -4,10 +4,10 @@
 其它内容页面（首页 / 资讯 / 新番档期 / 详情）对所有人开放。
 """
 
-from fastapi import APIRouter, Depends, Query, Request
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import FileResponse, HTMLResponse
 
-from app import crud
+from app import crud, media
 from app.auth import require_admin_page
 from app.page_common import DbSession, render_missing, templates
 
@@ -244,6 +244,51 @@ def schedule_page(
             "grouped_mode": not filter_mode,
         },
     )
+
+
+# ---------- 封面图片（缩略图 / 压缩全图：按需生成 + 长缓存） ----------
+
+# 派生图缓存有效期（30 天）：与部署侧 Nginx expires 30d 对齐，
+# 朋友重复浏览同一张封面不再产生请求，也不占用服务器流量。
+_VARIANT_CACHE_HEADERS = {"Cache-Control": "public, max-age=2592000"}
+
+
+def _serve_cover_variant(kind: str, filename: str):
+    """按需返回封面派生图（thumb=400px 缩略 / full=≤1200px 压缩全图）。
+
+    命中磁盘缓存直接返回；未命中用 Pillow 现场生成并原子落盘；
+    生成失败（源图损坏等）降级返回原图——封面可见性优先于体积优化；
+    原图也没有才 404，由前端 onerror 回退渐变占位。
+    """
+    variant = media.ensure_variant(kind, filename)
+    if variant is not None:
+        return FileResponse(
+            variant,
+            media_type=media.VARIANT_MEDIA_TYPE,
+            headers=dict(_VARIANT_CACHE_HEADERS),
+        )
+    name = media.safe_cover_name(filename)
+    if name is not None:
+        original = media.cover_root() / name
+        if original.is_file():
+            return FileResponse(
+                original,
+                media_type=media.guess_media_type(original),
+                headers=dict(_VARIANT_CACHE_HEADERS),
+            )
+    raise HTTPException(status_code=404, detail="封面不存在")
+
+
+@router.get("/media/thumb/{filename}")
+def media_thumb(filename: str):
+    """列表卡片缩略图（400px WebP）：万部作品的列表页流量命门。"""
+    return _serve_cover_variant("thumb", filename)
+
+
+@router.get("/media/full/{filename}")
+def media_full(filename: str):
+    """详情页全图（≤1200px / ≤400KB WebP）：比直接铺原图省一半以上流量。"""
+    return _serve_cover_variant("full", filename)
 
 
 @router.get("/schedule/runs", response_class=HTMLResponse,

@@ -21,9 +21,16 @@
     <div class="card-body p-4">
         <p class="small mb-3"><a href="/">&larr; 返回内容列表</a></p>
 
-        {# 条目头图：无外部图片素材，用品牌渐变封面 + 标题首字占位 #}
+        {# 条目头图：占位层（品牌渐变 + 标题首字）常驻，有封面时图片层叠在上；
+           图片走 /media/full/ 压缩端点（≤1200px / ≤400KB），加载失败即隐藏，
+           露出下面的占位层（见 style.css 的 detail-cover-box） #}
         <div class="d-flex flex-wrap flex-sm-nowrap align-items-start gap-3">
-            <div class="detail-cover" aria-hidden="true">{{ content.title[:1] }}</div>
+            <div class="detail-cover-box">
+                <div class="detail-cover" aria-hidden="true">{{ content.title[:1] }}</div>
+                {% if content.image_url %}
+                <img class="detail-cover" src="{{ full_src(content.image_url) }}" alt="{{ content.title }}封面" onerror="this.style.display='none'">
+                {% endif %}
+            </div>
             <div class="flex-grow-1">
                 <div class="d-flex flex-wrap align-items-start justify-content-between gap-2">
                     <h1 class="h3 mb-0">{{ content.title }}</h1>
@@ -92,6 +99,28 @@
             <span class="text-muted small">登录后可标注「看过 / 未看 / 想看」</span>
             {% endif %}
         </div>
+
+        {# 封面上传（仅 staff：管理员 / 站长）：给作品补图 / 换图，校验后与导入封面同管线生成缩略图与全图 #}
+        {% if current_user and current_user.role != 'user' %}
+        <div class="mt-3">
+            {% if request.query_params.get('cover') == 'ok' %}
+            <div class="alert alert-success py-2">封面已更新。</div>
+            {% elif request.query_params.get('cover') == 'error' %}
+            {% set why = request.query_params.get('why') %}
+            <div class="alert alert-warning py-2">封面上传失败：{% if why == 'too_big' %}图片超过大小上限{% elif why == 'not_image' %}只支持 jpg / png / webp / gif 图片{% elif why == 'corrupt' %}图片文件无法解码{% elif why == 'empty' %}没有选择文件{% else %}请换一张图片重试{% endif %}。</div>
+            {% endif %}
+            <form method="post" action="/manage/contents/{{ content.id }}/cover" enctype="multipart/form-data"
+                  class="d-flex flex-wrap align-items-end gap-2">
+                <input type="hidden" name="next" value="/contents/{{ content.id }}">
+                <div>
+                    <label class="form-label small fw-semibold mb-1" for="cover-file">上传封面（jpg / png / webp / gif，≤ 5 MB）</label>
+                    <input class="form-control form-control-sm" type="file" id="cover-file" name="cover"
+                           accept="image/jpeg,image/png,image/webp,image/gif" required>
+                </div>
+                <button class="btn btn-sm btn-outline-primary" type="submit">上传封面</button>
+            </form>
+        </div>
+        {% endif %}
 
         {% if content.source_url %}
         <p class="text-muted small mt-3 mb-0">

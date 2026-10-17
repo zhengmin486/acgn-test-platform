@@ -834,6 +834,28 @@ hr {
     user-select: none;
 }
 
+/* 本地封面图（Bangumi 导入时下载到 /covers）：与渐变占位同尺寸，裁切填满不变形 */
+img.detail-cover {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+/* 详情页封面盒：占位层与图片层同位置叠放；图片走 /media/full/ 压缩端点，
+   加载失败时前端 onerror 隐藏图片，露出占位层（见 detail.html）。 */
+.detail-cover-box {
+    position: relative;
+    width: 108px;
+    height: 148px;
+    flex: 0 0 auto;
+}
+.detail-cover-box > .detail-cover {
+    position: absolute;
+    inset: 0;
+}
+
 /* 白字小徽标：渐变用 brand-700 起步（brand-500/600 上白字不达标，深一档青绿保障 AA） */
 .detail-type-badge {
     background: var(--brand-400);
@@ -973,6 +995,29 @@ hr {
     font-weight: 800;
     text-shadow: 0 1px 0 rgba(255, 255, 255, 0.35);
     user-select: none;
+}
+
+/* 列表封面盒：占位层与图片层同位置叠放；图片走 /media/thumb/ 缩略图端点，
+   加载失败时前端 onerror 隐藏图片，露出占位层（contents / index / space）。 */
+.work-cover-box {
+    position: relative;
+    display: block;
+    height: 104px;
+}
+.work-cover-box > .work-cover {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+}
+
+/* 本地封面图版本：撑满卡片头部、裁切不变形（见 contents.html / index.html / space.html） */
+img.work-cover {
+    position: absolute;
+    inset: 0;
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
 }
 
 .work-card-body {

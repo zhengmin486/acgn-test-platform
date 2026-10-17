@@ -11,6 +11,7 @@ from fastapi import Depends, Request
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
+from app import media
 from app.database import get_db
 
 # 复用的依赖注解：模块级定义一次，各页面签名直接引用（FastAPI 推荐写法）。
@@ -32,6 +33,11 @@ templates = Jinja2Templates(
     directory=str(BASE_DIR / "templates"),
     context_processors=[_inject_current_user],
 )
+
+# 封面图片助手（模板全局）：本地封面走 /media 派生图端点（缩略图 / 压缩全图），
+# 远端完整地址原样透传；模板里直接 {{ thumb_src(item.image_url) }}。
+templates.env.globals["thumb_src"] = media.thumb_src
+templates.env.globals["full_src"] = media.full_src
 
 
 # 按 404 主体归属选择所属区域的布局与返回入口：
