@@ -1,0 +1,37 @@
+{# 内容管理二级导航（内容平台 → 内容管理，/manage/*）。
+   只列内容数据运营相关的页面；账号 / 邀请码 / 角色属于「站点设置」，
+   见 _settings_nav.html。本导航只出现在继承 base_content.html 的页面里。 #}
+{% set admin_path = request.url.path %}
+<ul class="nav data-subnav mb-3">
+    <li class="nav-item">
+        <a class="nav-link{% if admin_path == '/manage' %} active{% endif %}" href="/manage">总览</a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link{% if admin_path.startswith('/manage/contents') %} active{% endif %}"
+           href="/manage/contents">作品数据</a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link{% if admin_path.startswith('/manage/entities') %} active{% endif %}"
+           href="/manage/entities">关联管理</a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link{% if admin_path.startswith('/manage/articles') %} active{% endif %}"
+           href="/manage/articles">资讯数据</a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link{% if admin_path.startswith('/manage/schedules') %} active{% endif %}"
+           href="/manage/schedules">新番档期</a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link{% if admin_path == '/manage/sync' %} active{% endif %}"
+           href="/manage/sync">数据同步</a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link{% if admin_path.startswith('/manage/sync/runs') %} active{% endif %}"
+           href="/manage/sync/runs">同步历史</a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link{% if admin_path.startswith('/manage/submissions') %} active{% endif %}"
+           href="/manage/submissions">词条审核</a>
+    </li>
+</ul>

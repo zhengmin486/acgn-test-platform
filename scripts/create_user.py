@@ -1,14 +1,18 @@
-"""账号管理脚本：创建 / 重置密码 / 查看平台账号（user 与 admin）。
+"""账号管理脚本：创建 / 重置密码 / 查看平台账号（user / admin / owner）。
 
 用法示例：
     # 创建管理员
     python scripts/create_user.py --username alice --role admin
+    # 创建站长（最高级角色，可进角色管理页调整他人角色）
+    python scripts/create_user.py --username root --role owner
     # 创建普通用户（密码从命令行读取，不落历史）
     python scripts/create_user.py --username bob --role user --password '你的密码'
     # 创建时绑定邮箱（管理员创建的账号一律视为已验证，无需再走验证邮件）
     python scripts/create_user.py --username carol --email carol@example.com
     # 重置已有账号密码
     python scripts/create_user.py --username alice --reset-password --password '新密码'
+    # 仅修改已有账号角色（不动密码）：把现有管理员提升为站长
+    python scripts/create_user.py --username alice --set-role owner
     # 仅列出账号（不显示密码哈希）
     python scripts/create_user.py --list
 
@@ -70,10 +74,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--username", help="账号用户名")
     parser.add_argument("--email", help="可选：绑定邮箱；管理员创建的账号一律视为已验证")
     parser.add_argument("--role", choices=list(crud.VALID_ROLES), default=crud.ROLE_USER,
-                        help="账号角色：user（默认）或 admin")
+                        help="账号角色：user（默认）、admin 或 owner（站长）")
     parser.add_argument("--password", help="密码；不提供则交互输入（推荐）")
     parser.add_argument("--reset-password", action="store_true",
                         help="账号已存在时重置其密码（并可选更新角色）")
+    parser.add_argument("--set-role", choices=list(crud.VALID_ROLES),
+                        help="仅修改已有账号的角色（不改密码），用于提升/降级现有账号")
     parser.add_argument("--list", action="store_true", help="列出全部账号后退出")
     parser.add_argument("--database-url", default=settings.database_url,
                         help="数据库连接串（默认取配置 / .env）")
@@ -94,6 +100,15 @@ def main(argv: list[str] | None = None) -> int:
 
         existing = crud.get_user_by_username(db, args.username.strip())
         if existing is not None:
+            if args.set_role:
+                # 只改角色：不动密码，方便把现有账号提升为站长后再自行降级。
+                try:
+                    crud.set_user_role(db, existing, args.set_role)
+                except ValueError as exc:
+                    print(f"修改角色失败：{exc}")
+                    return 1
+                print(f"已将账号 {existing.username} 的角色改为 {existing.role}。")
+                return 0
             if not args.reset_password:
                 print(f"账号已存在：{existing.username}（角色={existing.role}）。"
                       f"如需重置密码请加 --reset-password。")

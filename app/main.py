@@ -11,13 +11,16 @@ from fastapi import Depends, FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from app import (
-    admin_pages,
     api,
     auth,
     business_pages,
     cases,
+    content_admin_pages,
     cover_admin,
     crud,
+    legacy_redirects,
+    persona_pages,
+    site_admin_pages,
     space_pages,
     submission_pages,
     testing_pages,
@@ -31,6 +34,7 @@ from app.auth import (
     require_admin_api,
     require_admin_page,
 )
+from app.config import settings
 from app.database import engine
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -55,11 +59,30 @@ app.include_router(submission_pages.router)
 # 封面图片上传（/manage/contents/{id}/cover，仅 staff）：管理员给作品补图 / 换图，
 # 与导入落地的封面同一条 app/media.py 管线（校验 → 落盘 → 双尺寸派生）。
 app.include_router(cover_admin.router)
+# 阿宅画像（/me/persona）：登录用户绑定 Bangumi 用户名、同步公开收藏并生成画像。
+app.include_router(persona_pages.router)
+# 免登录试算（/persona）：引流入口，不写库、不建账号，只渲染当次结果。
+app.include_router(persona_pages.public_router)
 # 测试管理平台页面：仅管理员可访问（未登录跳登录页、越权 403）。
 app.include_router(testing_pages.router, dependencies=[Depends(require_admin_page)])
-# 数据管理页面（测试管理平台 → 数据管理）：同样仅管理员可访问。
-app.include_router(admin_pages.router, dependencies=[Depends(require_admin_page)])
+# 内容管理页面（内容平台 → 内容管理，/manage/*）：同样仅管理员可访问。
+app.include_router(content_admin_pages.router, dependencies=[Depends(require_admin_page)])
+# 站点设置页面（内容平台 → 站点设置，/admin/*）：仅管理员可访问；
+# 角色管理在路由内再叠一层 require_owner_page（仅站长）。
+app.include_router(site_admin_pages.router, dependencies=[Depends(require_admin_page)])
+# 旧地址兼容：/admin/data* 与 /schedule/runs 跳转到新地址。
+# 放在最后，避免 catch-all 抢在真实路由之前匹配。
+app.include_router(legacy_redirects.router)
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
+
+# 封面图静态目录：Bangumi 导入时下载到 cover_storage_dir（配置可为项目内
+# 相对路径或其它盘符的绝对路径），统一挂到 /covers，Content.image_url 存
+# /covers/<文件名> 引用。目录不存在则创建，保证首次导入前挂载就有效。
+COVER_DIR = Path(settings.cover_storage_dir)
+if not COVER_DIR.is_absolute():
+    COVER_DIR = BASE_DIR.parent / COVER_DIR
+COVER_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/covers", StaticFiles(directory=COVER_DIR), name="covers")
 
 # 页面级拒绝的统一处理：未登录 -> 登录页；权限不足 -> 403 页面。
 app.add_exception_handler(LoginRequired, login_required_handler)

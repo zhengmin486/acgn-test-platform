@@ -1,11 +1,11 @@
-{% extends "base_admin.html" %}
+{% extends "base_content.html" %}
 {% from "_pager.html" import pager %}
 {# 作品数据管理：查看 / 删除 / 批量删除 #}
-{% block title %}作品数据 - 测试管理平台{% endblock %}
+{% block title %}作品数据 - ACGN 内容平台{% endblock %}
 {% block content %}
 <h1 class="h3 mb-1 section-heading">作品数据</h1>
 <p class="text-muted small mb-3">共 {{ total }} 条作品。删除为真实写库操作，只删除所选条目。</p>
-{% include "_data_nav.html" %}
+{% include "_manage_nav.html" %}
 
 {% if deleted is not none %}
 <div class="alert {% if deleted > 0 %}alert-success{% else %}alert-warning{% endif %} py-2">
@@ -13,7 +13,7 @@
 </div>
 {% endif %}
 
-<form class="row g-2 align-items-end mb-3" method="get" action="/admin/data/contents">
+<form class="row g-2 align-items-end mb-3" method="get" action="/manage/contents">
     <div class="col-sm-5 col-md-4">
         <label class="form-label" for="q">关键词</label>
         <input class="form-control form-control-sm" id="q" name="q" value="{{ q }}"
@@ -30,13 +30,13 @@
     </div>
     <div class="col-auto">
         <button class="btn btn-sm btn-primary" type="submit">筛选</button>
-        <a class="btn btn-sm btn-outline-secondary" href="/admin/data/contents">重置</a>
+        <a class="btn btn-sm btn-outline-secondary" href="/manage/contents">重置</a>
     </div>
 </form>
 
 {# 批量删除表单：只承载隐藏的筛选条件；勾选框与批量按钮用 form 属性归入本表单，
    单条删除按钮各自使用所在单元格内的独立表单，避免出现嵌套表单。 #}
-<form id="bulk-delete" method="post" action="/admin/data/contents/delete">
+<form id="bulk-delete" method="post" action="/manage/contents/delete">
     <input type="hidden" name="q" value="{{ q }}">
     <input type="hidden" name="type" value="{{ content_type }}">
     <input type="hidden" name="page" value="{{ page }}">
@@ -74,7 +74,7 @@
             </td>
             <td class="text-nowrap">
                 <a class="btn btn-sm btn-outline-secondary" href="/contents/{{ c.id }}">查看</a>
-                <form method="post" action="/admin/data/contents/delete" class="d-inline">
+                <form method="post" action="/manage/contents/delete" class="d-inline">
                     <input type="hidden" name="ids" value="{{ c.id }}">
                     <input type="hidden" name="q" value="{{ q }}">
                     <input type="hidden" name="type" value="{{ content_type }}">
@@ -90,7 +90,7 @@
 
 <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mt-3">
     <button class="btn btn-sm btn-danger" type="submit" form="bulk-delete">批量删除选中</button>
-    {{ pager('/admin/data/contents?q=' ~ (q|urlencode) ~ '&type=' ~ (content_type|urlencode) ~ '&', page, total_pages) }}
+    {{ pager('/manage/contents?q=' ~ (q|urlencode) ~ '&type=' ~ (content_type|urlencode) ~ '&', page, total_pages) }}
 </div>
 {% endif %}
 {% endblock %}

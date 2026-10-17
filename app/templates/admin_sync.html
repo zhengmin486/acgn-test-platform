@@ -1,9 +1,9 @@
-{% extends "base_admin.html" %}
+{% extends "base_content.html" %}
 {# 数据同步：选择数据源与范围 → 预览 → 确认写入。
    预览与正式走同一条执行路径，确认按钮只在预览结果上出现；
    表单之间不嵌套（范围表单 / 预览按钮 / 确认表单是并列关系）。
    确认写入主入口与「预览」按钮并排（.sync-actions 操作行），明细表下方再留次要入口。 #}
-{% block title %}数据同步 - 测试管理平台{% endblock %}
+{% block title %}数据同步 - ACGN 内容平台{% endblock %}
 
 {# 确认写入表单：与范围表单并列（不嵌套），参数沿用预览时提交的原始范围值
    （资讯的 result.scope 是展示文本、不可再解析，必须回传 form_scope/form_limit）。
@@ -11,7 +11,7 @@
    prominent=False → 次要入口，放在逐条明细表下方，滚到底也能确认。 #}
 {% macro confirm_block(prominent) %}
 {% if can_confirm %}
-<form method="post" action="/admin/data/sync/apply"
+<form method="post" action="/manage/sync/apply"
       class="sync-confirm{% if prominent %} sync-confirm-prominent{% endif %}">
     <input type="hidden" name="task" value="{{ result.task_key }}">
     <input type="hidden" name="scope" value="{{ form_scope }}">
@@ -43,7 +43,7 @@
     选择数据源与同步范围，先预览再确认写入。预览只读取源数据并汇总结果，不写业务数据；
     确认后按同一范围正式同步（重复数据按各自规则跳过或更新，不覆盖本地不应覆盖的内容）。
 </p>
-{% include "_data_nav.html" %}
+{% include "_manage_nav.html" %}
 
 {% if error %}
 <div class="alert alert-danger py-2 small mb-3" role="alert">{{ error }}</div>
@@ -54,7 +54,7 @@
     {% for t in tasks %}
     <li class="nav-item">
         <a class="nav-link{% if t.key == spec.key %} active{% endif %}"
-           href="/admin/data/sync?task={{ t.key }}">{{ t.label }}</a>
+           href="/manage/sync?task={{ t.key }}">{{ t.label }}</a>
     </li>
     {% endfor %}
 </ul>
@@ -70,7 +70,7 @@
                 {# 范围表单：只装字段；表单末尾保留一个不可见的默认提交按钮，
                    使在文本框里按回车也能触发预览。可见按钮在下方 .sync-actions 行，
                    预览按钮经 form 属性归属本表单；确认写入是并列的独立表单，不嵌套。#}
-                <form method="post" action="/admin/data/sync/preview" id="sync-preview-form">
+                <form method="post" action="/manage/sync/preview" id="sync-preview-form">
                     <input type="hidden" name="task" value="{{ spec.key }}">
 
                     {% if spec.scope_kind == "ids" %}
@@ -207,6 +207,12 @@
                 {% if not can_confirm and result.mode == mode_apply %}
                 <p class="text-muted small mb-0">本次为正式写入结果，已记录到同步历史。</p>
                 {% endif %}
+                {% if result.mode == mode_apply %}
+                <p class="small mb-0 mt-2">
+                    数据已变更，建议执行一次回归批次，确认接口没被这次同步影响 →
+                    <a href="/testcases">去执行回归</a>
+                </p>
+                {% endif %}
             </div>
         </div>
         {% endif %}
@@ -239,7 +245,7 @@
                                 </td>
                                 <td class="text-truncate" style="max-width: 8rem;" title="{{ r.scope }}">{{ r.scope }}</td>
                                 <td class="text-nowrap">
-                                    <a href="/admin/data/sync?task={{ r.task_key }}&run={{ r.id }}">查看</a>
+                                    <a href="/manage/sync?task={{ r.task_key }}&run={{ r.id }}">查看</a>
                                 </td>
                             </tr>
                             {% endfor %}

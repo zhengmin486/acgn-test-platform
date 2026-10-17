@@ -53,13 +53,16 @@ _MISSING_SECTIONS = {
                "back_href": "/runs", "back_label": "返回执行历史"},
     "执行批次": {"layout": "base_admin.html", "platform": "测试管理平台",
                "back_href": "/batches", "back_label": "返回批次列表"},
-    # 数据管理（测试管理平台 → 数据管理）下的主体
-    "作品数据": {"layout": "base_admin.html", "platform": "测试管理平台",
-               "back_href": "/admin/data/contents", "back_label": "返回作品数据"},
-    "资讯数据": {"layout": "base_admin.html", "platform": "测试管理平台",
-               "back_href": "/admin/data/articles", "back_label": "返回资讯数据"},
-    "档期作品": {"layout": "base_admin.html", "platform": "测试管理平台",
-               "back_href": "/admin/data/schedules", "back_label": "返回新番档期"},
+    # 数据管理（内容平台 → 内容管理）下的主体：404 也留在内容平台
+    "作品数据": {"layout": "base_content.html", "platform": "ACGN 内容平台",
+               "back_href": "/manage/contents", "back_label": "返回作品数据"},
+    "资讯数据": {"layout": "base_content.html", "platform": "ACGN 内容平台",
+               "back_href": "/manage/articles", "back_label": "返回资讯数据"},
+    "档期作品": {"layout": "base_content.html", "platform": "ACGN 内容平台",
+               "back_href": "/manage/schedules", "back_label": "返回新番档期"},
+    # 作者/公司索引（作品关系）：404 回到索引页
+    "作者/公司": {"layout": "base_content.html", "platform": "ACGN 内容平台",
+               "back_href": "/creators", "back_label": "返回作者/公司索引"},
 }
 _MISSING_DEFAULT = {"layout": "base_content.html", "platform": "ACGN 内容平台",
                     "back_href": "/", "back_label": "返回列表"}

@@ -1,11 +1,11 @@
-{% extends "base_admin.html" %}
+{% extends "base_content.html" %}
 {% from "_pager.html" import pager %}
 {# 资讯数据管理：查看 / 删除（含未发布文章，便于核对） #}
-{% block title %}资讯数据 - 测试管理平台{% endblock %}
+{% block title %}资讯数据 - ACGN 内容平台{% endblock %}
 {% block content %}
 <h1 class="h3 mb-1 section-heading">资讯数据</h1>
 <p class="text-muted small mb-3">共 {{ total }} 篇文章（含未发布）。删除为真实写库操作。</p>
-{% include "_data_nav.html" %}
+{% include "_manage_nav.html" %}
 
 {% if deleted is not none %}
 <div class="alert {% if deleted > 0 %}alert-success{% else %}alert-warning{% endif %} py-2">
@@ -13,7 +13,7 @@
 </div>
 {% endif %}
 
-<form class="row g-2 align-items-end mb-3" method="get" action="/admin/data/articles">
+<form class="row g-2 align-items-end mb-3" method="get" action="/manage/articles">
     <div class="col-sm-6 col-md-4">
         <label class="form-label" for="q">关键词</label>
         <input class="form-control form-control-sm" id="q" name="q" value="{{ q }}"
@@ -21,7 +21,7 @@
     </div>
     <div class="col-auto">
         <button class="btn btn-sm btn-primary" type="submit">筛选</button>
-        <a class="btn btn-sm btn-outline-secondary" href="/admin/data/articles">重置</a>
+        <a class="btn btn-sm btn-outline-secondary" href="/manage/articles">重置</a>
     </div>
 </form>
 
@@ -61,7 +61,7 @@
             <td class="text-muted small">{{ a.published_at.strftime('%Y-%m-%d %H:%M') }}</td>
             <td class="text-nowrap">
                 <a class="btn btn-sm btn-outline-secondary" href="/articles/{{ a.id }}">查看</a>
-                <form method="post" action="/admin/data/articles/{{ a.id }}/delete" class="d-inline">
+                <form method="post" action="/manage/articles/{{ a.id }}/delete" class="d-inline">
                     <input type="hidden" name="q" value="{{ q }}">
                     <input type="hidden" name="page" value="{{ page }}">
                     <button class="btn btn-sm btn-outline-danger" type="submit">删除</button>
@@ -74,7 +74,7 @@
 </div>
 
 <div class="d-flex flex-wrap justify-content-end align-items-center gap-2 mt-3">
-    {{ pager('/admin/data/articles?q=' ~ (q|urlencode) ~ '&', page, total_pages) }}
+    {{ pager('/manage/articles?q=' ~ (q|urlencode) ~ '&', page, total_pages) }}
 </div>
 {% endif %}
 {% endblock %}

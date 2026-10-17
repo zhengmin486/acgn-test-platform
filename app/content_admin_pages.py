@@ -1,37 +1,37 @@
-"""数据管理页面路由（测试管理平台 → 数据管理）。
+"""内容管理页面路由（内容平台 → 内容管理，/manage/*）。
 
-面向管理员的数据维护入口，管理内容平台的三类数据：
-
-- 作品数据（contents）：查看 / 删除 / 批量删除；
-- 资讯数据（articles）：查看 / 删除；
-- 新番档期（anime_schedules）：查看 / 删除 / 重新同步；
-- 数据同步：选择数据源与范围 → 预览 → 确认写入 → 查看结果与历史。
+面向管理员的内容运营入口：作品 / 资讯 / 新番档期 / 数据同步 / 同步历史 / 词条审核。
+数据全部来自 app.crud 与 app.sync_tasks，不依赖测试平台的任何模块；
+账号 / 邀请码 / 角色等站点治理在 app.site_admin_pages。
 
 设计约束：
-- 全部页面挂在 /admin/data 下，由 app.main 用 require_admin_page 统一守卫，
-  因此这里不重复鉴权：未登录会跳登录页，已登录但不是管理员会得到 403 页面；
-- 删除是单表的真实写库操作，只删除所提交的主键，不做级联清理，
-  也不触碰其它模块的数据（与既有测试平台 / 内容平台互不影响）；
-- 「重新同步」复用既有同步流程（scripts/sync_yuc_schedule.run_sync），
-  不复制也不修改同步逻辑；外部网络失败时把原因回显到页面，应用其它功能不受影响；
-- 「数据同步」页同样只做编排：三类数据源的实际同步逻辑集中在 app.sync_tasks，
-  该模块调用既有脚本/流程，本文件只负责表单、预览/确认两步与结果展示。
+- 页面挂在 /manage 下，由 app.main 用 require_admin_page 统一守卫；
+- 删除只按主键删除单表记录，不做级联，也不触碰其它模块的数据；
+- 「重新同步」复用 scripts/sync_yuc_schedule.run_sync；「数据同步」只做编排，逻辑在 app.sync_tasks；
+- 表单写操作统一 PRG：303 + 查询参数回显。
 """
 
-import math
-from urllib.parse import quote, urlencode
+from datetime import datetime
 
 from fastapi import APIRouter, Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from app import crud, mailer, sync_tasks
+from app import crud, sync_tasks
+from app.admin_common import (
+    actor_id as _actor_id,
+    collect_ids as _collect_ids,
+    form_text as _form_text,
+    page_count as _pages,
+    page_param as _page_param,
+    short_text as _short,
+    url_with as _url,
+)
 from app.business_pages import CONTENT_TYPE_LABELS, WEEKDAY_NAMES
-from app.config import settings
 from app.database import SessionLocal
 from app.page_common import DbSession, render_missing, templates
 from scripts.sync_yuc_schedule import SeasonNotFoundError, YucFetchError, run_sync
 
-router = APIRouter(tags=["admin-data"])
+router = APIRouter(tags=["content-admin"])
 
 # 管理列表每页条数：内容量不大，固定 20 条便于逐页核对与批量勾选。
 PAGE_SIZE = 20
@@ -41,50 +41,6 @@ SYNC_HISTORY_LIMIT = 20
 
 # 词条审核列表每页条数：与作品数据列表保持一致，便于逐页核对。
 SUBMISSION_PAGE_SIZE = 20
-
-# 重新同步失败原因的展示上限：过长信息截断，避免撑爆地址栏与页面。
-RESYNC_REASON_MAX = 300
-
-
-# ---------- 小工具 ----------
-
-
-def _pages(total: int, page_size: int = PAGE_SIZE) -> int:
-    """总页数（至少 1，便于模板统一渲染分页）。"""
-    return max(1, math.ceil(total / page_size)) if total else 1
-
-
-def _url(path: str, **params) -> str:
-    """拼装带查询参数的站内地址；空字符串参数自动忽略。"""
-    clean = {key: value for key, value in params.items() if value is not None and value != ""}
-    return f"{path}?{urlencode(clean)}" if clean else path
-
-
-def _page_param(value) -> str | None:
-    """页码回传：第 1 页不写入地址，保持 URL 简洁。"""
-    text = str(value).strip()
-    return None if text in ("", "0", "1") else text
-
-
-def _form_text(form, key: str) -> str:
-    """取表单里的单个文本字段（不存在时返回空串）。"""
-    return str(form.get(key, "")).strip()
-
-
-def _collect_ids(values) -> list[int]:
-    """把表单里的 ids 原始值转成合法主键列表；非数字项直接忽略。"""
-    ids: list[int] = []
-    for value in values:
-        text = str(value).strip()
-        if text.isdigit():
-            ids.append(int(text))
-    return ids
-
-
-def _short(text: str, limit: int = RESYNC_REASON_MAX) -> str:
-    """折叠空白并截断过长提示。"""
-    collapsed = " ".join(text.split())
-    return collapsed if len(collapsed) <= limit else collapsed[: limit - 1] + "…"
 
 
 def _clean_content_type(value: str) -> str | None:
@@ -121,9 +77,44 @@ def run_sync_task(
 # ---------- 数据管理总览 ----------
 
 
-@router.get("/admin/data", response_class=HTMLResponse)
+def _relative_time(value: datetime | None, now: datetime | None = None) -> str:
+    """相对时间文案：刚刚 / N 分钟前 / N 小时前 / N 天前（质量条用来标注数据新旧）。"""
+    if value is None:
+        return ""
+    now = now or datetime.now()
+    seconds = max(0, int((now - value).total_seconds()))
+    if seconds < 60:
+        return "刚刚"
+    if seconds < 3600:
+        return f"{seconds // 60} 分钟前"
+    if seconds < 86400:
+        return f"{seconds // 3600} 小时前"
+    return f"{seconds // 86400} 天前"
+
+
+def _quality_summary(batch, now: datetime | None = None):
+    """质量条数据：最近一次回归批次的通过率与时间；没有批次返回 None。
+
+    通过率口径与批次详情页一致：passed / total，空批次（total=0）为 None 而不是 0%。
+    超过 24 小时的批次标记为「可能已过期」——批次是手动触发的，旧结果不代表当前代码。
+    """
+    if batch is None:
+        return None
+    now = now or datetime.now()
+    finished = batch.finished_at or batch.started_at
+    age = (now - finished).total_seconds() if finished else 0
+    return {
+        "batch": batch,
+        "pass_rate": round(batch.passed / batch.total * 100, 1) if batch.total else None,
+        "when": _relative_time(finished, now),
+        "stale": age > 24 * 3600,
+    }
+
+
+@router.get("/manage", response_class=HTMLResponse)
 def data_overview(request: Request, db: DbSession):
-    """数据管理总览：三类数据的当前规模与各自入口。"""
+    """数据管理总览：三类数据的当前规模与各自入口 + 最近一次回归批次的质检条。"""
+    batches = crud.list_batches(db)
     return templates.TemplateResponse(
         request=request,
         name="admin_data.html",
@@ -132,6 +123,7 @@ def data_overview(request: Request, db: DbSession):
             "article_total": crud.count_articles(db),
             "schedule_total": crud.count_schedules(db),
             "season_total": crud.count_schedule_seasons(db),
+            "quality": _quality_summary(batches[0] if batches else None),
         },
     )
 
@@ -139,7 +131,7 @@ def data_overview(request: Request, db: DbSession):
 # ---------- 作品数据 ----------
 
 
-@router.get("/admin/data/contents", response_class=HTMLResponse)
+@router.get("/manage/contents", response_class=HTMLResponse)
 def contents_page(
     request: Request,
     db: DbSession,
@@ -170,7 +162,7 @@ def contents_page(
     )
 
 
-@router.post("/admin/data/contents/delete")
+@router.post("/manage/contents/delete")
 async def delete_contents_page(request: Request, db: DbSession):
     """删除作品：同一入口同时支持单条与批量删除。
 
@@ -182,7 +174,7 @@ async def delete_contents_page(request: Request, db: DbSession):
     deleted = crud.delete_contents(db, ids)
     return RedirectResponse(
         _url(
-            "/admin/data/contents",
+            "/manage/contents",
             q=_form_text(form, "q"),
             type=_form_text(form, "type"),
             page=_page_param(_form_text(form, "page")),
@@ -192,10 +184,159 @@ async def delete_contents_page(request: Request, db: DbSession):
     )
 
 
+# ---------- 关联管理（作品关系：作者 / 公司 / 系列） ----------
+
+# 管理端可选的关联角色及默认实体类型：与 app/entity_links 的白名单一致，
+# 公司类角色落 company，其余落 person。角色也可用「自定义」自由填写
+# （Bangumi 信息卡的角色远不止这几种）。
+ENTITY_ROLE_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("原作", crud.ENTITY_TYPE_PERSON),
+    ("插画", crud.ENTITY_TYPE_PERSON),
+    ("导演", crud.ENTITY_TYPE_PERSON),
+    ("音乐", crud.ENTITY_TYPE_PERSON),
+    ("角色设计", crud.ENTITY_TYPE_PERSON),
+    ("系列构成", crud.ENTITY_TYPE_PERSON),
+    ("动画制作", crud.ENTITY_TYPE_COMPANY),
+    ("出版社", crud.ENTITY_TYPE_COMPANY),
+    ("发行", crud.ENTITY_TYPE_COMPANY),
+)
+
+# 操作结果回显码（PRG 后由查询参数带回，模板映射为中文提示）。
+ENTITY_NOTES = {
+    "added": "已添加作者/公司关联。",
+    "exists": "该关联已存在，未重复添加。",
+    "removed": "已删除作者/公司关联。",
+    "link_missing": "关联不存在（可能已被删除）。",
+    "content_missing": "作品不存在。",
+    "series_saved": "已设置所属系列。",
+    "series_cleared": "已清除所属系列。",
+    "bad_input": "名称或角色为空，未做任何修改。",
+}
+
+
+@router.get("/manage/entities", response_class=HTMLResponse)
+def entities_page(
+    request: Request,
+    db: DbSession,
+    q: str = Query(default=""),
+    page: int = Query(default=1, ge=1),
+    note: str = Query(default=""),
+):
+    """关联管理：按作品维护「作者/公司关联」与「所属系列」。
+
+    自动识别（导入 / scripts/link_entities.py）覆盖不了的边角用例在这里
+    手工补删：补一个信息卡没解析出来的作者、删一个错认的公司、把两部
+    作品归入同一个系列。写操作统一 PRG（303 + 查询参数回显）。
+    """
+    keyword = q.strip()
+    total, contents = crud.search_contents_page(
+        db, keyword=keyword, page=page, page_size=PAGE_SIZE
+    )
+    rows = []
+    for content in contents:
+        rows.append(
+            {
+                "content": content,
+                "links": crud.list_content_entity_links(db, content.id),
+                "series": crud.get_series(db, content.series_id) if content.series_id else None,
+            }
+        )
+    return templates.TemplateResponse(
+        request=request,
+        name="admin_entities.html",
+        context={
+            "rows": rows,
+            "total": total,
+            "page": page,
+            "total_pages": _pages(total),
+            "q": q,
+            "note": note,
+            "note_text": ENTITY_NOTES.get(note, ""),
+            "role_options": ENTITY_ROLE_OPTIONS,
+            "entity_type_labels": crud.ENTITY_TYPE_LABELS,
+        },
+    )
+
+
+@router.post("/manage/entities/link/add")
+def add_entity_link_page(
+    request: Request,
+    db: DbSession,
+    content_id: int = Form(...),
+    name: str = Form(""),
+    role: str = Form(""),
+    role_custom: str = Form(""),
+    q: str = Form(""),
+    page: str = Form("1"),
+):
+    """给指定作品手工补一条作者/公司关联；作品不存在返回 404 页面。"""
+    content = crud.get_content(db, content_id)
+    if content is None:
+        return render_missing(request, "作品数据", content_id)
+    final_role = (role_custom or "").strip() or role.strip()
+    role_type = dict(ENTITY_ROLE_OPTIONS).get(role, crud.ENTITY_TYPE_PERSON)
+    ok, _message = crud.add_content_entity_link(
+        db, content_id, name, final_role, role_type
+    )
+    # 名称或角色为空时 add_content_entity_link 返回 False（bad_input）；
+    # 已存在的组合它返回 True 并提示「已存在」，这里同样按 added 回显。
+    note = "added" if ok else "bad_input"
+    return RedirectResponse(
+        _url(
+            "/manage/entities",
+            q=q,
+            page=_page_param(page),
+            note=note,
+        ),
+        status_code=303,
+    )
+
+
+@router.post("/manage/entities/link/delete")
+def delete_entity_link_page(
+    request: Request,
+    db: DbSession,
+    link_id: int = Form(...),
+    q: str = Form(""),
+    page: str = Form("1"),
+):
+    """删除一条作品-实体关联（手工纠错；关联不存在时仅提示，不报错）。"""
+    if crud.delete_content_entity_link(db, link_id):
+        note = "removed"
+    else:
+        note = "link_missing"
+    return RedirectResponse(
+        _url("/manage/entities", q=q, page=_page_param(page), note=note),
+        status_code=303,
+    )
+
+
+@router.post("/manage/entities/series")
+def set_content_series_page(
+    request: Request,
+    db: DbSession,
+    content_id: int = Form(...),
+    series: str = Form(""),
+    action: str = Form("save"),
+    q: str = Form(""),
+    page: str = Form("1"),
+):
+    """设置 / 清除作品的所属系列；action=clear 或系列名为空都视为清除。"""
+    content = crud.get_content(db, content_id)
+    if content is None:
+        return render_missing(request, "作品数据", content_id)
+    final = crud.set_content_series(db, content_id, "" if action == "clear" else series)
+    note = "series_saved" if final else "series_cleared"
+    return RedirectResponse(
+        _url("/manage/entities", q=q, page=_page_param(page), note=note),
+        status_code=303,
+    )
+
+
 # ---------- 资讯数据 ----------
 
 
-@router.get("/admin/data/articles", response_class=HTMLResponse)
+@router.get("/manage/articles", response_class=HTMLResponse)
 def articles_page(
     request: Request,
     db: DbSession,
@@ -222,7 +363,7 @@ def articles_page(
     )
 
 
-@router.post("/admin/data/articles/{article_id}/delete")
+@router.post("/manage/articles/{article_id}/delete")
 def delete_article_page(
     request: Request,
     article_id: int,
@@ -236,7 +377,7 @@ def delete_article_page(
         return render_missing(request, "资讯数据", article_id)
     deleted = crud.delete_articles(db, [article_id])
     return RedirectResponse(
-        _url("/admin/data/articles", q=q.strip(), page=_page_param(page), deleted=deleted),
+        _url("/manage/articles", q=q.strip(), page=_page_param(page), deleted=deleted),
         status_code=303,
     )
 
@@ -244,7 +385,7 @@ def delete_article_page(
 # ---------- 新番档期 ----------
 
 
-@router.get("/admin/data/schedules", response_class=HTMLResponse)
+@router.get("/manage/schedules", response_class=HTMLResponse)
 def schedules_page(
     request: Request,
     db: DbSession,
@@ -289,7 +430,7 @@ def schedules_page(
     )
 
 
-@router.post("/admin/data/schedules/{schedule_id}/delete")
+@router.post("/manage/schedules/{schedule_id}/delete")
 def delete_schedule_page(
     request: Request,
     schedule_id: int,
@@ -308,7 +449,7 @@ def delete_schedule_page(
     deleted = crud.delete_schedules(db, [schedule_id])
     return RedirectResponse(
         _url(
-            "/admin/data/schedules",
+            "/manage/schedules",
             season=season.strip(),
             q=q.strip(),
             page=_page_param(page),
@@ -318,7 +459,7 @@ def delete_schedule_page(
     )
 
 
-@router.post("/admin/data/schedules/resync")
+@router.post("/manage/schedules/resync")
 def resync_schedule_page(
     season_code: str = Form(""),
     season: str = Form(""),
@@ -334,20 +475,20 @@ def resync_schedule_page(
     base = {"season": season.strip(), "q": q.strip(), "page": _page_param(page)}
     if not code:
         return RedirectResponse(
-            _url("/admin/data/schedules", **base, resync="error", reason="缺少档期参数"),
+            _url("/manage/schedules", **base, resync="error", reason="缺少档期参数"),
             status_code=303,
         )
     try:
         summary = resync_season(code)
     except (YucFetchError, SeasonNotFoundError) as exc:
         return RedirectResponse(
-            _url("/admin/data/schedules", **base, resync="error", reason=_short(str(exc))),
+            _url("/manage/schedules", **base, resync="error", reason=_short(str(exc))),
             status_code=303,
         )
     except Exception as exc:  # 同步过程中的意外错误同样只回显，不中断页面
         return RedirectResponse(
             _url(
-                "/admin/data/schedules",
+                "/manage/schedules",
                 **base,
                 resync="error",
                 reason=_short(f"同步失败：{exc}"),
@@ -356,7 +497,7 @@ def resync_schedule_page(
         )
     return RedirectResponse(
         _url(
-            "/admin/data/schedules",
+            "/manage/schedules",
             **base,
             resync="ok",
             added=summary.added,
@@ -369,11 +510,6 @@ def resync_schedule_page(
 
 
 # ---------- 数据同步（选择数据源与范围 → 预览 → 确认写入） ----------
-
-
-def _actor_id(request: Request) -> int | None:
-    """当前登录管理员的主键（用于运行记录审计）；未知时返回 None。"""
-    return getattr(getattr(request.state, "current_user", None), "id", None)
 
 
 def _render_sync_page(
@@ -425,7 +561,7 @@ def _render_sync_page(
     )
 
 
-@router.get("/admin/data/sync", response_class=HTMLResponse)
+@router.get("/manage/sync", response_class=HTMLResponse)
 def sync_page(
     request: Request,
     db: DbSession,
@@ -444,7 +580,7 @@ def sync_page(
     )
 
 
-@router.post("/admin/data/sync/preview", response_class=HTMLResponse)
+@router.post("/manage/sync/preview", response_class=HTMLResponse)
 def sync_preview_page(
     request: Request,
     db: DbSession,
@@ -477,7 +613,7 @@ def sync_preview_page(
     )
 
 
-@router.post("/admin/data/sync/apply")
+@router.post("/manage/sync/apply")
 def sync_apply_page(
     request: Request,
     task: str = Form(""),
@@ -498,105 +634,24 @@ def sync_apply_page(
         )
     except (sync_tasks.ScopeError, sync_tasks.TaskBusyError) as exc:
         return RedirectResponse(
-            _url("/admin/data/sync", **base, error=_short(str(exc))), status_code=303
+            _url("/manage/sync", **base, error=_short(str(exc))), status_code=303
         )
     except Exception as exc:
         return RedirectResponse(
-            _url("/admin/data/sync", **base, error=_short(f"同步未完成：{exc}")),
+            _url("/manage/sync", **base, error=_short(f"同步未完成：{exc}")),
             status_code=303,
         )
     if result.run_id is not None:
         return RedirectResponse(
-            _url("/admin/data/sync", **base, run=result.run_id), status_code=303
+            _url("/manage/sync", **base, run=result.run_id), status_code=303
         )
-    return RedirectResponse(_url("/admin/data/sync", **base), status_code=303)
-
-
-# ---------- 账号验证（邮箱验证的人工兜底入口） ----------
-
-
-def _render_accounts_page(
-    request: Request,
-    db,
-    *,
-    verified: str = "",
-    error: str = "",
-    link: str = "",
-    link_user: str = "",
-):
-    return templates.TemplateResponse(
-        request=request,
-        name="admin_accounts.html",
-        context={
-            "pending_users": crud.list_unverified_users(db),
-            "verified": verified,
-            "error": error,
-            "link": link,
-            "link_user": link_user,
-            "smtp_enabled": mailer.smtp_enabled(),
-            "email_verification_enabled": settings.email_verification_enabled,
-        },
-    )
-
-
-@router.get("/admin/accounts", response_class=HTMLResponse)
-def accounts_page(
-    request: Request,
-    db: DbSession,
-    verified: str = Query(default=""),
-    error: str = Query(default=""),
-    link: str = Query(default=""),
-    link_user: str = Query(default=""),
-):
-    """待验证账号列表：管理员可直接放行，或在未配置邮件服务时取得验证链接。"""
-    return _render_accounts_page(
-        request, db, verified=verified, error=error, link=link, link_user=link_user
-    )
-
-
-@router.post("/admin/accounts/{user_id}/verify")
-def verify_account(request: Request, db: DbSession, user_id: int):
-    """管理员手动标记账号为已验证（PRG：303 回列表并回显用户名）。"""
-    account = crud.get_user(db, user_id)
-    if account is None:
-        return RedirectResponse(
-            _url("/admin/accounts", error=f"账号不存在：{user_id}"), status_code=303
-        )
-    crud.mark_email_verified(db, account)
-    return RedirectResponse(
-        _url("/admin/accounts", verified=account.username), status_code=303
-    )
-
-
-@router.post("/admin/accounts/{user_id}/link")
-def account_verification_link(request: Request, db: DbSession, user_id: int):
-    """为指定账号生成一次性验证链接，供管理员转交用户。
-
-    与面向普通用户的 /verify/link 不同，这里**不要求「未配置 SMTP」**：
-    邮件服务故障（配置错误、被拒收）时，管理员仍需要一条可转交的链接兜底。
-    管理员本身就能直接放行账号，因此不存在额外越权风险。
-    每次生成都会让该账号此前的链接失效。
-    """
-    if not settings.email_verification_enabled:
-        return RedirectResponse("/admin/accounts", status_code=303)
-    account = crud.get_user(db, user_id)
-    if account is None or not account.email:
-        return RedirectResponse(
-            _url("/admin/accounts", error=f"账号不存在或无邮箱：{user_id}"), status_code=303
-        )
-    token = crud.issue_email_token(db, account)
-    base = (settings.public_base_url or str(request.base_url)).rstrip("/")
-    verify_url = f"{base}/verify/email?token={quote(token)}"
-    return RedirectResponse(
-        _url("/admin/accounts", link=verify_url, link_user=account.username),
-        status_code=303,
-    )
+    return RedirectResponse(_url("/manage/sync", **base), status_code=303)
 
 
 # ---------- 词条审核 ----------
 
 
-@router.get("/admin/submissions", response_class=HTMLResponse)
+@router.get("/manage/submissions", response_class=HTMLResponse)
 def submissions_page(
     request: Request,
     db: DbSession,
@@ -651,7 +706,7 @@ def submissions_page(
     )
 
 
-@router.post("/admin/submissions/{submission_id}/approve")
+@router.post("/manage/submissions/{submission_id}/approve")
 def approve_submission(request: Request, db: DbSession, submission_id: int):
     """通过词条申请：写入 / 更新 contents；重复处理返回错误提示。"""
     reviewer = getattr(request.state, "current_user", None)
@@ -663,7 +718,7 @@ def approve_submission(request: Request, db: DbSession, submission_id: int):
     )
     return RedirectResponse(
         _url(
-            "/admin/submissions",
+            "/manage/submissions",
             status="approved",
             decided="ok" if error is None else "error",
             reason=error,
@@ -672,7 +727,7 @@ def approve_submission(request: Request, db: DbSession, submission_id: int):
     )
 
 
-@router.post("/admin/submissions/{submission_id}/reject")
+@router.post("/manage/submissions/{submission_id}/reject")
 async def reject_submission(request: Request, db: DbSession, submission_id: int):
     """驳回词条申请：可附驳回说明，内容库不变。"""
     form = await request.form()
@@ -687,10 +742,24 @@ async def reject_submission(request: Request, db: DbSession, submission_id: int)
     )
     return RedirectResponse(
         _url(
-            "/admin/submissions",
+            "/manage/submissions",
             status="rejected",
             decided="ok" if error is None else "error",
             reason=error,
         ),
         status_code=303,
+    )
+
+
+# ---------- 同步历史（内容管理：新番档期的同步记录） ----------
+
+
+@router.get("/manage/sync/runs", response_class=HTMLResponse)
+def schedule_runs_page(request: Request, db: DbSession):
+    """同步历史页（内容管理）：每次同步（含 dry-run 预览）的运行结果。"""
+    total, runs = crud.list_sync_runs(db, limit=100)
+    return templates.TemplateResponse(
+        request=request,
+        name="schedule_runs.html",
+        context={"runs": runs, "total": total},
     )

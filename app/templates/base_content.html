@@ -1,17 +1,28 @@
 {% extends "base.html" %}
-{# ACGN 内容平台布局（面向普通用户）：内容导航（首页 / ACGN 资讯 / 新番档期）
-   + 右侧跨区入口“测试管理”。
-   内容页统一继承本布局；测试管理功能不出现在本导航中。 #}
+{# ACGN 内容平台布局（面向读者 + 内容运营）：内容导航（首页 / ACGN 资讯 / 新番档期）
+   + 管理员可见的「内容管理」「站点设置」+ 右侧跨区入口“测试管理”。
+   内容页与内容管理页统一继承本布局；测试用例 / 执行 / 批次不出现在本导航中。 #}
 {% block navbar %}
 {% set nav_path = request.url.path %}
 {% set nav_items = [
     ("首页", "/", nav_path == "/" or nav_path.startswith("/contents")),
     ("ACGN 资讯", "/articles", nav_path.startswith("/articles")),
-    ("新番档期", "/schedule", nav_path == "/schedule" or nav_path == "/schedule/")
+    ("新番档期", "/schedule", nav_path == "/schedule" or nav_path == "/schedule/"),
+    ("作者/公司", "/creators", nav_path.startswith("/creators"))
 ] %}
+{# 阿宅画像是引流入口：游客走免登录试算页，登录用户直接进自己的画像页。 #}
+{% set nav_items = nav_items + [("阿宅画像", "/me/persona" if current_user else "/persona", nav_path.startswith("/persona") or nav_path.startswith("/me/persona"))] %}
 {# 登录用户追加「个人空间」入口（游客不显示，未登录访问 /me 会跳登录页） #}
 {% if current_user %}
 {% set nav_items = nav_items + [("个人空间", "/me", nav_path == "/me")] %}
+{% endif %}
+{# 管理员 / 站长：内容数据的运营与站点治理都属于内容平台，在这里各给一个入口。
+   （测试平台只保留测试用例 / 执行历史 / 回归批次，不再承载内容管理。） #}
+{% if current_user and current_user.is_staff %}
+{% set manage_active = nav_path.startswith("/manage") %}
+{% set nav_items = nav_items + [("内容管理", "/manage", manage_active)] %}
+{% set settings_active = nav_path.startswith("/admin/accounts") or nav_path.startswith("/admin/invites") or nav_path.startswith("/admin/roles") %}
+{% set nav_items = nav_items + [("站点设置", "/admin/accounts", settings_active)] %}
 {% endif %}
 <nav class="navbar navbar-expand-lg navbar-dark sticky-top site-navbar content-navbar px-3">
     <a class="navbar-brand" href="/"><span class="brand-mark" aria-hidden="true"></span>ACGN 内容平台</a>
@@ -33,7 +44,7 @@
            导航不展示「未登录」状态提示（用户要求去掉）。 #}
         <div class="d-flex flex-wrap align-items-center gap-2">
             {% if current_user %}
-            {% if current_user.is_admin %}
+            {% if current_user.is_staff %}
             <a class="btn btn-sm nav-cta" href="/testcases">测试管理 &rarr;</a>
             {% endif %}
             <span class="navbar-user">

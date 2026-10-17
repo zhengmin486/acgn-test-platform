@@ -5,30 +5,56 @@ MySQL 接入与 Alembic 迁移尚未落地。
 """
 
 import secrets
+import unicodedata
 from datetime import datetime, timedelta
 
-from sqlalchemy import Engine, delete as sa_delete, func, inspect, or_, select, text
+from sqlalchemy import (
+    Engine,
+    delete as sa_delete,
+    func,
+    inspect,
+    or_,
+    select,
+    text,
+    update,
+)
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import settings
 from app.database import Base
 from app.fake_data import FAKE_CONTENTS
+from app.tagging import split_tags
 from app.models import (
     AnimeSchedule,
     Article,
+    ArticleContentLink,
+    ArticleTag,
+    BangumiCollection,
+    CASE_SOURCE_MANUAL,
     Content,
+    ContentEntityLink,
     ContentFavorite,
+    ContentCast,
+    ContentCredit,
+    ContentFact,
     ContentStatus,
+    ContentStudio,
     ContentSubmission,
     ContentTag,
     ContentViewHistory,
     EmailVerificationToken,
+    Entity,
     ExecutionBatch,
     ExecutionRecord,
+    InviteCode,
     PasswordResetToken,
+    PersonaReport,
     ScheduleSyncRun,
+    Series,
     SyncTaskRun,
     Tag,
+    UserSiteImport,
     TestCase,
     User,
 )
@@ -149,6 +175,24 @@ MAX_CONTENT_TAGS = 5
 # 截断会产生语义错误的标签，丢弃只损失一个可选筛选维度。
 TAG_NAME_MAX_LENGTH = 80
 
+# 单篇资讯最多保留的识别标签数：与作品标签上限一致，防止标签刷屏。
+MAX_ARTICLE_TAGS = 5
+
+
+def normalize_tag_names(tag_names: list[str]) -> list[str]:
+    """标签名卫生规则（作品标签与资讯识别标签共用，避免两套实现漂移）：
+
+    - 去首尾空白、丢弃空名与超长名（TAG_NAME_MAX_LENGTH，不截断）；
+    - 去重且保持原顺序（先出现的排名更靠前）。
+    """
+    names: list[str] = []
+    for raw in tag_names:
+        name = (raw or "").strip()
+        if not name or len(name) > TAG_NAME_MAX_LENGTH or name in names:
+            continue
+        names.append(name)
+    return names
+
 
 def get_or_create_tag(db: Session, name: str) -> Tag:
     """按名称取标签，不存在则创建；调用方负责把名称裁剪到长度上限内。"""
@@ -163,18 +207,12 @@ def get_or_create_tag(db: Session, name: str) -> Tag:
 def replace_content_tags(db: Session, content_id: int, tag_names: list[str]) -> list[str]:
     """用给定标签列表整体替换某作品的标签，返回最终生效的标签名列表。
 
-    - 名称去空白、去重（保序）、丢弃空名与超长名（TAG_NAME_MAX_LENGTH）；
+    - 名称走 normalize_tag_names 卫生规则；
     - 最多保留前 MAX_CONTENT_TAGS 个（导入侧已按标注数截断，这里兜底）；
     - 先删旧关联再建新关联：重复导入同一作品不会堆叠关联行，
       标签被源站移除后本地同步移除（标签是派生命名，不是本地资产）。
     """
-    names: list[str] = []
-    for raw in tag_names:
-        name = (raw or "").strip()
-        if not name or len(name) > TAG_NAME_MAX_LENGTH or name in names:
-            continue
-        names.append(name)
-    names = names[:MAX_CONTENT_TAGS]
+    names = normalize_tag_names(tag_names)[:MAX_CONTENT_TAGS]
 
     db.execute(sa_delete(ContentTag).where(ContentTag.content_id == content_id))
     for name in names:
@@ -196,6 +234,239 @@ def list_content_tags(db: Session, content_id: int) -> list[str]:
     )
 
 
+def replace_content_studios(
+    db: Session, content_id: int, names: list[str]
+) -> list[str]:
+    """整体替换某作品的制作公司（保序去重，最多 80 字符），返回最终列表。"""
+    cleaned: list[str] = []
+    for name in names or []:
+        text_value = str(name).strip()
+        if text_value and len(text_value) <= 80 and text_value not in cleaned:
+            cleaned.append(text_value)
+
+    db.execute(sa_delete(ContentStudio).where(ContentStudio.content_id == content_id))
+    for name in cleaned:
+        db.add(ContentStudio(content_id=content_id, name=name))
+    db.commit()
+    return cleaned
+
+
+def list_content_studios(db: Session, content_id: int) -> list[str]:
+    """某作品的制作公司列表（按写入顺序）。"""
+    return list(
+        db.scalars(
+            select(ContentStudio.name)
+            .where(ContentStudio.content_id == content_id)
+            .order_by(ContentStudio.id)
+        )
+    )
+
+
+def replace_content_credits(
+    db: Session, content_id: int, credits: list[dict]
+) -> int:
+    """整体替换某作品的制作人员（幂等），返回写入条数。"""
+    rows: list[ContentCredit] = []
+    seen: set[tuple[str, str]] = set()
+    for index, item in enumerate(credits or []):
+        role = str(item.get("role") or "").strip()[:30]
+        name = str(item.get("name") or "").strip()[:100]
+        if not role or not name:
+            continue
+        key = (role, name)
+        if key in seen:
+            continue
+        seen.add(key)
+        detail = str(item.get("detail") or "").strip()[:200] or None
+        person_id = item.get("person_id")
+        tier = str(item.get("tier") or "main")
+        if tier not in ("main", "long", "candidate"):
+            tier = "main"
+        rows.append(
+            ContentCredit(
+                content_id=content_id,
+                person_id=int(person_id) if person_id else None,
+                role=role,
+                name=name,
+                detail=detail,
+                sort_order=int(item.get("sort_order") or index),
+                tier=tier,
+            )
+        )
+
+    db.execute(sa_delete(ContentCredit).where(ContentCredit.content_id == content_id))
+    for row in rows:
+        db.add(row)
+    db.commit()
+    return len(rows)
+
+
+def promote_staff_candidates(
+    db: Session,
+    *,
+    names: list[str] | None = None,
+    threshold: int = 10,
+) -> int:
+    """长尾职员转正：本站累计 ≥ threshold 部作品的候选升级为 long（展示）。
+
+    - 「作品数」按 ``distinct content_id`` 统计，同一作品多职位只算一部；
+    - names 给定时只检查这些人（同步单部作品后的增量检查），为空则全表扫；
+    - 不维护「知名名单」：数据越多越准，名单不会过时。
+    """
+    stmt = (
+        select(ContentCredit.name, func.count(func.distinct(ContentCredit.content_id)))
+        .where(ContentCredit.tier.in_(("candidate", "long")))
+        .group_by(ContentCredit.name)
+        .having(func.count(func.distinct(ContentCredit.content_id)) >= threshold)
+    )
+    if names:
+        stmt = stmt.where(ContentCredit.name.in_(names))
+    eligible = [str(name) for name, _count in db.execute(stmt)]
+    if not eligible:
+        return 0
+
+    result = db.execute(
+        update(ContentCredit)
+        .where(ContentCredit.tier == "candidate", ContentCredit.name.in_(eligible))
+        .values(tier="long")
+    )
+    db.commit()
+    return result.rowcount or 0
+
+
+def list_content_credits(
+    db: Session, content_id: int, tier: str | None = None
+) -> list[ContentCredit]:
+    """某作品的制作人员（按 sort_order 稳定排序）。"""
+    stmt = select(ContentCredit).where(ContentCredit.content_id == content_id)
+    if tier:
+        stmt = stmt.where(ContentCredit.tier == tier)
+    return list(db.scalars(stmt.order_by(ContentCredit.sort_order, ContentCredit.id)))
+
+
+def replace_content_cast(db: Session, content_id: int, cast: list[dict]) -> int:
+    """整体替换角色-声优（只存原版配音），返回写入条数。"""
+    rows: list[ContentCast] = []
+    seen: set[tuple[str, str]] = set()
+    for index, item in enumerate(cast or []):
+        character = str(item.get("character") or "").strip()[:100]
+        actor = str(item.get("actor") or "").strip()[:100]
+        if not character or not actor:
+            continue
+        key = (character, actor)
+        if key in seen:
+            continue
+        seen.add(key)
+        character_id = item.get("character_id")
+        person_id = item.get("person_id")
+        rows.append(
+            ContentCast(
+                content_id=content_id,
+                character=character,
+                character_id=int(character_id) if character_id else None,
+                person_id=int(person_id) if person_id else None,
+                actor=actor,
+                sort_order=int(item.get("sort_order") or index),
+            )
+        )
+
+    db.execute(sa_delete(ContentCast).where(ContentCast.content_id == content_id))
+    for row in rows:
+        db.add(row)
+    db.commit()
+    return len(rows)
+
+
+def list_content_cast(
+    db: Session, content_id: int, limit: int | None = None
+) -> list[ContentCast]:
+    """某作品的角色-声优（按出场顺序）。"""
+    stmt = (
+        select(ContentCast)
+        .where(ContentCast.content_id == content_id)
+        .order_by(ContentCast.sort_order, ContentCast.id)
+    )
+    if limit:
+        stmt = stmt.limit(limit)
+    return list(db.scalars(stmt))
+
+
+def replace_content_facts(db: Session, content_id: int, facts: dict) -> int:
+    """整体替换客观信息键值（幂等），返回写入条数。"""
+    items = []
+    for key, value in (facts or {}).items():
+        name = str(key).strip()[:50]
+        text_value = str(value).strip()[:500]
+        if name and text_value:
+            items.append((name, text_value))
+
+    db.execute(sa_delete(ContentFact).where(ContentFact.content_id == content_id))
+    for name, text_value in items:
+        db.add(ContentFact(content_id=content_id, key=name, value=text_value))
+    db.commit()
+    return len(items)
+
+
+def list_content_facts(db: Session, content_id: int) -> list[tuple[str, str]]:
+    """某作品的客观信息（按写入顺序）。"""
+    rows = db.execute(
+        select(ContentFact.key, ContentFact.value)
+        .where(ContentFact.content_id == content_id)
+        .order_by(ContentFact.id)
+    ).all()
+    return [(str(key), str(value)) for key, value in rows]
+
+
+def list_engaged_content_ids(db: Session) -> set[int]:
+    """有互动的作品 id：被收藏 / 标注 / 浏览过（多用户并集，补全与封面共用）。"""
+    ids: set[int] = set()
+    for model in (ContentFavorite, ContentStatus, ContentViewHistory):
+        ids.update(int(value) for value in db.scalars(select(model.content_id).distinct()))
+    return ids
+
+
+def list_person_works(db: Session, person_id: int) -> dict:
+    """按 Bangumi 人物 id 聚合作品：{credits: [(内容, 职位)], cast: [(内容, 角色)]}。"""
+    credit_rows = db.execute(
+        select(Content, ContentCredit.role)
+        .join(ContentCredit, ContentCredit.content_id == Content.id)
+        .where(ContentCredit.person_id == person_id)
+        .order_by(Content.rating.desc(), Content.id.desc())
+    ).all()
+    cast_rows = db.execute(
+        select(Content, ContentCast.character)
+        .join(ContentCast, ContentCast.content_id == Content.id)
+        .where(ContentCast.person_id == person_id)
+        .order_by(Content.rating.desc(), Content.id.desc())
+    ).all()
+    return {
+        "credits": [(content, str(role)) for content, role in credit_rows],
+        "cast": [(content, str(character)) for content, character in cast_rows],
+    }
+
+
+def person_name(db: Session, person_id: int) -> str:
+    """从已有记录里取人物名（声优或制作人员），取不到返回空串。"""
+    name = db.scalar(
+        select(ContentCredit.name).where(ContentCredit.person_id == person_id).limit(1)
+    ) or db.scalar(
+        select(ContentCast.actor).where(ContentCast.person_id == person_id).limit(1)
+    )
+    return str(name or "")
+
+
+def list_contents_by_studio(db: Session, name: str) -> list[Content]:
+    """某制作公司的作品（按评分倒序）。"""
+    return list(
+        db.scalars(
+            select(Content)
+            .join(ContentStudio, ContentStudio.content_id == Content.id)
+            .where(ContentStudio.name == name)
+            .order_by(Content.rating.desc(), Content.id.desc())
+        )
+    )
+
+
 def list_tags_with_counts(db: Session, limit: int | None = 30) -> list[tuple[str, int]]:
     """全部标签及关联作品数，按作品数从多到少（筛选栏用）；空库返回空列表。
 
@@ -211,6 +482,441 @@ def list_tags_with_counts(db: Session, limit: int | None = 30) -> list[tuple[str
     if limit is not None:
         stmt = stmt.limit(limit)
     return [(name, count) for name, count in db.execute(stmt).all()]
+
+
+def list_all_tag_names(db: Session) -> list[str]:
+    """全部标签名（识别词表用，按 id 稳定排序）。
+
+    只返回名字，不做计数过滤：孤儿标签（已无作品关联）也保留在词表里——
+    它们仍是有效的题材词，历史资讯可能提到。
+    """
+    return list(db.scalars(select(Tag.name).order_by(Tag.id)))
+
+
+def list_content_titles(db: Session) -> list[tuple[int, str]]:
+    """全部作品的 (id, 标题)（关联识别的匹配词表，按 id 排序）。"""
+    return [(row[0], row[1]) for row in db.execute(select(Content.id, Content.title)).all()]
+
+
+# ---------- 资讯自动识别（标签 / 关联作品，写入见 app/article_tags.py） ----------
+
+
+def replace_article_tags(db: Session, article_id: int, tag_names: list[str]) -> list[str]:
+    """替换某篇资讯的识别标签：先删旧关联再按 names 建新关联，返回最终标签名。
+
+    与 replace_content_tags 同一套卫生规则（normalize_tag_names + 前
+    MAX_ARTICLE_TAGS 个截断）；传空列表 = 清空该资讯的标签。
+
+    与 replace_content_tags 的差别：本函数**不自行 commit**——调用方
+    （导入批次 / 回填 CLI）按自己的事务边界统一提交，失败可整体回滚。
+    """
+    names = normalize_tag_names(tag_names)[:MAX_ARTICLE_TAGS]
+    db.execute(sa_delete(ArticleTag).where(ArticleTag.article_id == article_id))
+    for name in names:
+        tag = get_or_create_tag(db, name)
+        db.add(ArticleTag(article_id=article_id, tag_id=tag.id))
+    return names
+
+
+def list_article_tags(db: Session, article_id: int) -> list[str]:
+    """某篇资讯的识别标签名列表（按关联行入库顺序，即识别得分序）。"""
+    return list(
+        db.scalars(
+            select(Tag.name)
+            .join(ArticleTag, ArticleTag.tag_id == Tag.id)
+            .where(ArticleTag.article_id == article_id)
+            .order_by(ArticleTag.id)
+        )
+    )
+
+
+def article_tags_map(db: Session, article_ids: list[int]) -> dict[int, list[str]]:
+    """批量取多篇资讯的识别标签（列表页用，一次查询，避免 N+1）。
+
+    返回 {article_id: [标签名...]}；没有标签的资讯不出现在字典里（模板按
+    ``map.get(article.id)`` 取用，缺失即空态）。组内顺序同 list_article_tags
+    （关联行入库顺序，即识别得分序）。
+    """
+    if not article_ids:
+        return {}
+    rows = db.execute(
+        select(ArticleTag.article_id, Tag.name)
+        .join(Tag, Tag.id == ArticleTag.tag_id)
+        .where(ArticleTag.article_id.in_(article_ids))
+        .order_by(ArticleTag.article_id, ArticleTag.id)
+    ).all()
+    result: dict[int, list[str]] = {}
+    for article_id, name in rows:
+        result.setdefault(article_id, []).append(name)
+    return result
+
+
+def replace_article_content_links(db: Session, article_id: int, titles: list[str]) -> list[Content]:
+    """替换某篇资讯的关联作品：按标题匹配 contents，先删旧关联再建新关联。
+
+    titles 为识别出的作品标题（调用方已按得分排序）：同标题作品会全部
+    关联——同名条目很少见，全部关联比任选其一更忠实；返回的作品列表保持
+    传入标题的顺序（得分序），供页面按相关度渲染。空列表 = 清空关联。
+
+    与 replace_article_tags 一样不自行 commit（调用方统一事务边界）。
+    """
+    unique = list(dict.fromkeys(title.strip() for title in titles if title and title.strip()))
+    db.execute(sa_delete(ArticleContentLink).where(ArticleContentLink.article_id == article_id))
+    if not unique:
+        return []
+    by_title: dict[str, list[Content]] = {}
+    for content in db.scalars(select(Content).where(Content.title.in_(unique))):
+        by_title.setdefault(content.title, []).append(content)
+    ordered = [content for title in unique for content in by_title.get(title, [])]
+    for content in ordered:
+        db.add(ArticleContentLink(article_id=article_id, content_id=content.id))
+    return ordered
+
+
+def list_article_contents(db: Session, article_id: int, limit: int | None = None) -> list[Content]:
+    """某篇资讯关联的作品列表（按关联行入库顺序，即识别得分序；limit 限制条数）。"""
+    stmt = (
+        select(Content)
+        .join(ArticleContentLink, ArticleContentLink.content_id == Content.id)
+        .where(ArticleContentLink.article_id == article_id)
+        .order_by(ArticleContentLink.id)
+    )
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    return list(db.scalars(stmt))
+
+
+def count_article_content_links(db: Session, article_id: int) -> int:
+    """某篇资讯的关联作品数（CLI 汇总与去重跳过判断用）。"""
+    return (
+        db.scalar(
+            select(func.count())
+            .select_from(ArticleContentLink)
+            .where(ArticleContentLink.article_id == article_id)
+        )
+        or 0
+    )
+
+
+# ---------- 作品关系：作者 / 公司花名册 + 系列（识别见 app/entity_links.py） ----------
+
+# 实体类型三分（与内容类型 person/company/association 的展示标签配套）。
+ENTITY_TYPE_PERSON = "person"
+ENTITY_TYPE_COMPANY = "company"
+ENTITY_TYPE_ASSOCIATION = "association"
+ENTITY_TYPES = (ENTITY_TYPE_PERSON, ENTITY_TYPE_COMPANY, ENTITY_TYPE_ASSOCIATION)
+ENTITY_TYPE_LABELS = {
+    ENTITY_TYPE_PERSON: "个人",
+    ENTITY_TYPE_COMPANY: "公司",
+    ENTITY_TYPE_ASSOCIATION: "协会",
+}
+
+# 名称 / 角色长度上限：与 Entity.name String(120)、role String(40) 对齐，
+# 超长直接丢弃不截断——截断人名会产生错误的关联。
+ENTITY_NAME_MAX_LENGTH = 120
+ENTITY_ROLE_MAX_LENGTH = 40
+SERIES_NAME_MAX_LENGTH = 200
+
+# 单部作品最多保留的作者/公司关联数：一部作品通常原作+作画+动画制作+音乐
+# 几个角色，12 个足够容纳且防止信息卡里的杂项刷屏。
+MAX_CONTENT_ENTITY_LINKS = 12
+
+
+def normalize_entity_name(name: str | None) -> str:
+    """实体名卫生规则：NFKC 归一 + 去首尾空白（不做大小写合并）。
+
+    Bangumi 信息卡的键值可能带全角字符或首尾空白；名字本身的大小写是
+    身份的一部分（A-1 Pictures 与 a-1 pictures 不是同一家公司），故只做
+    NFKC 与 strip。
+    """
+    if not name:
+        return ""
+    return unicodedata.normalize("NFKC", str(name)).strip()
+
+
+def _clean_entity_link(link) -> tuple[str, str, str] | None:
+    """把 (name, entity_type, role) 三元组清洗成规范形态，不合格返回 None。
+
+    三项全部去空白；name 上限 ENTITY_NAME_MAX_LENGTH、role 上限
+    ENTITY_ROLE_MAX_LENGTH；entity_type 不在枚举内回落为 person。
+    """
+    name = normalize_entity_name(link[0] if link else "")
+    role = (link[2] if link and len(link) > 2 else "") or ""
+    role = unicodedata.normalize("NFKC", str(role)).strip()[:ENTITY_ROLE_MAX_LENGTH]
+    entity_type = (link[1] if link and len(link) > 1 else "") or ENTITY_TYPE_PERSON
+    entity_type = entity_type if entity_type in ENTITY_TYPES else ENTITY_TYPE_PERSON
+    if not name or len(name) > ENTITY_NAME_MAX_LENGTH or not role:
+        return None
+    return name, entity_type, role
+
+
+def get_or_create_entity(
+    db: Session,
+    name: str,
+    entity_type: str = ENTITY_TYPE_PERSON,
+) -> Entity:
+    """按名称取实体，不存在则创建；调用方负责把名称归一化到长度上限内。
+
+    与 get_or_create_tag 同模式：flush 拿到 id 供同批关联行引用，commit 由
+    调用方（replace_content_entity_links 或导入批次）统一决定。
+    """
+    entity = db.scalar(select(Entity).where(Entity.name == name))
+    if entity is None:
+        entity = Entity(name=name, entity_type=entity_type)
+        db.add(entity)
+        db.flush()
+    return entity
+
+
+def replace_content_entity_links(
+    db: Session,
+    content_id: int,
+    links: list[tuple[str, str, str]],
+) -> list[tuple[str, str, str]]:
+    """整体替换某作品的作者/公司关联，返回最终生效的 (name, type, role)。
+
+    - links 每项为 (名称, 类型, 角色)，走 _clean_entity_link 清洗，
+      同 (名称, 角色) 去重（类型以首次出现的为准）；
+    - 最多保留前 MAX_CONTENT_ENTITY_LINKS 项；
+    - 先删旧关联再建新关联：重复导入同一作品不堆叠行，信息卡更新后本地
+      同步更新（与 replace_content_tags 同语义）；
+    - 与 replace_content_tags 一样自行 commit（导入侧每步独立提交）。
+    """
+    cleaned: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for link in links or []:
+        item = _clean_entity_link(link)
+        if item is None:
+            continue
+        name, _entity_type, role = item
+        if (name, role) in seen:
+            continue
+        seen.add((name, role))
+        cleaned.append(item)
+        if len(cleaned) >= MAX_CONTENT_ENTITY_LINKS:
+            break
+
+    db.execute(sa_delete(ContentEntityLink).where(ContentEntityLink.content_id == content_id))
+    for name, entity_type, role in cleaned:
+        entity = get_or_create_entity(db, name, entity_type)
+        db.add(ContentEntityLink(content_id=content_id, entity_id=entity.id, role=role))
+    db.commit()
+    return cleaned
+
+
+def list_content_entity_links(
+    db: Session,
+    content_id: int,
+) -> list[tuple[int, str, str]]:
+    """某作品的关联明细 (link_id, role, name)（管理端删除用，按关联行 id 序）。"""
+    rows = db.execute(
+        select(ContentEntityLink.id, ContentEntityLink.role, Entity.name)
+        .join(Entity, Entity.id == ContentEntityLink.entity_id)
+        .where(ContentEntityLink.content_id == content_id)
+        .order_by(ContentEntityLink.id)
+    ).all()
+    return [(row[0], row[1], row[2]) for row in rows]
+
+
+def list_content_entity_roles(
+    db: Session,
+    content_id: int,
+) -> dict[str, list[str]]:
+    """某作品的作者/公司按角色分组：{角色: [名称...]}（详情页 chips 用）。
+
+    组内顺序即关联行入库顺序（识别得分序）；角色之间保持首次出现顺序。
+    """
+    grouped: dict[str, list[str]] = {}
+    for _link_id, role, name in list_content_entity_links(db, content_id):
+        grouped.setdefault(role, []).append(name)
+    return grouped
+
+
+def count_content_entity_links(db: Session, content_id: int) -> int:
+    """某作品的作者/公司关联数（CLI 汇总与去重跳过判断用）。"""
+    return (
+        db.scalar(
+            select(func.count())
+            .select_from(ContentEntityLink)
+            .where(ContentEntityLink.content_id == content_id)
+        )
+        or 0
+    )
+
+
+def delete_content_entity_link(db: Session, link_id: int) -> bool:
+    """删除单条作品-实体关联（管理端手工纠错），返回是否删除。"""
+    result = db.execute(sa_delete(ContentEntityLink).where(ContentEntityLink.id == link_id))
+    db.commit()
+    return bool(result.rowcount)
+
+
+def add_content_entity_link(
+    db: Session,
+    content_id: int,
+    name: str,
+    role: str,
+    entity_type: str = ENTITY_TYPE_PERSON,
+) -> tuple[bool, str]:
+    """管理端手工补一条作品-实体关联，返回 (是否成功, 说明)。
+
+    已存在的同 (作品, 实体, 角色) 组合视为成功并提示「已存在」——手工补录
+    重复点击不应报错。角色为空或名称超长则拒绝。
+    """
+    item = _clean_entity_link((name, entity_type, role))
+    if item is None:
+        return False, "名称或角色为空（或名称超长）"
+    clean_name, clean_type, clean_role = item
+    entity = get_or_create_entity(db, clean_name, clean_type)
+    link = ContentEntityLink(content_id=content_id, entity_id=entity.id, role=clean_role)
+    db.add(link)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        return True, f"已存在：{clean_name}（{clean_role}）"
+    return True, f"已添加：{clean_name}（{clean_role}）"
+
+
+def list_entities_with_counts(
+    db: Session,
+    entity_type: str | None = None,
+    limit: int | None = None,
+) -> list[tuple[Entity, int]]:
+    """实体花名册及关联作品数，按作品数从多到少（索引页用）。
+
+    entity_type 给定时只返回该类型；作品数统计关联行数（弱关联，作品被删
+    后关联行仍在，计数可能略高于可见作品数，页面内连接查不到即不展示）。
+    """
+    stmt = (
+        select(Entity, func.count(ContentEntityLink.id))
+        .join(ContentEntityLink, ContentEntityLink.entity_id == Entity.id)
+        .group_by(Entity.id, Entity.name, Entity.entity_type)
+        .order_by(func.count(ContentEntityLink.id).desc(), Entity.name)
+    )
+    if entity_type in ENTITY_TYPES:
+        stmt = stmt.where(Entity.entity_type == entity_type)
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    return [(entity, count) for entity, count in db.execute(stmt).all()]
+
+
+def get_entity_by_name(db: Session, name: str) -> Entity | None:
+    """按名称取实体（名称需先归一化）；索引页跳转与筛选反查共用。"""
+    return db.scalar(select(Entity).where(Entity.name == normalize_entity_name(name)))
+
+
+def list_entity_contents(
+    db: Session,
+    entity_id: int,
+    limit: int | None = None,
+) -> list[Content]:
+    """某实体的全部作品（评分降序、同分按 id；limit 限制条数）。
+
+    内连接：作品被删后关联行查不到即不出现。同一作品以多个角色关联同一
+    实体时只出现一次（distinct）。
+    """
+    stmt = (
+        select(Content)
+        .join(ContentEntityLink, ContentEntityLink.content_id == Content.id)
+        .where(ContentEntityLink.entity_id == entity_id)
+        .distinct()
+        .order_by(Content.rating.desc(), Content.id)
+    )
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    return list(db.scalars(stmt))
+
+
+def get_or_create_series(db: Session, name: str) -> Series:
+    """按名称取系列，不存在则创建；名称需先归一化到长度上限内。
+
+    flush 不 commit：系列设置跟随导入/回填批次的事务边界（与
+    get_or_create_entity 的差别是后者在替换函数内统一提交）。
+    """
+    series = db.scalar(select(Series).where(Series.name == name))
+    if series is None:
+        series = Series(name=name)
+        db.add(series)
+        db.flush()
+    return series
+
+
+def set_content_series(db: Session, content_id: int, series_name: str | None) -> str | None:
+    """设置（或清除）某作品的所属系列，返回最终系列名（None = 已清除）。
+
+    空名 = 清除系列；系列名超长（SERIES_NAME_MAX_LENGTH）直接拒绝并返回
+    None。自行 commit（管理端单次操作与导入批次都按这一语义）。
+    """
+    name = normalize_entity_name(series_name)[:SERIES_NAME_MAX_LENGTH]
+    content = db.get(Content, content_id)
+    if content is None:
+        return None
+    if not name:
+        content.series_id = None
+        db.commit()
+        return None
+    series = get_or_create_series(db, name)
+    content.series_id = series.id
+    db.commit()
+    return series.name
+
+
+def get_series(db: Session, series_id: int) -> Series | None:
+    """按 ID 取系列。"""
+    return db.get(Series, series_id)
+
+
+def get_series_by_name(db: Session, name: str) -> Series | None:
+    """按名称取系列（名称需先归一化）；/creators/{name} 解析与筛选反查共用。"""
+    return db.scalar(select(Series).where(Series.name == normalize_entity_name(name)))
+
+
+def list_series_with_counts(
+    db: Session,
+    limit: int | None = None,
+) -> list[tuple[Series, int]]:
+    """全部系列及作品数，按作品数从多到少（索引页用）。"""
+    stmt = (
+        select(Series, func.count(Content.id))
+        .join(Content, Content.series_id == Series.id)
+        .group_by(Series.id, Series.name)
+        .order_by(func.count(Content.id).desc(), Series.name)
+    )
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    return [(series, count) for series, count in db.execute(stmt).all()]
+
+
+def list_series_contents(
+    db: Session,
+    series_id: int,
+    exclude_content_id: int | None = None,
+    limit: int | None = None,
+) -> list[Content]:
+    """同系列的作品（评分降序；exclude_content_id 排除「当前作品」自身）。"""
+    stmt = (
+        select(Content)
+        .where(Content.series_id == series_id)
+        .order_by(Content.rating.desc(), Content.id)
+    )
+    if exclude_content_id is not None:
+        stmt = stmt.where(Content.id != exclude_content_id)
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    return list(db.scalars(stmt))
+
+
+def has_content_entity_recognition(db: Session, content_id: int) -> bool:
+    """某作品是否已有关系数据（作者/公司关联或所属系列）。
+
+    回填 CLI 的跳过判断：已识别的作品默认不再重算（--force 才重算），
+    避免每次全量回填都重复请求 Bangumi。
+    """
+    if count_content_entity_links(db, content_id) > 0:
+        return True
+    content = db.get(Content, content_id)
+    return bool(content and content.series_id is not None)
 
 
 def list_articles(
@@ -252,12 +958,25 @@ def get_article(
 
     return db.scalar(stmt)
 
-def _content_search_stmt(keyword: str, content_type: str | None, tag: str | None = None):
-    """内容搜索的共享查询：标题/简介不区分大小写包含匹配，可叠加类型与标签筛选。
+def _content_search_stmt(
+    keyword: str,
+    content_type: str | None,
+    tag: str | None = None,
+    creator: str | None = None,
+):
+    """内容搜索的共享查询：标题/简介不区分大小写包含匹配，可叠加类型、标签与作者筛选。
 
     匹配语义保持原样（lower 后包含匹配）；分页与不分页的调用方共用本构造，
-    避免两套搜索实现漂移。标签筛选走 content_tags/tags 连接下推到 SQL，
-    不在应用层过滤；同一作品命中标签时只出现一次（联合唯一约束保证）。
+    避免两套搜索实现漂移。筛选走连接下推到 SQL，不在应用层过滤：
+
+    - 标签筛选走 content_tags/tags 连接（同一作品命中标签只出现一次，
+      联合唯一约束保证）；
+    - 作者/公司筛选走 content_entity_links/entities 连接按名称等值匹配
+      （索引页「查看全部作品」与列表页 ?creator= 共用）。
+
+    tag 与 creator 同时给定时连接会放大行数（一部作品命中标签又有多个
+    角色的同一实体），故任一筛选生效时统一 distinct，保证一部作品在结果
+    里只出现一次；单筛选时 distinct 不改变语义。
     """
     stmt = select(Content)
     if keyword:
@@ -276,15 +995,28 @@ def _content_search_stmt(keyword: str, content_type: str | None, tag: str | None
             .join(Tag, Tag.id == ContentTag.tag_id)
             .where(Tag.name == tag)
         )
+    if creator:
+        stmt = (
+            stmt.join(ContentEntityLink, ContentEntityLink.content_id == Content.id)
+            .join(Entity, Entity.id == ContentEntityLink.entity_id)
+            .where(Entity.name == creator)
+        )
+    if tag or creator:
+        stmt = stmt.distinct()
     return stmt.order_by(Content.id)
 
 
-def search_contents(db: Session, keyword: str, tag: str | None = None) -> list[Content]:
+def search_contents(
+    db: Session,
+    keyword: str,
+    tag: str | None = None,
+    creator: str | None = None,
+) -> list[Content]:
     """标题/简介不区分大小写的包含匹配，与分页版本语义一致。
 
     不分页、按 id 排序返回全部匹配；分页需求用 search_contents_page。
     """
-    return list(db.scalars(_content_search_stmt(keyword, None, tag)))
+    return list(db.scalars(_content_search_stmt(keyword, None, tag, creator)))
 
 
 def search_contents_page(
@@ -293,15 +1025,16 @@ def search_contents_page(
     keyword: str = "",
     content_type: str | None = None,
     tag: str | None = None,
+    creator: str | None = None,
     page: int = 1,
     page_size: int = 20,
 ) -> tuple[int, list[Content]]:
-    """分页搜索内容：关键词（标题/简介）、类型与标签筛选可叠加，返回 (总数, 当前页)。
+    """分页搜索内容：关键词（标题/简介）、类型、标签与作者筛选可叠加，返回 (总数, 当前页)。
 
-    三类条件均可缺省：只给类型即按类型浏览，只给关键词即全类型搜索，
-    只给标签即按标签归类浏览。
+    四类条件均可缺省：只给类型即按类型浏览，只给关键词即全类型搜索，
+    只给标签即按标签归类浏览，只给作者即按作者/公司浏览。
     """
-    stmt = _content_search_stmt(keyword, content_type, tag)
+    stmt = _content_search_stmt(keyword, content_type, tag, creator)
     total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     items = list(
         db.scalars(stmt.offset((page - 1) * page_size).limit(page_size))
@@ -310,7 +1043,13 @@ def search_contents_page(
 
 
 def seed_if_empty(db: Session) -> int:
-    """表为空时播种开发/测试数据，返回写入行数；表已有数据则不动（幂等）。"""
+    """表为空且开关打开时播种开发/测试数据，返回写入行数；表已有数据则不动（幂等）。
+
+    ``SEED_DEMO_DATA=false`` 时直接返回 0：上线用干净库，真实数据由后台
+    「数据同步」灌入（见 README 数据管理一节）。
+    """
+    if not settings.seed_demo_data:
+        return 0
     if db.scalars(select(Content.id).limit(1)).first() is not None:
         return 0
     for row in FAKE_CONTENTS:
@@ -391,6 +1130,132 @@ def ensure_user_profile_columns(engine: Engine) -> list[str]:
     return added
 
 
+# 启动时按需补齐的 contents 列（封面图）。项目没有 Alembic，历史库只能幂等
+# ALTER；不回填任何值——没有封面的条目继续走渐变占位，由导入/回填脚本落图。
+_CONTENT_IMAGE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("image_url", "VARCHAR(500)"),
+)
+
+# 作品发行年（来自 Bangumi date）：标签归一时单独成列，避免年份混进内容标签。
+_CONTENT_YEAR_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("year", "INTEGER"),
+)
+
+# 客观信息列（媒介 / 原作载体 / 话数）与元数据补全时间，同样走幂等 ALTER。
+_CONTENT_META_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("media", "VARCHAR(20)"),
+    ("source_material", "VARCHAR(20)"),
+    ("episodes", "INTEGER"),
+    ("meta_fetched_at", "DATETIME"),
+)
+
+
+def ensure_test_case_source_column(engine: Engine) -> list[str]:
+    """为已存在的 test_cases 表补齐 source 列（manual / auto），幂等。
+
+    用例自动生成需要区分「人工录入」与「自动生成」：前者永不被自动改动，
+    后者可被更新期望值或下线。历史库不会自动得到这一列，需在这里补。
+    """
+    inspector = inspect(engine)
+    if "test_cases" not in inspector.get_table_names():
+        return []
+
+    existing = {column["name"] for column in inspector.get_columns("test_cases")}
+    if "source" in existing:
+        return []
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE test_cases ADD COLUMN source VARCHAR(10)"))
+        # 既有行统一视为人工录入：它们在自动生成功能之前就存在。
+        connection.execute(
+            text(f"UPDATE test_cases SET source = '{CASE_SOURCE_MANUAL}' WHERE source IS NULL")
+        )
+    return ["source"]
+
+
+def ensure_content_image_column(engine: Engine) -> list[str]:
+    """为已存在的 contents 表补齐封面列（image_url），幂等，返回新增列名。
+
+    与 ensure_user_profile_columns 同一模式：create_all 只建新表、不给已有表
+    加列，封面功能上线前创建的库需要在启动时补列，否则读取 image_url 直接报错。
+    """
+    inspector = inspect(engine)
+    if "contents" not in inspector.get_table_names():
+        return []
+
+    existing = {column["name"] for column in inspector.get_columns("contents")}
+    added: list[str] = []
+    for name, ddl in _CONTENT_IMAGE_COLUMNS:
+        if name in existing:
+            continue
+        with engine.begin() as connection:
+            connection.execute(text(f"ALTER TABLE contents ADD COLUMN {name} {ddl}"))
+        added.append(name)
+    return added
+
+
+def ensure_content_year_column(engine: Engine) -> list[str]:
+    """为已存在的 contents 表补齐 year 列，幂等，返回新增列名。
+
+    历史库的行留 NULL，由 scripts/clean_content_tags.py 或下一次同步回填。
+    """
+    inspector = inspect(engine)
+    if "contents" not in inspector.get_table_names():
+        return []
+
+    existing = {column["name"] for column in inspector.get_columns("contents")}
+    added: list[str] = []
+    for name, ddl in _CONTENT_YEAR_COLUMNS:
+        if name in existing:
+            continue
+        with engine.begin() as connection:
+            connection.execute(text(f"ALTER TABLE contents ADD COLUMN {name} {ddl}"))
+        added.append(name)
+    return added
+
+
+# 所属系列（作品关系功能）：同系列的多季 / 剧场版指向 series 表同一行。
+_CONTENT_SERIES_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("series_id", "INTEGER"),
+)
+
+
+def ensure_content_series_column(engine: Engine) -> list[str]:
+    """为已存在的 contents 表补齐 series_id 列，幂等，返回新增列名。
+
+    历史库的行留 NULL（未归系列），由 scripts/link_entities.py 回填。
+    """
+    inspector = inspect(engine)
+    if "contents" not in inspector.get_table_names():
+        return []
+
+    existing = {column["name"] for column in inspector.get_columns("contents")}
+    added: list[str] = []
+    for name, ddl in _CONTENT_SERIES_COLUMNS:
+        if name in existing:
+            continue
+        with engine.begin() as connection:
+            connection.execute(text(f"ALTER TABLE contents ADD COLUMN {name} {ddl}"))
+        added.append(name)
+    return added
+
+
+def ensure_content_meta_columns(engine: Engine) -> list[str]:
+    """为已存在的 contents 表补齐客观信息列，幂等，返回新增列名。"""
+    inspector = inspect(engine)
+    if "contents" not in inspector.get_table_names():
+        return []
+
+    existing = {column["name"] for column in inspector.get_columns("contents")}
+    added: list[str] = []
+    for name, ddl in _CONTENT_META_COLUMNS:
+        if name in existing:
+            continue
+        with engine.begin() as connection:
+            connection.execute(text(f"ALTER TABLE contents ADD COLUMN {name} {ddl}"))
+        added.append(name)
+    return added
+
+
 def init_db(engine: Engine) -> int:
     """建表（如无）并播种，返回播种行数。
 
@@ -403,6 +1268,11 @@ def init_db(engine: Engine) -> int:
     # 历史库补列：create_all 只建新表、不给已有表加列，老库需按需 ALTER TABLE。
     ensure_user_email_columns(engine)
     ensure_user_profile_columns(engine)
+    ensure_content_image_column(engine)
+    ensure_content_year_column(engine)
+    ensure_content_series_column(engine)
+    ensure_content_meta_columns(engine)
+    ensure_test_case_source_column(engine)
     db = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
     try:
         seeded = seed_if_empty(db)
@@ -414,15 +1284,78 @@ def init_db(engine: Engine) -> int:
 
 # ---------- 账号与认证 ----------
 
-# 角色取值：普通用户只能使用内容平台，管理员额外可使用测试管理平台。
+# 角色取值（三级，由低到高）：
+# - user  普通用户：只能使用内容平台（含个人空间）；
+# - admin 管理员：额外可使用测试管理平台（用例 / 执行 / 批次 / 数据管理）；
+# - owner 站长：最高级，具备管理员全部能力，并独占角色管理等站点级操作。
 ROLE_USER = "user"
 ROLE_ADMIN = "admin"
-VALID_ROLES = (ROLE_USER, ROLE_ADMIN)
+ROLE_OWNER = "owner"
+VALID_ROLES = (ROLE_USER, ROLE_ADMIN, ROLE_OWNER)
+
+# 角色展示名：导航徽标、账号列表、个人空间统一使用这一套。
+ROLE_LABELS = {
+    ROLE_OWNER: "站长",
+    ROLE_ADMIN: "管理员",
+    ROLE_USER: "普通用户",
+}
+
+# 角色等级：数值越大权限越高，用于「至少达到某角色」的判断。
+ROLE_RANK = {ROLE_USER: 1, ROLE_ADMIN: 2, ROLE_OWNER: 3}
+
+
+def role_rank(role: str) -> int:
+    """角色等级；未知角色返回 0（最低），不会误判为有权限。"""
+    return ROLE_RANK.get(role, 0)
+
+
+def has_role(role: str, minimum: str) -> bool:
+    """role 是否达到 minimum 等级（含同级）；未知角色一律 False。"""
+    if minimum not in ROLE_RANK:
+        return False
+    return role_rank(role) >= role_rank(minimum)
 
 
 def count_users(db: Session) -> int:
     """账号总数（用于判断是否需要创建初始账号）。"""
     return db.scalar(select(func.count()).select_from(User)) or 0
+
+
+def list_users(db: Session) -> list[User]:
+    """全部账号（按 id 升序），供站长的角色管理页展示。"""
+    return list(db.scalars(select(User).order_by(User.id)))
+
+
+def highest_staff_account(db: Session) -> User | None:
+    """权限最高的 staff 账号（站长优先于管理员），没有则返回 None。
+
+    用例执行与自动生成都以这个账号的身份发请求——测试工具是管理员用的，
+    匿名身份只能测到一堆 401/303，测不到后台接口本身。
+    """
+    staff = [user for user in list_users(db) if has_role(user.role, ROLE_ADMIN)]
+    if not staff:
+        return None
+    return max(staff, key=lambda user: ROLE_RANK.get(user.role, 0))
+
+
+def set_user_role(db: Session, user: User, role: str) -> User:
+    """修改账号角色；角色非法时抛 ValueError（由路由层回显）。"""
+    if role not in VALID_ROLES:
+        raise ValueError(f"角色不合法，可选值：{'、'.join(VALID_ROLES)}")
+    if user.role == role:
+        return user
+    user.role = role
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+def count_owners(db: Session) -> int:
+    """站长账号数量；用于阻止把最后一个站长降级。"""
+    return (
+        db.scalar(select(func.count()).select_from(User).where(User.role == ROLE_OWNER))
+        or 0
+    )
 
 
 def get_user(db: Session, user_id: int) -> User | None:
@@ -951,6 +1884,428 @@ def decide_content_submission(
     return row, None
 
 
+# ---------- 阿宅画像：Bangumi 收藏快照 / 报告 ----------
+
+
+def replace_bangumi_collections(
+    db: Session, user_id: int, items: list[dict]
+) -> int:
+    """用本次同步结果整体替换某账号的 Bangumi 收藏快照，返回写入条数。"""
+    db.execute(
+        sa_delete(BangumiCollection).where(BangumiCollection.user_id == user_id)
+    )
+    rows = [BangumiCollection(user_id=user_id, **item) for item in items]
+    db.add_all(rows)
+    db.commit()
+    return len(rows)
+
+
+def list_bangumi_collections(
+    db: Session, user_id: int
+) -> list[BangumiCollection]:
+    """某账号的全部 Bangumi 收藏快照（按作品 id 升序，便于稳定分析）。"""
+    return list(
+        db.scalars(
+            select(BangumiCollection)
+            .where(BangumiCollection.user_id == user_id)
+            .order_by(BangumiCollection.subject_id)
+        )
+    )
+
+
+def count_bangumi_collections(db: Session, user_id: int) -> int:
+    """某账号已同步的 Bangumi 收藏条数。"""
+    return (
+        db.scalar(
+            select(func.count())
+            .select_from(BangumiCollection)
+            .where(BangumiCollection.user_id == user_id)
+        )
+        or 0
+    )
+
+
+def clear_bangumi_collections(db: Session, user_id: int) -> int:
+    """清空某账号的 Bangumi 收藏快照，返回删除行数。"""
+    result = db.execute(
+        sa_delete(BangumiCollection).where(BangumiCollection.user_id == user_id)
+    )
+    db.commit()
+    return result.rowcount or 0
+
+
+def get_persona_report(db: Session, user_id: int) -> PersonaReport | None:
+    """取某账号的画像报告（每账号一份）。"""
+    return db.scalar(select(PersonaReport).where(PersonaReport.user_id == user_id))
+
+
+# 单次「同步到本站」最多新建多少部作品：收藏动辄上千条，一次点击不该无上限写库。
+PERSONA_SITE_SYNC_LIMIT = 200
+
+# Bangumi 收藏状态 → 站内标注：只在「看过 / 在看 / 想看」时补站内收藏与标注，
+# 抛弃 / 搁置只补作品条目，不往个人空间塞负向记录。
+SITE_SYNC_MARK_STATUS = {"seen": "seen", "want": "want"}
+
+# SQLite 的参数上限较低（老版本 999），批量 in_ 查询按块拆开。
+_ID_CHUNK = 400
+
+
+def count_contents_by_bangumi(db: Session, bangumi_ids: list[int]) -> int:
+    """给定 Bangumi 条目里有多少已在本站作品库（按 bangumi_id 精确匹配）。"""
+    ids = [int(item) for item in bangumi_ids if item]
+    found = 0
+    for start in range(0, len(ids), _ID_CHUNK):
+        chunk = ids[start : start + _ID_CHUNK]
+        found += (
+            db.scalar(
+                select(func.count())
+                .select_from(Content)
+                .where(Content.bangumi_id.in_(chunk))
+            )
+            or 0
+        )
+    return found
+
+
+def _bangumi_work_summary(work: dict) -> str:
+    """为收藏同步进来的作品拼一段可读简介（快照里没有原始 summary）。"""
+    parts = []
+    year = work.get("year")
+    type_label = str(work.get("type_label") or "")
+    if year and type_label:
+        parts.append(f"{year} 年的{type_label}")
+    elif type_label:
+        parts.append(type_label)
+    score = work.get("score")
+    if score:
+        parts.append(f"Bangumi 评分 {float(score):.1f}")
+    header = "，".join(parts)
+    # 简介里的标签也只列题材，避免把年份/公司/声优写进正文
+    tags = split_tags([str(tag) for tag in (work.get("tags") or [])])[0][:5]
+    if tags:
+        header += ("，标签：" if header else "标签：") + " / ".join(tags)
+    note = f"由 Bangumi 收藏同步（bgm.tv/subject/{work.get('subject_id')}）"
+    return f"{header}。{note}。" if header else f"{note}。"
+
+
+def import_works_to_site(
+    db: Session,
+    user_id: int,
+    works: list[dict],
+    *,
+    limit: int = PERSONA_SITE_SYNC_LIMIT,
+) -> dict:
+    """把 Bangumi 收藏里的作品补进站内作品库，并镜像收藏 / 标注。
+
+    约定：
+    - 以 ``bangumi_id`` 去重：站内已有只做关联，**不覆盖**人工维护的标题 / 简介 / 标签；
+    - 新作品用收藏快照里的元数据生成简介，封面留空（页面走渐变占位）；
+    - 只对「看过 / 在看 / 想看」补站内收藏与标注；已有手动标注不覆盖；
+    - 单次最多新建 ``limit`` 部，返回统计供页面回显（``limited`` 表示还有剩余）。
+    """
+    stats = {
+        "new": 0,
+        "linked": 0,
+        "skipped": 0,
+        "favorited": 0,
+        "marked": 0,
+        "limited": False,
+    }
+
+    prepared: list[dict] = []
+    seen: set[int] = set()
+    for work in works:
+        subject_id = work.get("subject_id")
+        title = str(work.get("title") or "").strip()
+        try:
+            subject_id = int(subject_id)
+        except (TypeError, ValueError):
+            stats["skipped"] += 1
+            continue
+        if subject_id <= 0 or not title or subject_id in seen:
+            stats["skipped"] += 1
+            continue
+        seen.add(subject_id)
+        prepared.append(work)
+
+    content_ids: dict[int, int] = {}
+    ids = [int(work["subject_id"]) for work in prepared]
+    for start in range(0, len(ids), _ID_CHUNK):
+        chunk = ids[start : start + _ID_CHUNK]
+        for bangumi_id, content_id in db.execute(
+            select(Content.bangumi_id, Content.id).where(Content.bangumi_id.in_(chunk))
+        ):
+            if bangumi_id is not None:
+                content_ids[int(bangumi_id)] = int(content_id)
+
+    stats["linked"] = sum(
+        1 for work in prepared if int(work["subject_id"]) in content_ids
+    )
+
+    pending = [
+        work for work in prepared if int(work["subject_id"]) not in content_ids
+    ]
+    if limit > 0 and len(pending) > limit:
+        pending = pending[:limit]
+        stats["limited"] = True
+
+    for work in pending:
+        subject_id = int(work["subject_id"])
+        raw_tags = [str(tag) for tag in (work.get("tags") or []) if str(tag).strip()]
+        genres, studios, tag_year = split_tags(raw_tags)
+        work_year = work.get("year") or tag_year
+        content = Content(
+            title=str(work["title"]).strip()[:200],
+            type=str(work.get("type") or "anime"),
+            summary=_bangumi_work_summary(work),
+            rating=float(work.get("score") or work.get("rate") or 0),
+            bangumi_id=subject_id,
+            source_url=f"https://bgm.tv/subject/{subject_id}",
+            year=int(work_year) if work_year else None,
+        )
+        # 并发兜底：两个请求同时插入同一 bangumi_id 会撞唯一索引，
+        # 用 SAVEPOINT 只回滚这一条，再按「已在站内」处理，不让整批 500。
+        try:
+            with db.begin_nested():
+                db.add(content)
+                db.flush()  # 先拿 id，标签关联与收藏引用都要用
+        except IntegrityError:
+            try:
+                db.expunge(content)
+            except Exception:  # noqa: BLE001 - 对象可能已不在会话里
+                pass
+            existing_id = db.scalar(
+                select(Content.id).where(Content.bangumi_id == subject_id)
+            )
+            if existing_id is not None:
+                content_ids[subject_id] = int(existing_id)
+                stats["linked"] += 1
+            else:
+                stats["skipped"] += 1
+            continue
+
+        # 标签只入题材；公司单独成表，年份已在 Content.year（见 app/tagging.py）
+        if genres:
+            replace_content_tags(db, content.id, genres)
+        if studios:
+            replace_content_studios(db, content.id, studios)
+        db.add(UserSiteImport(user_id=user_id, content_id=content.id))
+        content_ids[subject_id] = content.id
+        stats["new"] += 1
+
+    targets = []
+    for work in prepared:
+        content_id = content_ids.get(int(work["subject_id"]))
+        site_status = SITE_SYNC_MARK_STATUS.get(str(work.get("status") or ""))
+        if content_id and site_status:
+            targets.append((content_id, site_status))
+
+    if targets:
+        target_ids = [content_id for content_id, _ in targets]
+        favorites: set[int] = set()
+        marks: dict[int, str] = {}
+        for start in range(0, len(target_ids), _ID_CHUNK):
+            chunk = target_ids[start : start + _ID_CHUNK]
+            favorites.update(
+                int(value)
+                for value in db.scalars(
+                    select(ContentFavorite.content_id).where(
+                        ContentFavorite.user_id == user_id,
+                        ContentFavorite.content_id.in_(chunk),
+                    )
+                )
+            )
+            for content_id, status in db.execute(
+                select(ContentStatus.content_id, ContentStatus.status).where(
+                    ContentStatus.user_id == user_id,
+                    ContentStatus.content_id.in_(chunk),
+                )
+            ):
+                marks[int(content_id)] = status
+
+        for content_id, site_status in targets:
+            if content_id not in favorites:
+                db.add(ContentFavorite(user_id=user_id, content_id=content_id))
+                favorites.add(content_id)
+                stats["favorited"] += 1
+            if content_id not in marks:
+                db.add(
+                    ContentStatus(
+                        user_id=user_id, content_id=content_id, status=site_status
+                    )
+                )
+                marks[content_id] = site_status
+                stats["marked"] += 1
+
+    db.commit()
+    return stats
+
+
+def count_user_site_imports(db: Session, user_id: int) -> int:
+    """某账号通过「同步到本站」新建了多少部作品。"""
+    return (
+        db.scalar(
+            select(func.count())
+            .select_from(UserSiteImport)
+            .where(UserSiteImport.user_id == user_id)
+        )
+        or 0
+    )
+
+
+def list_user_site_imports(
+    db: Session, user_id: int, limit: int = 10
+) -> list[tuple[Content, datetime]]:
+    """我导入的作品（按导入时间倒序）：内连接 contents，已删的不展示。"""
+    rows = db.execute(
+        select(Content, UserSiteImport.created_at)
+        .join(UserSiteImport, UserSiteImport.content_id == Content.id)
+        .where(UserSiteImport.user_id == user_id)
+        .order_by(UserSiteImport.created_at.desc(), UserSiteImport.id.desc())
+        .limit(limit)
+    ).all()
+    return [(content, created_at) for content, created_at in rows]
+
+
+def undo_site_imports(db: Session, user_id: int) -> dict:
+    """撤销本账号导入的作品：没被别人使用的真删，被使用的保留并计数。
+
+    「被使用」的判定：有其它账号的收藏 / 标注 / 浏览记录，或其它账号也导入过。
+    删除时连同标签关联与自己的收藏 / 标注 / 浏览记录一起清掉，不留孤儿行。
+    """
+    rows = list(
+        db.scalars(select(UserSiteImport).where(UserSiteImport.user_id == user_id))
+    )
+    stats = {"removed": 0, "kept": 0}
+    for row in rows:
+        content_id = int(row.content_id)
+        content = db.get(Content, content_id)
+        if content is None:
+            db.delete(row)
+            continue
+
+        used_by_others = (
+            db.scalar(
+                select(func.count())
+                .select_from(ContentFavorite)
+                .where(
+                    ContentFavorite.content_id == content_id,
+                    ContentFavorite.user_id != user_id,
+                )
+            )
+            or db.scalar(
+                select(func.count())
+                .select_from(ContentStatus)
+                .where(
+                    ContentStatus.content_id == content_id,
+                    ContentStatus.user_id != user_id,
+                )
+            )
+            or db.scalar(
+                select(func.count())
+                .select_from(ContentViewHistory)
+                .where(
+                    ContentViewHistory.content_id == content_id,
+                    ContentViewHistory.user_id != user_id,
+                )
+            )
+            or db.scalar(
+                select(func.count())
+                .select_from(UserSiteImport)
+                .where(
+                    UserSiteImport.content_id == content_id,
+                    UserSiteImport.user_id != user_id,
+                )
+            )
+        )
+        if used_by_others:
+            stats["kept"] += 1
+            continue
+
+        db.execute(sa_delete(ContentTag).where(ContentTag.content_id == content_id))
+        db.execute(
+            sa_delete(ContentFavorite).where(ContentFavorite.content_id == content_id)
+        )
+        db.execute(
+            sa_delete(ContentStatus).where(ContentStatus.content_id == content_id)
+        )
+        db.execute(
+            sa_delete(ContentViewHistory).where(
+                ContentViewHistory.content_id == content_id
+            )
+        )
+        db.delete(content)
+        db.delete(row)
+        stats["removed"] += 1
+
+    db.commit()
+    return stats
+
+
+def set_persona_username(
+    db: Session, user_id: int, username: str
+) -> PersonaReport:
+    """记录账号绑定的 Bangumi 用户名（同步时调用；无报告则先建空壳）。"""
+    row = get_persona_report(db, user_id)
+    if row is None:
+        row = PersonaReport(user_id=user_id, bangumi_username=username, payload={})
+        db.add(row)
+    else:
+        row.bangumi_username = username
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def save_persona_report(
+    db: Session,
+    user_id: int,
+    *,
+    bangumi_username: str | None,
+    tone: str,
+    payload: dict,
+    narrative: str | None = None,
+    source: str = "template",
+) -> PersonaReport:
+    """新建或覆盖某账号的画像报告（重新生成即覆盖）。"""
+    row = get_persona_report(db, user_id)
+    if row is None:
+        row = PersonaReport(user_id=user_id)
+        db.add(row)
+    row.bangumi_username = bangumi_username
+    row.tone = tone
+    row.payload = payload
+    row.narrative = narrative
+    row.narrative_source = source
+    row.generated_at = datetime.now()
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def set_persona_narrative(
+    db: Session, user_id: int, text: str, source: str = "manual"
+) -> PersonaReport | None:
+    """保存用户贴回的 LLM 文案（没有报告时返回 None）。"""
+    row = get_persona_report(db, user_id)
+    if row is None:
+        return None
+    row.narrative = (text or "").strip() or None
+    row.narrative_source = source
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def clear_persona(db: Session, user_id: int) -> None:
+    """清除某账号的收藏快照与画像报告（隐私：一键删除）。"""
+    db.execute(
+        sa_delete(BangumiCollection).where(BangumiCollection.user_id == user_id)
+    )
+    db.execute(sa_delete(PersonaReport).where(PersonaReport.user_id == user_id))
+    db.commit()
+
+
 def count_view_history(db: Session, user_id: int) -> int:
     """浏览记录条数（个人空间统计卡）。"""
     return (
@@ -1238,6 +2593,168 @@ def ensure_default_users(db: Session) -> int:
     return 2
 
 
+# ---------- 注册邀请码（公开注册关闭后的准入控制） ----------
+#
+# 数据模型借鉴 LunaTV 邀请码系统（过期时间 / 使用痕迹 / 追溯），按本站
+# 「单表 + 弱关联」风格落地：code 明文存储（管理员要在列表页分发），
+# 单次有效，created_by 不设外键。字符集去掉 0/O/1/I 等易混淆字符，
+# 避免邀请码口头转抄时出错。
+
+# 邀请码字符集：去掉易混淆字符（0/O、1/I），8 位，空间 32^8 足够。
+INVITE_CODE_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+INVITE_CODE_LENGTH = 8
+# 单次批量生成上限（管理页表单与 CLI 共用，防止一次生成太多不好分发）。
+INVITE_CODE_MAX_BATCH = 20
+
+INVITE_STATUS_AVAILABLE = "available"
+INVITE_STATUS_USED = "used"
+INVITE_STATUS_EXPIRED = "expired"
+INVITE_STATUS_REVOKED = "revoked"
+INVITE_STATUSES = (
+    INVITE_STATUS_AVAILABLE,
+    INVITE_STATUS_USED,
+    INVITE_STATUS_EXPIRED,
+    INVITE_STATUS_REVOKED,
+)
+INVITE_STATUS_LABELS = {
+    INVITE_STATUS_AVAILABLE: "可用",
+    INVITE_STATUS_USED: "已使用",
+    INVITE_STATUS_EXPIRED: "已过期",
+    INVITE_STATUS_REVOKED: "已作废",
+}
+
+
+def invite_code_status(row: InviteCode) -> str:
+    """派生展示状态：已作废 > 已使用 > 已过期 > 可用（互斥，优先级递减）。"""
+    if row.revoked_at is not None:
+        return INVITE_STATUS_REVOKED
+    if row.used_at is not None:
+        return INVITE_STATUS_USED
+    if row.expires_at is not None and row.expires_at < datetime.now():
+        return INVITE_STATUS_EXPIRED
+    return INVITE_STATUS_AVAILABLE
+
+
+def create_invite_codes(
+    db: Session,
+    *,
+    count: int = 1,
+    expires_at: datetime | None = None,
+    note: str = "",
+    created_by: int | None = None,
+) -> list[InviteCode]:
+    """批量生成邀请码，返回明文码行列表（新的在前由调用方决定排序展示）。
+
+    逐个提交 + 唯一索引冲突重试：单个码碰撞只影响该码，不影响同批已生成的；
+    数量超限抛 ValueError，由路由层 / CLI 回显。
+    """
+    if count < 1 or count > INVITE_CODE_MAX_BATCH:
+        raise ValueError(f"单次生成数量需在 1-{INVITE_CODE_MAX_BATCH} 之间")
+    cleaned_note = (note or "").strip() or None
+    rows: list[InviteCode] = []
+    for _ in range(count):
+        for _attempt in range(5):
+            code = "".join(
+                secrets.choice(INVITE_CODE_ALPHABET) for _ in range(INVITE_CODE_LENGTH)
+            )
+            row = InviteCode(
+                code=code,
+                note=cleaned_note,
+                expires_at=expires_at,
+                created_by=created_by,
+            )
+            db.add(row)
+            try:
+                db.commit()
+            except IntegrityError:  # 碰撞：换一个码重试（不影响已提交的行）
+                db.rollback()
+                continue
+            db.refresh(row)
+            rows.append(row)
+            break
+        else:
+            raise RuntimeError("邀请码生成多次碰撞，请重试")
+    return rows
+
+
+def get_invite_code(db: Session, code: str) -> InviteCode | None:
+    """按明文码查询；空串 / 不存在返回 None。"""
+    text_code = (code or "").strip()
+    if not text_code:
+        return None
+    return db.scalar(select(InviteCode).where(InviteCode.code == text_code))
+
+
+def list_invite_codes(db: Session, *, limit: int = 200) -> list[InviteCode]:
+    """全部邀请码（新的在前），供管理页与 CLI 展示。"""
+    return list(
+        db.scalars(select(InviteCode).order_by(InviteCode.id.desc()).limit(limit))
+    )
+
+
+def check_invite_code(db: Session, code: str) -> tuple[InviteCode | None, str]:
+    """校验邀请码是否可用；返回 ``(码行, 错误信息)``，错误信息为空串表示可用。
+
+    与 consume_invite_code 分开两步：先做便宜的存在性 / 状态校验，把准确原因
+    回显给注册者；真正消费时再用条件 UPDATE 兜并发（见 consume_invite_code）。
+    """
+    row = get_invite_code(db, code)
+    if row is None:
+        return None, "邀请码不存在，请向管理员索取有效邀请码"
+    status = invite_code_status(row)
+    if status == INVITE_STATUS_USED:
+        return None, "邀请码已被使用"
+    if status == INVITE_STATUS_EXPIRED:
+        return None, "邀请码已过期"
+    if status == INVITE_STATUS_REVOKED:
+        return None, "邀请码已被管理员作废"
+    return row, ""
+
+
+def consume_invite_code(db: Session, code: str, user_id: int) -> tuple[bool, str]:
+    """消费邀请码（落使用者），返回 ``(是否成功, 错误信息)``。
+
+    条件 UPDATE（``WHERE used_at IS NULL``）兜住并发：两个请求同时提交同一个
+    码时只有一个能改成功；失败方由注册流程删除刚建的账号并回显原因。
+    """
+    row = get_invite_code(db, code)
+    if row is None:
+        return False, "邀请码不存在，请向管理员索取有效邀请码"
+    result = db.execute(
+        update(InviteCode)
+        .where(InviteCode.id == row.id, InviteCode.used_at.is_(None))
+        .values(used_by=user_id, used_at=datetime.now())
+    )
+    db.commit()
+    if not result.rowcount:
+        return False, "邀请码已被使用"
+    return True, ""
+
+
+def revoke_invite_code(db: Session, invite_id: int) -> tuple[bool, str]:
+    """作废邀请码（仅未使用的可作废）；返回 ``(是否成功, 错误信息)``。"""
+    row = db.get(InviteCode, invite_id)
+    if row is None:
+        return False, "邀请码不存在"
+    if row.used_at is not None:
+        return False, "邀请码已被使用，无需作废"
+    if row.revoked_at is not None:
+        return False, "邀请码已作废"
+    row.revoked_at = datetime.now()
+    db.commit()
+    return True, ""
+
+
+def delete_user(db: Session, user: User) -> None:
+    """删除账号（单表按主键，不做级联）。
+
+    目前唯一调用方是注册流程的并发兜底：邀请码条件消费失败时，把刚创建的
+    账号删掉，保证「一个邀请码只换一个账号」。
+    """
+    db.delete(user)
+    db.commit()
+
+
 # ---------- 测试用例管理 ----------
 
 
@@ -1251,14 +2768,30 @@ def get_case(db: Session, case_id: int) -> TestCase | None:
     return db.get(TestCase, case_id)
 
 
-def create_case(db: Session, data: TestCaseCreate) -> TestCase:
-    """新建用例；字段已由 TestCaseCreate 完成校验。"""
+def find_case(db: Session, method: str, path: str) -> TestCase | None:
+    """按「方法 + 路径」查用例（自动生成用来判重，同路径不同方法是两条用例）。"""
+    return db.scalars(
+        select(TestCase).where(TestCase.method == method.upper(), TestCase.path == path)
+    ).first()
+
+
+def set_case_enabled(db: Session, case: TestCase, enabled: bool) -> TestCase:
+    """启停用例：接口下线时只停用，不删除（历史执行记录靠 case_id 关联）。"""
+    case.enabled = enabled
+    db.commit()
+    db.refresh(case)
+    return case
+
+
+def create_case(db: Session, data: TestCaseCreate, source: str = CASE_SOURCE_MANUAL) -> TestCase:
+    """新建用例；字段已由 TestCaseCreate 完成校验。source 默认人工录入。"""
     case = TestCase(
         name=data.name,
         method=data.method,
         path=data.path,
         expected_status=data.expected_status,
         enabled=data.enabled,
+        source=source,
     )
     db.add(case)
     db.commit()

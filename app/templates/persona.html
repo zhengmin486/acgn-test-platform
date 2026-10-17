@@ -1,0 +1,370 @@
+{% extends "base_content.html" %}
+{% block title %}我的阿宅画像 - ACGN 内容平台{% endblock %}
+{% block content %}
+<div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-3">
+    <div>
+        <h1 class="h3 mb-1 section-heading">{% if guest_mode %}阿宅画像试算{% else %}我的阿宅画像{% endif %}</h1>
+        <p class="text-muted small mb-0">
+            {% if guest_mode %}
+            这是免登录试算结果：只读公开收藏、不保存。登录后可保存画像并把喜欢的作品同步到本站。
+            {% else %}
+            绑定 Bangumi 用户名，把公开收藏和站内收藏 / 标注一起算成一份口味画像。
+            {% endif %}
+        </p>
+    </div>
+    {% if guest_mode %}
+    <div class="d-flex gap-2">
+        <a class="btn btn-primary btn-sm" href="/login?next=/me/persona">登录保存</a>
+        <a class="btn btn-outline-secondary btn-sm" href="/register">注册</a>
+    </div>
+    {% else %}
+    <a class="btn btn-outline-secondary btn-sm" href="/me">&larr; 返回个人空间</a>
+    {% endif %}
+</div>
+
+{% if request.query_params.get('sync') %}
+<div class="alert alert-success py-2">已同步 {{ request.query_params.get('sync') }} 条 Bangumi 收藏。</div>
+{% endif %}
+{% if request.query_params.get('site') == 'ok' %}
+<div class="alert alert-success py-2">
+    已同步到本站：新增作品 {{ request.query_params.get('site_new') }} 部、关联已有作品 {{ request.query_params.get('site_linked') }} 部；
+    补收藏 {{ request.query_params.get('site_fav') }} 条、补标注 {{ request.query_params.get('site_mark') }} 条。
+    {% if request.query_params.get('site_limited') == '1' %}
+    本次达到 {{ site_sync.limit }} 部上限，还剩
+    <strong>{{ site_sync.pending }}</strong> 部未导入。
+    {% if site_sync.pending %}
+    <form method="post" action="/me/persona/sync-site" class="d-inline-block ms-1"
+          onsubmit="this.querySelector('button[type=submit]').disabled=true">
+        <button class="btn btn-sm btn-outline-primary py-0" type="submit">继续导入剩余 {{ site_sync.pending }} 部</button>
+    </form>
+    {% endif %}
+    {% endif %}
+</div>
+{% endif %}
+{% if request.query_params.get('undo') == 'ok' %}
+<div class="alert alert-info py-2">
+    已撤销导入：删除 {{ request.query_params.get('undo_removed') }} 部作品。
+    {% if request.query_params.get('undo_kept') not in (None, '0') %}
+    另有 {{ request.query_params.get('undo_kept') }} 部已被其他用户收藏 / 标注 / 浏览，已保留。
+    {% endif %}
+</div>
+{% endif %}
+{% if request.query_params.get('generated') %}
+<div class="alert alert-success py-2">画像已生成。</div>
+{% endif %}
+{% if request.query_params.get('narrative') == 'manual' %}
+<div class="alert alert-success py-2">文案已保存。</div>
+{% elif request.query_params.get('narrative') == 'llm' %}
+<div class="alert alert-success py-2">已用配置的 LLM 生成文案。</div>
+{% endif %}
+{% if request.query_params.get('llmtest') %}
+<div class="alert alert-success py-2">
+    接口可用（{{ request.query_params.get('llmtest') }}），返回：{{ request.query_params.get('llmreply') }}
+</div>
+{% endif %}
+{% if request.query_params.get('cleared') %}
+<div class="alert alert-info py-2">已清除本账号的 Bangumi 快照与画像。</div>
+{% endif %}
+{% if request.query_params.get('error') %}
+<div class="alert alert-danger py-2">{{ request.query_params.get('error') }}</div>
+{% endif %}
+
+<div class="card app-card mb-3">
+    <div class="card-header bg-white fw-semibold">{% if guest_mode %}1. 试算对象{% else %}1. 绑定 Bangumi 公开收藏{% endif %}</div>
+    <div class="card-body">
+        {% if guest_mode %}
+        <div class="d-flex flex-wrap align-items-end justify-content-between gap-3">
+            <div class="small">
+                正在分析 <strong>{{ bound_username }}</strong> 的公开收藏，共识别
+                <strong>{{ collections_count }}</strong> 条（最多读前 {{ guest_max_items }} 条）。
+                结果不保存、不建账号。
+            </div>
+            <form method="post" action="/persona/preview" class="d-flex align-items-end gap-2"
+                  onsubmit="var b=this.querySelector('button[type=submit]'); b.disabled=true; b.textContent='读取中…';">
+                <div>
+                    <label class="form-label small mb-0" for="guest-bgm-2">换个用户名试试</label>
+                    <input class="form-control form-control-sm" id="guest-bgm-2" name="username"
+                           value="{{ bound_username }}" maxlength="100">
+                </div>
+                <button class="btn btn-sm btn-outline-primary" type="submit">重新试算</button>
+            </form>
+        </div>
+        {% else %}
+        <form method="post" action="/me/persona/sync" class="row g-2 align-items-end">
+            <div class="col-sm-6 col-md-4">
+                <label class="form-label small mb-0" for="bgm-user">Bangumi 用户名</label>
+                <input class="form-control form-control-sm" id="bgm-user" name="username"
+                       value="{{ bound_username }}" placeholder="例如 sai" maxlength="100">
+            </div>
+            <div class="col-auto">
+                <button class="btn btn-sm btn-primary" type="submit">同步公开收藏</button>
+            </div>
+            <div class="col-auto">
+                <span class="form-text">只读公开收藏；私有条目看不到（需要 OAuth，暂未接入）。</span>
+            </div>
+        </form>
+        <div class="mt-3 d-flex flex-wrap gap-2 small text-muted">
+            <span>已同步 <strong>{{ collections_count }}</strong> 条</span>
+            {% for key, label in status_labels.items() %}
+            {% set count = status_counts.get(key, 0) %}
+            {% if count %}<span>· {{ label }} {{ count }}</span>{% endif %}
+            {% endfor %}
+            {% for key, label in type_labels.items() %}
+            {% set count = type_counts.get(key, 0) %}
+            {% if count %}<span>· {{ label }} {{ count }}</span>{% endif %}
+            {% endfor %}
+        </div>
+        {% if collections_count %}
+        <form method="post" action="/me/persona/clear" class="mt-3"
+              data-confirm="确定清除已同步的 Bangumi 收藏与画像报告吗？" data-confirm-title="清除画像数据">
+            <button class="btn btn-sm btn-outline-danger" type="submit">清除我的画像数据</button>
+        </form>
+        {% endif %}
+        {% endif %}
+    </div>
+</div>
+
+{% if not guest_mode %}
+<div class="card app-card mb-3">
+    <div class="card-header bg-white fw-semibold">2. 同步到本站作品库</div>
+    <div class="card-body">
+        {% if collections_count %}
+        <p class="small mb-2">
+            收藏里可识别 <strong>{{ site_sync.total }}</strong> 部作品：站内已有
+            <strong>{{ site_sync.existing }}</strong> 部，待导入
+            <strong>{{ site_sync.pending }}</strong> 部。
+        </p>
+        <p class="small text-muted mb-3">
+            「看过 / 在看 / 想看」会同时补成站内收藏与标注（已有手动标注不覆盖）；
+            抛弃 / 搁置只补作品条目，不写收藏。单次最多导入 {{ site_sync.limit }} 部，
+            同步进来的作品封面暂用渐变占位。
+        </p>
+        <form method="post" action="/me/persona/sync-site" class="d-flex flex-wrap align-items-center gap-2"
+              data-confirm="把收藏里站内还没有的作品补进本站作品库，并补齐收藏与标注？" data-confirm-title="同步到本站"
+              onsubmit="this.querySelector('button[type=submit]').disabled=true">
+            <button class="btn btn-sm btn-primary" type="submit">
+                同步到本站
+                {% if site_sync.pending > site_sync.limit %}
+                （本次 {{ site_sync.limit }} 部，剩 {{ site_sync.pending - site_sync.limit }} 部）
+                {% endif %}
+            </button>
+            <a class="btn btn-sm btn-outline-secondary" href="/contents">去作品库看看</a>
+            <a class="btn btn-sm btn-outline-secondary" href="/me?tab=favorites">我的收藏</a>
+        </form>
+        {% else %}
+        <p class="small text-muted mb-0">先在上方绑定用户名并同步收藏，再决定要不要把这批作品导入本站。</p>
+        {% endif %}
+
+        {% if site_imports_total %}
+        <div class="border-top mt-3 pt-3">
+            <p class="small mb-2">
+                已由我导入 <strong>{{ site_imports_total }}</strong> 部作品（下面列出最近 10 部）。
+                撤销只删除没人用过的条目——被其他用户收藏 / 标注 / 浏览过的会保留。
+            </p>
+            <ul class="small text-muted mb-3">
+                {% for content, created_at in site_imports %}
+                <li>
+                    <a href="/contents/{{ content.id }}">{{ content.title }}</a>
+                    <span>· {{ created_at.strftime('%Y-%m-%d %H:%M') }}</span>
+                </li>
+                {% endfor %}
+            </ul>
+            <form method="post" action="/me/persona/site-imports/undo"
+                  data-confirm="撤销我导入的作品？没被别人使用过的会被永久删除。" data-confirm-title="撤销导入"
+                  onsubmit="this.querySelector('button[type=submit]').disabled=true">
+                <button class="btn btn-sm btn-outline-danger" type="submit">撤销我的导入</button>
+            </form>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<div class="card app-card mb-3">
+    <div class="card-header bg-white fw-semibold">3. 生成画像</div>
+    <div class="card-body">
+        <form method="post" action="/me/persona/generate" class="row g-2 align-items-end">
+            <div class="col-auto">
+                <label class="form-label small mb-0" for="tone">语气</label>
+                <select class="form-select form-select-sm" id="tone" name="tone">
+                    {% for key, label in tone_labels.items() %}
+                    <option value="{{ key }}"{% if tone == key %} selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-auto">
+                <button class="btn btn-sm btn-primary" type="submit"
+                        {% if not collections_count %}disabled{% endif %}>生成 / 重新生成</button>
+            </div>
+            <div class="col-auto">
+                <span class="form-text">
+                    {% if not collections_count %}先同步 Bangumi 收藏；{% endif %}
+                    规则算分，LLM 只写文案。
+                </span>
+            </div>
+        </form>
+    </div>
+</div>
+{% endif %}
+
+{% if report and payload %}
+{% if guest_mode %}
+<div class="alert alert-info py-2">
+    下面是免登录试算结果，刷新就没了；登录后可保存、导入本站、生成完整文案。
+</div>
+{% endif %}
+<div class="card app-card mb-3">
+    <div class="card-body p-4">
+        <div class="d-flex flex-wrap justify-content-between align-items-start gap-3">
+            <div>
+                <h2 class="persona-title mb-1">{{ template_report.title }}</h2>
+                <p class="persona-subtitle mb-0">{{ template_report.subtitle }}</p>
+            </div>
+            <span class="badge bg-info text-dark">生成于 {{ report.generated_at.strftime('%Y-%m-%d %H:%M') }}</span>
+        </div>
+
+        <div class="row g-4 mt-1 align-items-center">
+            <div class="col-12 col-lg-5">
+                <svg class="persona-radar" viewBox="0 0 300 240" width="100%" role="img" aria-label="六维画像">
+                    {% for ring in radar.grid %}
+                    <polygon points="{{ ring }}" fill="none" stroke="#d8e3ef" stroke-width="1"/>
+                    {% endfor %}
+                    {% for axis in radar.axes %}
+                    <line x1="{{ axis.x1 }}" y1="{{ axis.y1 }}" x2="{{ axis.x2 }}" y2="{{ axis.y2 }}"
+                          stroke="#d8e3ef" stroke-width="1"/>
+                    {% endfor %}
+                    <polygon points="{{ radar.polygon }}" fill="rgba(102,204,255,0.35)"
+                             stroke="#2b9ae0" stroke-width="2"/>
+                    {% for label in radar.labels %}
+                    <text x="{{ label.x }}" y="{{ label.y }}" text-anchor="{{ label.anchor }}"
+                          dominant-baseline="middle" font-size="12" fill="#5b6b7a">{{ label.text }}</text>
+                    {% endfor %}
+                </svg>
+            </div>
+            <div class="col-12 col-lg-7">
+                {% if narrative %}
+                <div class="persona-narrative">{{ narrative }}</div>
+                <p class="small text-muted mb-0 mt-2">
+                    文案来源：{{ '已配置的 LLM' if narrative_source == 'llm' else '手动贴回' }}。
+                </p>
+                {% else %}
+                <div class="persona-narrative">{{ template_report.entry_story }}
+{{ template_report.core_taste }}
+{{ template_report.dependencies }}</div>
+                <p class="small text-muted mb-0 mt-2">这是规则版骨架文案；想要样例那种写法，把下方向导贴给 LLM 再贴回。</p>
+                {% endif %}
+            </div>
+        </div>
+
+        <div class="row g-3 mt-3">
+            <div class="col-md-6">
+                <h3 class="h6">本命类型</h3>
+                <div class="d-flex flex-wrap gap-1">
+                    {% for name in template_report.favorite_genres %}
+                    <span class="tag-chip">{{ name }}</span>
+                    {% else %}
+                    <span class="text-muted small">数据不足</span>
+                    {% endfor %}
+                </div>
+            </div>
+            <div class="col-md-6">
+                <h3 class="h6">避雷类型</h3>
+                <div class="d-flex flex-wrap gap-1">
+                    {% for name in template_report.avoided_genres %}
+                    <span class="tag-chip tag-chip-clear">{{ name }}</span>
+                    {% else %}
+                    <span class="text-muted small">负向信号不足，暂时推断不出</span>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+
+        <div class="row g-3 mt-3">
+            <div class="col-md-6">
+                <h3 class="h6">二次元人格</h3>
+                <div class="d-flex flex-wrap gap-1">
+                    {% for tag in template_report.persona_tags %}
+                    <span class="badge bg-primary">{{ tag }}</span>
+                    {% endfor %}
+                </div>
+            </div>
+            <div class="col-md-6">
+                <h3 class="h6">代表作</h3>
+                <ul class="small mb-0">
+                    {% for work in profile.representative %}
+                    <li>{{ work.title }}{% if work.year %}（{{ work.year }}）{% endif %}</li>
+                    {% else %}
+                    <li class="text-muted">数据不足</li>
+                    {% endfor %}
+                </ul>
+            </div>
+        </div>
+
+        <div class="mt-3">
+            <h3 class="h6">建议</h3>
+            <p class="small mb-1">{{ template_report.advice }}</p>
+            <p class="small text-muted mb-0">锐评：{{ template_report.final_quip }}</p>
+        </div>
+        <p class="small text-muted mt-3 mb-0">{{ template_report.data_note }}</p>
+    </div>
+</div>
+
+{% if guest_mode %}
+<div class="card app-card mb-3">
+    <div class="card-body p-4">
+        <h2 class="h6 mb-2">登录后继续</h2>
+        <p class="small text-muted mb-3">
+            保存这份画像、按「看过 / 想看」筛选标注、把收藏里站内没有的作品同步到本站作品库，
+            还能用 LLM 生成完整文案（锐评 / 温和可切换）。
+        </p>
+        <div class="d-flex flex-wrap gap-2">
+            <a class="btn btn-primary btn-sm" href="/login?next=/me/persona">登录</a>
+            <a class="btn btn-outline-secondary btn-sm" href="/register">注册</a>
+            <a class="btn btn-outline-secondary btn-sm" href="/persona">换个用户名再试</a>
+        </div>
+    </div>
+</div>
+{% else %}
+<div class="card app-card mb-3">
+    <div class="card-header bg-white fw-semibold">4. LLM 文案（可选）</div>
+    <div class="card-body">
+        {% if llm_enabled %}
+        <form method="post" action="/me/persona/llm" class="d-flex flex-wrap align-items-center gap-2 mb-3">
+            <button class="btn btn-sm btn-primary" type="submit">用已配置的 LLM 生成文案</button>
+            <button class="btn btn-sm btn-outline-secondary" type="submit"
+                    formaction="/me/persona/llm/test">测一下接口</button>
+            <span class="form-text mb-0">{{ llm.label }} · {{ llm.model }}</span>
+        </form>
+        {% else %}
+        <p class="small text-muted mb-1">
+            没配接口也能用：复制下面的提示词，贴到千问 / 豆包 / DeepSeek 网页版，再把结果贴回即可。
+        </p>
+        <p class="small text-muted mb-3">
+            {{ llm.hint }}
+            想直接生成的话，配 <code>PERSONA_LLM_PROVIDER=deepseek|doubao|glm</code>
+            加 <code>PERSONA_LLM_API_KEY</code> 即可（地址与模型按预设自动补）。
+        </p>
+        {% endif %}
+        <label class="form-label small mb-1" for="persona-prompt">提示词（复制到你的 LLM 网页版 / App）</label>
+        <textarea class="form-control persona-prompt" id="persona-prompt" rows="10" readonly>{{ prompt }}</textarea>
+        <div class="d-flex flex-wrap gap-2 mt-2">
+            <button class="btn btn-sm btn-outline-secondary" type="button"
+                    onclick="if (navigator.clipboard) { navigator.clipboard.writeText(document.getElementById('persona-prompt').value); }">复制提示词</button>
+        </div>
+        <form method="post" action="/me/persona/narrative" class="mt-3">
+            <label class="form-label small mb-1" for="persona-narrative">把 LLM 生成的文案贴回这里</label>
+            <textarea class="form-control" id="persona-narrative" name="narrative" rows="10"
+                      placeholder="粘贴 LLM 输出的完整报告">{{ narrative or '' }}</textarea>
+            <div class="d-flex flex-wrap align-items-center gap-2 mt-2">
+                <button class="btn btn-sm btn-primary" type="submit">保存文案</button>
+                <span class="form-text mb-0">保存后会用你的文案替换上面的骨架文案。</span>
+            </div>
+        </form>
+    </div>
+</div>
+{% endif %}
+{% else %}
+<div class="detail-empty">
+    还没有生成画像。先在上方同步 Bangumi 收藏，再点「生成 / 重新生成」。
+</div>
+{% endif %}
+{% endblock %}

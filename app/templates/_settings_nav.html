@@ -1,0 +1,20 @@
+{# 站点设置二级导航（内容平台 → 站点设置，/admin/*）。
+   管「人」与「准入」：账号验证 / 注册邀请码 / 角色管理（仅站长）。
+   内容数据运营在 /manage 下，见 _manage_nav.html。 #}
+{% set settings_path = request.url.path %}
+<ul class="nav data-subnav mb-3">
+    <li class="nav-item">
+        <a class="nav-link{% if settings_path.startswith('/admin/accounts') %} active{% endif %}"
+           href="/admin/accounts">账号验证</a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link{% if settings_path.startswith('/admin/invites') %} active{% endif %}"
+           href="/admin/invites">注册邀请码</a>
+    </li>
+    {% if current_user and current_user.is_owner %}
+    <li class="nav-item">
+        <a class="nav-link{% if settings_path.startswith('/admin/roles') %} active{% endif %}"
+           href="/admin/roles">角色管理</a>
+    </li>
+    {% endif %}
+</ul>

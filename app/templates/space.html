@@ -45,15 +45,18 @@
             <div class="flex-grow-1">
                 <div class="d-flex flex-wrap align-items-center gap-2">
                     <span class="h5 mb-0">{{ account.username }}</span>
-                    <span class="badge {{ 'bg-primary' if account.role == 'admin' else 'bg-secondary' }}">
-                        {{ '管理员' if account.role == 'admin' else '普通用户' }}
+                    <span class="badge {{ 'bg-primary' if account.role != 'user' else 'bg-secondary' }}">
+                        {{ role_labels.get(account.role, account.role) }}
                     </span>
                 </div>
                 <div class="small text-muted mt-1">
                     邮箱：{{ account.email or '未绑定' }} · 注册于 {{ account.created_at.strftime('%Y-%m-%d') }}
                 </div>
             </div>
-            <a class="btn btn-outline-secondary btn-sm" href="/me?tab=history">浏览记录 &rarr;</a>
+            <div class="d-flex flex-wrap gap-2">
+                <a class="btn btn-outline-primary btn-sm" href="/me/persona">阿宅画像 &rarr;</a>
+                <a class="btn btn-outline-secondary btn-sm" href="/me?tab=history">浏览记录 &rarr;</a>
+            </div>
         </div>
         <div class="row g-3 mt-3">
             <div class="col-6 col-md-3">

@@ -1,7 +1,7 @@
-{% extends "base_admin.html" %}
+{% extends "base_content.html" %}
 {% from "_pager.html" import pager %}
 {# 新番档期管理：查看 / 删除 / 按档期重新同步（复用既有 Yuc 同步流程） #}
-{% block title %}新番档期 - 测试管理平台{% endblock %}
+{% block title %}新番档期 - ACGN 内容平台{% endblock %}
 {% block content %}
 <div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-1">
     <div>
@@ -16,10 +16,10 @@
     </button>
     {% endif %}
 </div>
-{% include "_data_nav.html" %}
+{% include "_manage_nav.html" %}
 
 {# 当前筛选档期的重新同步表单（按钮通过 form 属性引用，避免表单嵌套） #}
-<form id="resync-current" method="post" action="/admin/data/schedules/resync">
+<form id="resync-current" method="post" action="/manage/schedules/resync">
     <input type="hidden" name="season_code" value="{{ current_season or '' }}">
     <input type="hidden" name="season" value="{{ current_season or '' }}">
     <input type="hidden" name="q" value="{{ q }}">
@@ -42,7 +42,7 @@
 </div>
 {% endif %}
 
-<form class="row g-2 align-items-end mb-3" method="get" action="/admin/data/schedules">
+<form class="row g-2 align-items-end mb-3" method="get" action="/manage/schedules">
     <div class="col-sm-4 col-md-3">
         <label class="form-label" for="season">档期</label>
         <select class="form-select form-select-sm" id="season" name="season">
@@ -61,7 +61,7 @@
     </div>
     <div class="col-auto">
         <button class="btn btn-sm btn-primary" type="submit">筛选</button>
-        <a class="btn btn-sm btn-outline-secondary" href="/admin/data/schedules">重置</a>
+        <a class="btn btn-sm btn-outline-secondary" href="/manage/schedules">重置</a>
     </div>
 </form>
 
@@ -108,14 +108,14 @@
             <td class="text-muted small">{{ w.last_synced_at.strftime('%Y-%m-%d %H:%M') }}</td>
             <td class="text-nowrap">
                 <a class="btn btn-sm btn-outline-secondary" href="/schedule?season={{ w.season_code }}">查看</a>
-                <form method="post" action="/admin/data/schedules/resync" class="d-inline">
+                <form method="post" action="/manage/schedules/resync" class="d-inline">
                     <input type="hidden" name="season_code" value="{{ w.season_code }}">
                     <input type="hidden" name="season" value="{{ current_season or '' }}">
                     <input type="hidden" name="q" value="{{ q }}">
                     <input type="hidden" name="page" value="{{ page }}">
                     <button class="btn btn-sm btn-outline-primary" type="submit">重新同步</button>
                 </form>
-                <form method="post" action="/admin/data/schedules/{{ w.id }}/delete" class="d-inline">
+                <form method="post" action="/manage/schedules/{{ w.id }}/delete" class="d-inline">
                     <input type="hidden" name="season" value="{{ current_season or '' }}">
                     <input type="hidden" name="q" value="{{ q }}">
                     <input type="hidden" name="page" value="{{ page }}">
@@ -129,7 +129,7 @@
 </div>
 
 <div class="d-flex flex-wrap justify-content-end align-items-center gap-2 mt-3">
-    {{ pager('/admin/data/schedules?season=' ~ (current_season or '')|urlencode ~ '&q=' ~ (q|urlencode) ~ '&', page, total_pages) }}
+    {{ pager('/manage/schedules?season=' ~ (current_season or '')|urlencode ~ '&q=' ~ (q|urlencode) ~ '&', page, total_pages) }}
 </div>
 {% endif %}
 {% endblock %}

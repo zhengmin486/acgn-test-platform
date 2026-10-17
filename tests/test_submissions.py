@@ -188,11 +188,11 @@ class TestSubmit:
 
 class TestAdminReview:
     def test_admin_page_requires_admin(self, sub_env):
-        assert sub_env.client.get("/admin/submissions").status_code == 303  # 游客
+        assert sub_env.client.get("/manage/submissions").status_code == 303  # 游客
         login_as_user(sub_env.client)
-        assert sub_env.client.get("/admin/submissions").status_code == 403
+        assert sub_env.client.get("/manage/submissions").status_code == 403
         login_as_admin(sub_env.client)
-        assert sub_env.client.get("/admin/submissions").status_code == 200
+        assert sub_env.client.get("/manage/submissions").status_code == 200
 
     def test_approve_create_writes_content(self, sub_env):
         login_as_user(sub_env.client)
@@ -200,11 +200,11 @@ class TestAdminReview:
         row = _pending(sub_env.session_factory)[0]
 
         login_as_admin(sub_env.client)
-        page = sub_env.client.get("/admin/submissions?status=pending")
+        page = sub_env.client.get("/manage/submissions?status=pending")
         assert "新词条测试" in page.text
 
         resp = sub_env.client.post(
-            f"/admin/submissions/{row.id}/approve", follow_redirects=False
+            f"/manage/submissions/{row.id}/approve", follow_redirects=False
         )
         assert resp.status_code == 303
         assert "decided=ok" in resp.headers["location"]
@@ -237,7 +237,7 @@ class TestAdminReview:
 
         login_as_admin(sub_env.client)
         resp = sub_env.client.post(
-            f"/admin/submissions/{row.id}/approve", follow_redirects=False
+            f"/manage/submissions/{row.id}/approve", follow_redirects=False
         )
         assert resp.status_code == 303
 
@@ -257,7 +257,7 @@ class TestAdminReview:
 
         login_as_admin(sub_env.client)
         resp = sub_env.client.post(
-            f"/admin/submissions/{row.id}/reject",
+            f"/manage/submissions/{row.id}/reject",
             data={"note": "信息不完整"},
             follow_redirects=False,
         )
@@ -280,11 +280,11 @@ class TestAdminReview:
 
         login_as_admin(sub_env.client)
         first = sub_env.client.post(
-            f"/admin/submissions/{row.id}/approve", follow_redirects=False
+            f"/manage/submissions/{row.id}/approve", follow_redirects=False
         )
         assert "decided=ok" in first.headers["location"]
         second = sub_env.client.post(
-            f"/admin/submissions/{row.id}/approve", follow_redirects=False
+            f"/manage/submissions/{row.id}/approve", follow_redirects=False
         )
         assert "decided=error" in second.headers["location"]
 
@@ -301,6 +301,6 @@ class TestAdminReview:
         row = _pending(sub_env.session_factory)[0]
 
         resp = sub_env.client.post(
-            f"/admin/submissions/{row.id}/approve", follow_redirects=False
+            f"/manage/submissions/{row.id}/approve", follow_redirects=False
         )
         assert resp.status_code == 403

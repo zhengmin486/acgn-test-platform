@@ -1,0 +1,133 @@
+{% extends "base_content.html" %}
+{# 作者/公司索引页（作品关系）：三种视图共用本模板。
+   - view=index  花名册：实体列表 + 系列列表（均按关联作品数排序）；
+   - view=entity 单个作者/公司：其作品列表（按评分降序）；
+   - view=series 单个系列：同系列作品列表（按评分降序）。
+   数据来自 Bangumi 信息卡识别（app/entity_links.py 回填写入）。 #}
+{% block title %}{% if view == 'entity' %}{{ entity.name }}{% elif view == 'series' %}{{ series.name }}{% else %}作者 / 公司{% endif %} - ACGN 内容平台{% endblock %}
+
+{% macro stars(rating) %}
+{% set star_count = (rating / 2) | int %}
+<span class="detail-stars" aria-hidden="true">{% for i in range(1, 6) %}<span class="{{ 'star-on' if i <= star_count else 'star-off' }}">★</span>{% endfor %}</span>
+{% endmacro %}
+
+{% macro work_cards(contents) %}
+<div class="row g-3">
+    {% for item in contents %}
+    <div class="col-12 col-sm-6 col-lg-4">
+        <a class="work-card" href="/contents/{{ item.id }}">
+            <span class="work-cover-box">
+                <span class="work-cover" aria-hidden="true">{{ item.title[:1] }}</span>
+                {% if item.image_url %}
+                <img class="work-cover" src="{{ thumb_src(item.image_url) }}" alt="{{ item.title }}封面" loading="lazy" onerror="this.style.display='none'">
+                {% endif %}
+            </span>
+            <span class="work-card-body">
+                <span class="d-flex justify-content-between align-items-center gap-2">
+                    <span class="fw-semibold text-truncate">{{ item.title }}</span>
+                    <span class="badge detail-type-badge-sm">{{ type_labels.get(item.type, item.type) }}</span>
+                </span>
+                <span class="d-flex align-items-center gap-2 mt-1">
+                    {{ stars(item.rating) }}
+                    <span class="small text-muted">{{ '%.1f' % item.rating }}</span>
+                </span>
+                <span class="small text-secondary mt-1 work-card-summary">{{ item.summary[:60] }}{% if item.summary|length > 60 %}…{% endif %}</span>
+            </span>
+        </a>
+    </div>
+    {% endfor %}
+</div>
+{% endmacro %}
+
+{% block content %}
+{% if view == 'entity' %}
+{# ===== 单个作者 / 公司 ===== #}
+<div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-3">
+    <div>
+        <h1 class="h3 mb-1 section-heading">{{ entity.name }}</h1>
+        <p class="text-muted small mb-0">
+            <span class="badge detail-type-badge-sm">{{ entity_type_label }}</span>
+            共 {{ contents|length }} 部作品 · 按评分从高到低排列
+        </p>
+    </div>
+    <div class="d-flex flex-wrap align-items-center gap-2">
+        <a class="btn btn-outline-primary btn-sm" href="{{ filter_url }}">查看全部作品 &rarr;</a>
+        <a class="btn btn-outline-secondary btn-sm" href="/creators">&larr; 返回索引</a>
+    </div>
+</div>
+{% if not contents %}
+<div class="detail-empty">该作者/公司名下暂无可展示的作品。</div>
+{% else %}
+{{ work_cards(contents) }}
+{% endif %}
+
+{% elif view == 'series' %}
+{# ===== 单个系列 ===== #}
+<div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-3">
+    <div>
+        <h1 class="h3 mb-1 section-heading">系列：{{ series.name }}</h1>
+        <p class="text-muted small mb-0">共 {{ contents|length }} 部作品 · 按评分从高到低排列</p>
+    </div>
+    <a class="btn btn-outline-secondary btn-sm" href="/creators">&larr; 返回索引</a>
+</div>
+{% if not contents %}
+<div class="detail-empty">该系列下暂无可展示的作品。</div>
+{% else %}
+{{ work_cards(contents) }}
+{% endif %}
+
+{% else %}
+{# ===== 索引页：实体花名册 + 系列列表 ===== #}
+<div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-3">
+    <div>
+        <h1 class="h3 mb-1 section-heading">作者 / 公司</h1>
+        <p class="text-muted small mb-0">按关联作品数从多到少排列；数据来自 Bangumi 信息卡识别。</p>
+    </div>
+    <a class="btn btn-outline-secondary btn-sm" href="/">&larr; 返回首页</a>
+</div>
+
+<div class="card detail-section mb-3">
+    <div class="card-header bg-white fw-semibold">作者 / 公司花名册</div>
+    <div class="card-body">
+        {% if entities %}
+        <div class="d-flex flex-wrap align-items-center gap-2">
+            {% for entity, count in entities %}
+            <a class="tag-chip" href="/creators/{{ entity.name|urlencode }}">
+                {{ entity.name }}
+                <span class="badge detail-type-badge-sm">{{ entity_type_labels.get(entity.entity_type, entity.entity_type) }}</span>
+                <span class="tag-count">{{ count }}</span>
+            </a>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="detail-empty">
+            还没有识别到任何作者/公司关联。<br>
+            <span class="small">导入 Bangumi 条目时会自动识别信息卡；存量作品可运行
+            <code>python scripts/link_entities.py</code> 回填（预览模式，确认后加 --apply）。</span>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<div class="card detail-section">
+    <div class="card-header bg-white fw-semibold">系列</div>
+    <div class="card-body">
+        {% if series_list %}
+        <div class="d-flex flex-wrap align-items-center gap-2">
+            {% for series, count in series_list %}
+            <a class="tag-chip" href="/creators/{{ series.name|urlencode }}">
+                {{ series.name }}<span class="tag-count">{{ count }}</span>
+            </a>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="detail-empty">
+            还没有识别到任何系列。<br>
+            <span class="small">存量作品可运行 <code>python scripts/link_entities.py --series</code>
+            从关联条目回填（仅当配对作品也在库内时才归系列）。</span>
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endif %}
+{% endblock %}

@@ -771,7 +771,7 @@ class TestSchedulePages:
         assert 'referrerpolicy="no-referrer"' in resp.text  # 热链图片需要该属性
         assert "https://www.bilibili.com/" in resp.text
         assert "Yuc.wiki 来源" in resp.text
-        assert "/schedule/runs" in resp.text  # 导航入口
+        assert "/manage/sync/runs" in resp.text  # 导航入口
 
     def test_schedule_page_season_switch_and_filter(self, seeded):
         old = seeded.get("/schedule", params={"season": "202607"})
@@ -801,14 +801,14 @@ class TestSchedulePages:
             resp = client.get("/schedule")
             assert resp.status_code == 200
             assert "暂无已同步" in resp.text
-            runs = client.get("/schedule/runs")
+            runs = client.get("/manage/sync/runs")
             assert runs.status_code == 200
             assert "暂无同步记录" in runs.text
         finally:
             app.dependency_overrides.pop(get_db, None)
 
     def test_runs_page_lists_history(self, seeded):
-        resp = seeded.get("/schedule/runs")
+        resp = seeded.get("/manage/sync/runs")
         assert resp.status_code == 200
         assert "202610" in resp.text
         assert "dry-run" in resp.text

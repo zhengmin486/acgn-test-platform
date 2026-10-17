@@ -18,7 +18,10 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from app import crud
+from app.auth import SESSION_COOKIE
+from app.config import settings
 from app.models import ExecutionBatch, ExecutionRecord, TestCase
+from app.security import create_session_token
 
 _MAX_ERROR_CHARS = 200
 
@@ -52,6 +55,22 @@ def _is_local_path(path: str) -> bool:
     )
 
 
+def _apply_identity(db: Session) -> None:
+    """给进程内客户端带上身份：以权限最高的 staff 账号执行。
+
+    测试工具是管理员用的——匿名身份只能测到一堆 401/303，测不到后台接口本身。
+    库里没有管理员账号时清空身份，退回匿名（此时 401 就是真实结果，不伪装）。
+    """
+    client = _get_client()
+    account = crud.highest_staff_account(db)
+    if account is None:
+        client.cookies.clear()
+        return
+    client.cookies.set(
+        SESSION_COOKIE, create_session_token(account.id, settings.auth_secret_key)
+    )
+
+
 def run_case(db: Session, case: TestCase, batch_id: int | None = None) -> ExecutionRecord:
     """执行单条用例：发请求、比对预期状态码、保存记录并返回（已含主键）。
 
@@ -65,6 +84,7 @@ def run_case(db: Session, case: TestCase, batch_id: int | None = None) -> Execut
         error = "路径不合法：仅允许本站本地路径，未发送请求"
     else:
         try:
+            _apply_identity(db)
             response = _get_client().request(case.method, case.path)
             actual = response.status_code
             passed = actual == case.expected_status

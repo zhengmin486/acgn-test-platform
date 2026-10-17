@@ -1,0 +1,134 @@
+{% extends "base_content.html" %}
+{% from "_pager.html" import pager %}
+{# 关联管理：按作品手工维护「作者/公司关联」与「所属系列」。
+   自动识别（导入 / scripts/link_entities.py）覆盖不了的边角用例在这里补删。 #}
+{% block title %}关联管理 - ACGN 内容平台{% endblock %}
+{% block content %}
+<h1 class="h3 mb-1 section-heading">关联管理</h1>
+<p class="text-muted small mb-3">维护作品的作者/公司关联与所属系列：补一个信息卡没解析出来的作者、删一个错认的公司、把两部作品归入同一个系列。共 {{ total }} 部作品。</p>
+{% include "_manage_nav.html" %}
+
+{% if note_text %}
+<div class="alert alert-success py-2">{{ note_text }}</div>
+{% endif %}
+
+<form class="row g-2 align-items-end mb-3" method="get" action="/manage/entities">
+    <div class="col-sm-6 col-md-4">
+        <label class="form-label" for="q">关键词</label>
+        <input class="form-control form-control-sm" id="q" name="q" value="{{ q }}"
+               placeholder="作品标题 / 简介">
+    </div>
+    <div class="col-auto">
+        <button class="btn btn-sm btn-primary" type="submit">筛选</button>
+        <a class="btn btn-sm btn-outline-secondary" href="/manage/entities">重置</a>
+    </div>
+</form>
+
+{% if not rows %}
+<div class="detail-empty">没有符合条件的作品。</div>
+{% else %}
+<div class="table-responsive table-card">
+    <table class="table table-hover align-middle">
+        <thead>
+        <tr>
+            <th>ID</th>
+            <th>作品</th>
+            <th>作者/公司关联</th>
+            <th>所属系列</th>
+            <th>操作</th>
+        </tr>
+        </thead>
+        <tbody>
+        {% for row in rows %}
+        <tr>
+            <td>{{ row.content.id }}</td>
+            <td>
+                <div>{{ row.content.title }}</div>
+                <div class="small text-muted">
+                    <a href="/contents/{{ row.content.id }}">查看详情页</a>
+                </div>
+            </td>
+            <td>
+                {% if row.links %}
+                <div class="d-flex flex-wrap align-items-center gap-2">
+                    {% for link_id, role, name in row.links %}
+                    <span class="tag-chip">
+                        {{ role }}：{{ name }}
+                        <form method="post" action="/manage/entities/link/delete" class="d-inline m-0">
+                            <input type="hidden" name="link_id" value="{{ link_id }}">
+                            <input type="hidden" name="q" value="{{ q }}">
+                            <input type="hidden" name="page" value="{{ page }}">
+                            <button class="btn btn-sm btn-link p-0 lh-1 text-danger" type="submit"
+                                    title="删除该关联" aria-label="删除该关联">&times;</button>
+                        </form>
+                    </span>
+                    {% endfor %}
+                </div>
+                {% else %}
+                <span class="text-muted small">未识别到</span>
+                {% endif %}
+            </td>
+            <td>
+                {% if row.series %}
+                <a href="/creators/{{ row.series.name|urlencode }}">{{ row.series.name }}</a>
+                {% else %}
+                <span class="text-muted small">未归系列</span>
+                {% endif %}
+            </td>
+            <td>
+                {# 添加关联：角色从下拉选（公司类角色自动落 company），也可用自定义角色覆盖 #}
+                <form method="post" action="/manage/entities/link/add"
+                      class="row g-1 align-items-end mb-2">
+                    <input type="hidden" name="content_id" value="{{ row.content.id }}">
+                    <input type="hidden" name="q" value="{{ q }}">
+                    <input type="hidden" name="page" value="{{ page }}">
+                    <div class="col-auto">
+                        <input class="form-control form-control-sm" name="name" size="10"
+                               placeholder="作者/公司名" required>
+                    </div>
+                    <div class="col-auto">
+                        <select class="form-select form-select-sm" name="role" aria-label="角色">
+                            {% for role, _type in role_options %}
+                            <option value="{{ role }}">{{ role }}</option>
+                            {% endfor %}
+                        </select>
+                    </div>
+                    <div class="col-auto">
+                        <input class="form-control form-control-sm" name="role_custom" size="8"
+                               placeholder="自定义角色" aria-label="自定义角色">
+                    </div>
+                    <div class="col-auto">
+                        <button class="btn btn-sm btn-outline-primary" type="submit">添加</button>
+                    </div>
+                </form>
+                {# 设置系列：保存即写入，清除即把 series_id 置空 #}
+                <form method="post" action="/manage/entities/series"
+                      class="row g-1 align-items-end">
+                    <input type="hidden" name="content_id" value="{{ row.content.id }}">
+                    <input type="hidden" name="q" value="{{ q }}">
+                    <input type="hidden" name="page" value="{{ page }}">
+                    <div class="col-auto">
+                        <input class="form-control form-control-sm" name="series" size="12"
+                               placeholder="系列名"
+                               value="{{ row.series.name if row.series else '' }}">
+                    </div>
+                    <div class="col-auto">
+                        <button class="btn btn-sm btn-outline-primary" type="submit">保存系列</button>
+                    </div>
+                    <div class="col-auto">
+                        <button class="btn btn-sm btn-outline-secondary" type="submit"
+                                name="action" value="clear">清除</button>
+                    </div>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<div class="d-flex flex-wrap justify-content-end align-items-center gap-2 mt-3">
+    {{ pager('/manage/entities?q=' ~ (q|urlencode) ~ '&', page, total_pages) }}
+</div>
+{% endif %}
+{% endblock %}

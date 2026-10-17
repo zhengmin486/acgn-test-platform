@@ -50,10 +50,14 @@
 
         <p class="detail-summary mt-3 mb-0">{{ content.summary }}</p>
 
-        <div class="mt-3">
+        <div class="mt-3 d-flex flex-wrap align-items-center gap-2">
             <span class="detail-chip">{{ type_label }}</span>
-            {# 该文案只在确实没有标签时成立；有标签时由下方标签区展示 #}
-            {% if not content_tags %}<span class="text-muted small ms-1">暂无其他标签数据</span>{% endif %}
+            {% if content.year %}<span class="detail-chip">{{ content.year }}</span>{% endif %}
+            {% if content_studios %}
+            <span class="text-muted small">制作：{% for name in content_studios %}<a href="/studios/{{ name|urlencode }}">{{ name }}</a>{% if not loop.last %} / {% endif %}{% endfor %}</span>
+            {% endif %}
+            {# 该文案只在确实没有题材标签时成立；有标签时由下方标签区展示 #}
+            {% if not content_tags and not content_studios %}<span class="text-muted small ms-1">暂无其他标签数据</span>{% endif %}
         </div>
 
         {# 作品标签（随 Bangumi 导入）：点击跳全部作品页按该标签筛选 #}
@@ -63,6 +67,77 @@
             {% for name in content_tags %}
             <a class="tag-chip" href="/contents?tag={{ name|urlencode }}">{{ name }}</a>
             {% endfor %}
+        </div>
+        {% endif %}
+
+        {# 作者 / 公司关系（Bangumi 信息卡识别，见 app/entity_links.py）：
+            按角色分组，点击姓名进索引页反查其全部作品；系列 chip 进系列详情页 #}
+        {% if content_entity_roles or content_series %}
+        <div class="mt-3 d-flex flex-wrap align-items-center gap-2">
+            <span class="text-muted small">关系：</span>
+            {% for role, names in content_entity_roles.items() %}
+            <span class="text-muted small">{{ role }}</span>
+            {% for name in names %}
+            <a class="tag-chip" href="/creators/{{ name|urlencode }}">{{ name }}</a>
+            {% endfor %}
+            {% endfor %}
+            {% if content_series %}
+            <span class="text-muted small">系列</span>
+            <a class="tag-chip" href="/creators/{{ content_series.name|urlencode }}">{{ content_series.name }}</a>
+            {% endif %}
+        </div>
+        {% endif %}
+
+        {# 客观信息（只展示，不参与标签筛选）：媒介 / 话数 / 原作载体 + 键值补充 #}
+        {% if content.media or content.episodes or content.source_material or content_facts %}
+        <div class="mt-2 d-flex flex-wrap align-items-center gap-2 small text-muted">
+            {% if content.media %}<span class="detail-chip">{{ content.media }}</span>{% endif %}
+            {% if content.episodes %}<span>{{ content.episodes }} 话</span>{% endif %}
+            {% if content.source_material %}<span class="detail-chip">{{ content.source_material }}</span>{% endif %}
+            {% for key, value in content_facts %}
+            <span>· {{ key }}：{{ value }}</span>
+            {% endfor %}
+        </div>
+        {% endif %}
+
+        {# 制作人员与主要声优：来自 Bangumi 元数据补全（app/bangumi_meta.py）。
+            主创（导演 / 音乐 / 系列构成 等）在上面的「关系」里已有入口，
+            这里只展示实体体系未覆盖的职位与长尾职员，避免重复。 #}
+        {% set main_credits = content_credits | selectattr('tier', 'equalto', 'main') | list %}
+        {% set long_credits = content_credits | selectattr('tier', 'equalto', 'long') | list %}
+        {% if content_cast or main_credits or long_credits %}
+        <div class="mt-3 small">
+            {% if content_cast %}
+            <div class="d-flex flex-wrap align-items-baseline gap-2">
+                <span class="text-muted">主要声优：</span>
+                {% for item in content_cast[:6] %}
+                    {% if item.person_id %}
+                    <a class="tag-chip" href="/cast/{{ item.person_id }}">{{ item.actor }}</a>
+                    {% else %}
+                    <span class="tag-chip">{{ item.actor }}</span>
+                    {% endif %}
+                    <span class="text-muted">&larr; {{ item.character }}</span>
+                {% endfor %}
+            </div>
+            {% endif %}
+            {% if main_credits %}
+            <div class="d-flex flex-wrap align-items-baseline gap-2 mt-2">
+                <span class="text-muted">制作人员：</span>
+                {% for item in main_credits %}
+                <span class="text-muted">{{ item.role }}</span><span>{{ item.name }}</span>
+                {% endfor %}
+            </div>
+            {% endif %}
+            {% if long_credits %}
+            <details class="mt-2">
+                <summary class="text-muted">更多制作人员（{{ long_credits|length }}）</summary>
+                <div class="d-flex flex-wrap align-items-baseline gap-2 mt-1">
+                    {% for item in long_credits %}
+                    <span class="text-muted">{{ item.role }}</span><span>{{ item.name }}</span>
+                    {% endfor %}
+                </div>
+            </details>
+            {% endif %}
         </div>
         {% endif %}
 
@@ -188,6 +263,32 @@
         </div>
     </section>
 </div>
+
+{# 系列作品（同系列的多季 / 剧场版，contents.series_id 指向同一行）：
+    仅当该作品已归系列且系列内还有别的作品时展示 #}
+{% if content_series and series_contents %}
+<div class="card detail-section mt-3">
+    <div class="card-header bg-white fw-semibold d-flex justify-content-between align-items-center">
+        <span>系列作品 · {{ content_series.name }}</span>
+        <a class="small fw-normal" href="/creators/{{ content_series.name|urlencode }}">系列详情 &rarr;</a>
+    </div>
+    <div class="card-body">
+        <div class="row g-3">
+            {% for rel in series_contents %}
+            <div class="col-12 col-md-6 col-lg-4">
+                <a class="detail-related-item" href="/contents/{{ rel.id }}">
+                    <div class="d-flex justify-content-between align-items-center gap-2">
+                        <span class="fw-semibold text-truncate">{{ rel.title }}</span>
+                        <span class="badge detail-type-badge-sm">{{ type_label }}</span>
+                    </div>
+                    <div class="small text-muted mt-1">评分 {{ '%.1f' % rel.rating }}</div>
+                </a>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+</div>
+{% endif %}
 
 <div class="mt-4">
     <a class="btn btn-outline-secondary btn-sm" href="/">返回列表</a>

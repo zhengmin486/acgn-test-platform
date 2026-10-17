@@ -1,0 +1,35 @@
+{% extends "base_content.html" %}
+{% block title %}{{ studio_name }} - ACGN 内容平台{% endblock %}
+{% block content %}
+<div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-3">
+    <div>
+        <h1 class="h3 mb-1 section-heading">{{ studio_name }}</h1>
+        <p class="text-muted small mb-0">本站收录 {{ contents|length }} 部该制作公司的作品（按评分排序）。</p>
+    </div>
+    <a class="btn btn-outline-secondary btn-sm" href="/contents">&larr; 全部作品</a>
+</div>
+
+<div class="row g-3">
+    {% for item in contents %}
+    <div class="col-12 col-sm-6 col-lg-4">
+        <a class="work-card" href="/contents/{{ item.id }}">
+            <span class="work-cover" aria-hidden="true">{{ item.title[:1] }}</span>
+            <span class="work-card-body">
+                <span class="d-flex justify-content-between align-items-center gap-2">
+                    <span class="fw-semibold text-truncate">{{ item.title }}</span>
+                    <span class="badge detail-type-badge-sm">{{ type_labels.get(item.type, item.type) }}</span>
+                </span>
+                <span class="d-flex align-items-center gap-2 mt-1">
+                    <span class="small text-muted">评分 {{ '%.1f' % item.rating }}</span>
+                </span>
+                <span class="small text-muted mt-1">
+                    {% if item.year %}{{ item.year }}{% endif %}
+                    {% if item.media %} · {{ item.media }}{% endif %}
+                    {% if item.episodes %} · {{ item.episodes }} 话{% endif %}
+                </span>
+            </span>
+        </a>
+    </div>
+    {% endfor %}
+</div>
+{% endblock %}

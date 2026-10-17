@@ -38,6 +38,20 @@ class Content(Base):
     bangumi_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     source_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     image_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # 作品发行年（来自 Bangumi date）。单列存而不是塞进标签：
+    # 年份对筛选/排序有用，但混进 content_tags 会污染标签云。
+    year: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 客观信息：媒介（TV / 剧场版 / OVA / Web）、原作载体、话数。
+    # 只展示，不参与标签筛选（见 app/bangumi_meta.py）。
+    media: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    source_material: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    episodes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 制作 / 声优 / 客观信息最近一次从 Bangumi 补全的时间（为空表示还没补）。
+    meta_fetched_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 所属系列（系列文件夹 series.id）：同系列的多季 / 剧场版指向同一行，
+    # NULL 表示未归系列。与 year 一样经 crud.ensure_content_series_column
+    # 幂等补列，且不进 as_dict（API 契约保持不变）。
+    series_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     def as_dict(self) -> dict:
         """序列化为对外 JSON 结构，保持接口契约不变。"""
@@ -48,6 +62,103 @@ class Content(Base):
             "summary": self.summary,
             "rating": float(self.rating),
         }
+
+
+class ContentCredit(Base):
+    """制作人员（来自 Bangumi 条目 infobox + persons 接口）。
+
+    - ``role`` 直接存中文职位（导演 / 脚本 / 音乐 / 人物设定 …），展示即用；
+    - ``tier`` 区分 main（高级职位，全收）与 long（原画 / 作画监督等长尾，
+      只收知名或有作品积累的人），长尾默认折叠展示；
+    - ``person_id`` 是 Bangumi 人物 id，用于「按声优 / 制作人找作品」聚合页。
+    """
+
+    __tablename__ = "content_credits"
+    __table_args__ = (
+        UniqueConstraint(
+            "content_id", "role", "person_id", name="uq_content_credits_content_role_person"
+        ),
+        Index("ix_content_credits_content", "content_id"),
+        Index("ix_content_credits_person", "person_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    content_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    person_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    role: Mapped[str] = mapped_column(String(30), nullable=False)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    detail: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    tier: Mapped[str] = mapped_column(String(10), nullable=False, default="main")
+
+
+class ContentCast(Base):
+    """角色-声优（只保留原版配音，翻配不入库）。
+
+    Bangumi 的 ``actors`` 数组第一位即原版配音（日配），后续是中配 / 英配等，
+    因此取第一位即可，无需语言字段。
+    """
+
+    __tablename__ = "content_cast"
+    __table_args__ = (
+        UniqueConstraint(
+            "content_id", "character", "person_id",
+            name="uq_content_cast_content_character_person",
+        ),
+        Index("ix_content_cast_content", "content_id"),
+        Index("ix_content_cast_person", "person_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    content_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    character: Mapped[str] = mapped_column(String(100), nullable=False)
+    character_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    person_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    actor: Mapped[str] = mapped_column(String(100), nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
+class ContentFact(Base):
+    """客观信息键值（放送星期 / 播放结束 / 官方网站 / 别名 …）。
+
+    值域不固定、不参与筛选，只做详情页展示；固定且要用的字段
+    （媒介 / 原作载体 / 话数 / 年份）已单独成列。
+    """
+
+    __tablename__ = "content_facts"
+    __table_args__ = (
+        UniqueConstraint("content_id", "key", name="uq_content_facts_content_key"),
+        Index("ix_content_facts_content", "content_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    content_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    key: Mapped[str] = mapped_column(String(50), nullable=False)
+    value: Mapped[str] = mapped_column(String(500), nullable=False)
+
+
+class ContentStudio(Base):
+    """作品制作公司（来自 Bangumi 标签归一后的公司名）。
+
+    - ``(content_id, name)`` 联合唯一：重复导入幂等，不会堆叠行；
+    - 公司不再混进 ``content_tags``，标签云与标签筛选只看到题材；
+    - 弱关联风格与 ContentTag 一致：作品被删后行可留，列表内连接查不到即不展示。
+    """
+
+    __tablename__ = "content_studios"
+    __table_args__ = (
+        UniqueConstraint("content_id", "name", name="uq_content_studios_content_name"),
+        Index("ix_content_studios_name", "name"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    content_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    name: Mapped[str] = mapped_column(String(80), nullable=False)
+
+
+# 用例来源取值：manual 人工录入，auto 自动生成（可被生成流程更新 / 下线）。
+CASE_SOURCE_MANUAL = "manual"
+CASE_SOURCE_AUTO = "auto"
 
 
 class TestCase(Base):
@@ -64,6 +175,9 @@ class TestCase(Base):
     path: Mapped[str] = mapped_column(String(300), nullable=False)
     expected_status: Mapped[int] = mapped_column(Integer, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # 用例来源：manual（人工录入）/ auto（从路由表自动生成）。
+    # auto 用例可被「从接口清单生成」更新或下线，manual 用例永不被自动改动。
+    source: Mapped[str] = mapped_column(String(10), nullable=False, default=CASE_SOURCE_MANUAL)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
 
     def as_dict(self) -> dict:
@@ -437,6 +551,97 @@ class ContentSubmission(Base):
     applied_content_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
+class BangumiCollection(Base):
+    """个人空间「阿宅画像」的 Bangumi 收藏快照（按用户名读取公开收藏）。
+
+    - (user_id, subject_id) 联合唯一：同一账号同一作品只保留一条，重新同步为覆盖写；
+    - subject_type 为 Bangumi 原始类型（1 书籍 / 2 动画 / 3 音乐 / 4 游戏 / 6 三次元），
+      分析时映射到站内的动画 / 漫画 / 游戏 / 轻小说；
+    - collection_type 为 Bangumi 收藏状态（1 想看 / 2 在看 / 3 看过 / 4 搁置 / 5 抛弃），
+      是「避雷类型」的核心负向信号；
+    - rate 为用户个人评分（0 表示未评分）；
+    - subject_tags 存作品标签（[{name, count}]），user_tags 存用户自己打的标签；
+    - updated_at 为收藏最后更新时间（Bangumi 接口不提供首次收藏时间，
+      因此「入坑年份」只能用作品发行年 / 最早更新时间近似）。
+    """
+
+    __tablename__ = "bangumi_collections"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "subject_id", name="uq_bangumi_collections_user_subject"
+        ),
+        Index("ix_bangumi_collections_user", "user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    subject_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    subject_type: Mapped[int] = mapped_column(Integer, nullable=False)
+    name: Mapped[str] = mapped_column(String(300), nullable=False)
+    name_cn: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    date: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    collection_total: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rate: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+    collection_type: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    private: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    subject_tags: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    user_tags: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
+
+
+class PersonaReport(Base):
+    """阿宅画像报告（每个账号一份，重新生成为覆盖写）。
+
+    - payload：结构化画像（维度分数、标签、统计、模板文案、LLM 提示词）；
+    - narrative：可选的 LLM 文案（直接调用或用户从网页版贴回）；
+    - narrative_source：template / manual / llm，便于区分文案来源；
+    - tone：语气（sharp 善意锐评 / gentle 温和中性）。
+    """
+
+    __tablename__ = "persona_reports"
+    __table_args__ = (
+        Index("uq_persona_reports_user", "user_id", unique=True),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    bangumi_username: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    tone: Mapped[str] = mapped_column(String(20), nullable=False, default="sharp")
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    narrative: Mapped[str | None] = mapped_column(Text, nullable=True)
+    narrative_source: Mapped[str] = mapped_column(String(20), nullable=False, default="template")
+    generated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
+
+
+class UserSiteImport(Base):
+    """「收藏同步到本站」的导入记录：谁在什么时候把哪部作品带进了作品库。
+
+    - 只记录**新建**的作品；站内已有（按 bangumi_id 命中）只做关联，不算导入；
+    - ``(user_id, content_id)`` 联合唯一：重复同步不会堆叠记录；
+    - 用途：个人空间「我导入的作品」+ 撤销（没被别人使用才真删），
+      让「安全源免审核」的入库仍然可追溯、可回滚。
+    """
+
+    __tablename__ = "user_site_imports"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "content_id", name="uq_user_site_imports_user_content"
+        ),
+        Index("ix_user_site_imports_user", "user_id"),
+        Index("ix_user_site_imports_content", "content_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    content_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=datetime.now
+    )
+
+
 class Tag(Base):
     """作品标签（来源：Bangumi 条目 tags，按标注数取前若干个入库）。
 
@@ -472,6 +677,177 @@ class ContentTag(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     content_id: Mapped[int] = mapped_column(Integer, nullable=False)
     tag_id: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class ArticleTag(Base):
+    """资讯-标签关联表：(article_id, tag_id) 联合唯一，重复识别幂等。
+
+    标签由「自动识别」写入（见 app/article_tags.py）：拿库中已有作品标签
+    （tags 表，Bangumi 来源）当受控词表，在资讯标题/摘要/正文里做子串匹配，
+    命中的标签按得分截断后入库。与 ContentTag 同一风格：
+
+    - 替换式写入（crud.replace_article_tags）：重新识别先删旧关联再建新关联；
+    - 弱关联：资讯被后台删除后关联行仍保留（文章 id 不会再被复用命中）；
+    - 标签只随识别写入，站内不提供手工增改入口。
+    """
+
+    __tablename__ = "article_tags"
+    __table_args__ = (
+        UniqueConstraint("article_id", "tag_id", name="uq_article_tags_article_tag"),
+        Index("ix_article_tags_tag", "tag_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    article_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    tag_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
+
+
+class ArticleContentLink(Base):
+    """资讯-作品关联表：(article_id, content_id) 联合唯一，重复识别幂等。
+
+    作品由「自动识别」写入（见 app/article_tags.py）：拿库中作品标题
+    （contents.title）在资讯文本里做子串匹配，命中的作品按出现频次截断后
+    入库，是「这篇资讯在讲哪部作品」的结构化答案。
+
+    - 替换式写入（crud.replace_article_content_links）：重新识别先删旧关联；
+    - 弱关联：作品被后台删除后关联行仍保留，页面内连接查不到即不展示；
+    - 与作品详情页的「相关资讯」（crud.list_related_articles，请求时实时
+      文本匹配）互为反向：那一侧保证新导入作品立即可见，这一侧把识别结果
+      落库，供资讯页展示与后续统计使用。
+    """
+
+    __tablename__ = "article_content_links"
+    __table_args__ = (
+        UniqueConstraint("article_id", "content_id", name="uq_article_content_links"),
+        Index("ix_article_content_links_content", "content_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    article_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    content_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
+
+
+class Entity(Base):
+    """作者 / 公司花名册（来自 Bangumi 条目的 infobox 信息卡）。
+
+    - ``name`` 唯一（归一化后）：同一作者或公司只登记一行，多作品共用，
+      反查「这个人的全部作品」与按公司筛选都依赖这一点；
+    - ``entity_type`` 区分 个人 / 公司 / 协会（PersonType 同款三分）；
+    - ``bangumi_person_id`` 为 Bangumi 人物/公司条目 id 的溯源位（infobox
+      只给名字，暂为 NULL；将来接关联条目端点时补齐）；
+    - 与 Content 为多对多（ContentEntityLink）：弱关联风格，作品被删后
+      关联行仍保留，页面内连接查不到即不展示。
+    """
+
+    __tablename__ = "entities"
+    __table_args__ = (
+        Index("uq_entities_name", "name", unique=True),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    entity_type: Mapped[str] = mapped_column(String(20), nullable=False, default="person")
+    bangumi_person_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
+
+
+class ContentEntityLink(Base):
+    """作品-实体关联表：(content_id, entity_id, role) 联合唯一。
+
+    由 infobox 识别写入（见 app/entity_links.py）：哪部作品 ↔ 哪个作者/
+    公司 ↔ 什么角色（原作 / 动画制作 / 导演 …）。与 ContentTag 同一风格：
+
+    - 替换式写入（crud.replace_content_entity_links）：重新导入先删旧
+      关联再建新关联，不会堆叠行；源站信息卡更新后本地同步更新；
+    - 同一个人可在一部作品里以多个角色出现，故联合唯一含 role；
+    - 弱关联：作品或实体被删后关联行可留，页面内连接查不到即不展示。
+    """
+
+    __tablename__ = "content_entity_links"
+    __table_args__ = (
+        UniqueConstraint(
+            "content_id", "entity_id", "role",
+            name="uq_content_entity_links_content_entity_role",
+        ),
+        Index("ix_content_entity_links_entity", "entity_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    content_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    entity_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    role: Mapped[str] = mapped_column(String(40), nullable=False)
+
+
+class Series(Base):
+    """系列文件夹：同系列的作品（多季 / 剧场版 / 外传）指向同一行。
+
+    - ``name`` 唯一：由 infobox「系列」字段或关联条目端点回填产生，
+      也可在管理端手工维护；
+    - 作品侧只存一个 ``contents.series_id``：一部作品最多属于一个系列，
+      查询「同系列作品」就是一次按 series_id 的等值查询；
+    - 弱关联风格：系列行可保留，作品被删后计数自然下降。
+    """
+
+    __tablename__ = "series"
+    __table_args__ = (
+        Index("uq_series_name", "name", unique=True),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
+
+
+class InviteCode(Base):
+    """注册邀请码：公开注册关闭（REGISTRATION_MODE=invite）后，注册必须提供有效邀请码。
+
+    - code 唯一且**明文存储**：邀请码本身就是管理员要分发的东西，列表页需要
+      展示与转交，因此不做哈希（与密码、一次性令牌的保密语义不同）；
+    - 单次有效：used_by / used_at 落库即消费，重复使用被拒；
+    - expires_at 可空：为空表示永不过期；revoked_at 非空表示管理员提前作废；
+    - created_by 为弱关联（不设外键）：签发人账号被删除后记录仍可解读。
+
+    借鉴 LunaTV 邀请码系统的数据模型（过期 / 使用痕迹 / 追溯），
+    字符集去掉 0/O/1/I 等易混淆字符，避免口头转抄时出错。
+    """
+
+    __tablename__ = "invite_codes"
+    __table_args__ = (
+        Index("uq_invite_codes_code", "code", unique=True),
+        Index("ix_invite_codes_created_at", "created_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    code: Mapped[str] = mapped_column(String(32), nullable=False)
+    note: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    created_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    used_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    def as_dict(self) -> dict:
+        """序列化为 JSON 结构；时间为秒级 ISO 字符串（管理接口备用）。"""
+        return {
+            "id": self.id,
+            "code": self.code,
+            "note": self.note,
+            "created_by": self.created_by,
+            "created_at": self.created_at.isoformat(sep=" ", timespec="seconds"),
+            "expires_at": self.expires_at.isoformat(sep=" ", timespec="seconds")
+            if self.expires_at
+            else None,
+            "used_by": self.used_by,
+            "used_at": self.used_at.isoformat(sep=" ", timespec="seconds")
+            if self.used_at
+            else None,
+            "revoked_at": self.revoked_at.isoformat(sep=" ", timespec="seconds")
+            if self.revoked_at
+            else None,
+        }
 
 
 class EmailVerificationToken(Base):

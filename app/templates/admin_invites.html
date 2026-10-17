@@ -1,0 +1,121 @@
+{% extends "base_content.html" %}
+{# 注册邀请码：公开注册关闭（REGISTRATION_MODE=invite）后的准入控制。
+   管理员在这里批量生成邀请码、查看状态与使用痕迹、作废未使用的码。
+   邀请码明文存储——本页就是分发入口，转交时直接复制即可。 #}
+{% block title %}注册邀请码 - ACGN 内容平台{% endblock %}
+{% block content %}
+<h1 class="h3 mb-1 section-heading">注册邀请码</h1>
+<p class="text-muted small mb-3">
+    当前注册模式：<strong>{{ registration_mode }}</strong>
+    （{% if invite_required %}仅邀请码可注册{% else %}任何人可自助注册，邀请码不参与校验{% endif %}）。
+    邀请码一次性有效，注册成功即消费。
+</p>
+{% include "_settings_nav.html" %}
+
+{% if not invite_required %}
+<div class="alert alert-secondary py-2 small mb-3" role="alert">
+    当前为公开注册模式（REGISTRATION_MODE=open）：/register 不校验邀请码，下面的码暂时用不上。
+    改为 invite（或删除该配置项，默认即 invite）后恢复邀请码注册。
+</div>
+{% endif %}
+
+{% if error %}
+<div class="alert alert-danger py-2 small mb-3" role="alert">{{ error }}</div>
+{% endif %}
+{% if generated %}
+<div class="alert alert-success py-2 small mb-3" role="alert">
+    已生成 <strong>{{ generated }}</strong> 个邀请码，请从下方列表复制分发（新的在最上方）。
+</div>
+{% endif %}
+{% if revoked %}
+<div class="alert alert-success py-2 small mb-3" role="alert">邀请码已作废。</div>
+{% endif %}
+
+<div class="card app-card mb-3">
+    <div class="card-body">
+        <h2 class="h6 mb-3">生成邀请码</h2>
+        <form method="post" action="/admin/invites/generate" class="row g-2 align-items-end">
+            <div class="col-6 col-md-2">
+                <label class="form-label small" for="invite-count">数量</label>
+                <input class="form-control form-control-sm" id="invite-count" name="count"
+                       type="number" min="1" max="{{ max_batch }}" value="1" required>
+            </div>
+            <div class="col-6 col-md-3">
+                <label class="form-label small" for="invite-days">有效期（天）</label>
+                <input class="form-control form-control-sm" id="invite-days" name="days"
+                       type="number" min="0" max="3650" value="7" placeholder="0 = 永不过期">
+            </div>
+            <div class="col-12 col-md-4">
+                <label class="form-label small" for="invite-note">备注（可选）</label>
+                <input class="form-control form-control-sm" id="invite-note" name="note"
+                       maxlength="200" placeholder="发给谁 / 用途，便于日后核对">
+            </div>
+            <div class="col-12 col-md-3">
+                <button class="btn btn-sm btn-primary w-100" type="submit">生成</button>
+            </div>
+        </form>
+        <div class="form-text">一次最多 {{ max_batch }} 个；邀请码 8 位，已去掉 0/O、1/I 等易混淆字符。</div>
+    </div>
+</div>
+
+<div class="card app-card">
+    <div class="card-body">
+        <h2 class="h6 mb-3">全部邀请码（{{ codes|length }}）</h2>
+        {% if codes %}
+        <div class="table-responsive">
+            <table class="table table-sm align-middle mb-0">
+                <thead>
+                    <tr>
+                        <th scope="col">邀请码</th>
+                        <th scope="col">状态</th>
+                        <th scope="col">备注</th>
+                        <th scope="col">签发人</th>
+                        <th scope="col">生成时间</th>
+                        <th scope="col">有效期至</th>
+                        <th scope="col">使用者 / 时间</th>
+                        <th scope="col" class="text-end">操作</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for code, status in codes %}
+                    <tr>
+                        <td><code class="user-select-all">{{ code.code }}</code></td>
+                        <td>
+                            {% if status == 'available' %}<span class="badge bg-success">可用</span>
+                            {% elif status == 'used' %}<span class="badge bg-secondary">已使用</span>
+                            {% elif status == 'expired' %}<span class="badge bg-warning text-dark">已过期</span>
+                            {% else %}<span class="badge bg-danger">已作废</span>
+                            {% endif %}
+                        </td>
+                        <td class="small text-muted">{{ code.note or '—' }}</td>
+                        <td class="small">{{ usernames.get(code.created_by, code.created_by) if code.created_by else '—' }}</td>
+                        <td class="small text-muted">{{ code.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+                        <td class="small text-muted">
+                            {{ code.expires_at.strftime('%Y-%m-%d %H:%M') if code.expires_at else '永不过期' }}
+                        </td>
+                        <td class="small text-muted">
+                            {% if code.used_at %}{{ usernames.get(code.used_by, code.used_by) }} · {{ code.used_at.strftime('%Y-%m-%d %H:%M') }}
+                            {% else %}—{% endif %}
+                        </td>
+                        <td class="text-end">
+                            {% if status == 'available' %}
+                            <form method="post" action="/admin/invites/{{ code.id }}/revoke">
+                                <button class="btn btn-sm btn-outline-danger" type="submit">作废</button>
+                            </form>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+        {% else %}
+        <p class="text-muted small mb-0">还没有生成任何邀请码。用上面的表单生成后分发给需要注册的人。</p>
+        {% endif %}
+    </div>
+</div>
+
+<p class="small text-muted mt-3 mb-0">
+    也可以在命令行生成：<code>python scripts/create_invite.py --count 5 --days 7 --note "给朋友"</code>。
+</p>
+{% endblock %}

@@ -14,6 +14,7 @@ app.sync_tasks.SessionLocal，绝不触碰开发库 local_dev.db；
 里的假站点 HTML，因此也不会访问真实网络。
 """
 
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -21,7 +22,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
 
-from app import admin_pages, sync_tasks
+from app import content_admin_pages, sync_tasks
 from app.database import Base, get_db
 from app.main import app
 from app.models import AnimeSchedule, Article, Content, SyncTaskRun
@@ -40,7 +41,7 @@ from scripts.import_bangumi import run_import as real_run_import
 from scripts.sync_yuc_schedule import run_sync as real_run_sync
 from test_yuc_schedule import ATOM_URL, ATOM_XML, SEASON_HTML, SEASON_URL, make_stub_fetch
 
-SYNC_PATH = "/admin/data/sync"
+SYNC_PATH = "/manage/sync"
 
 # 本地已存在的 Bangumi 条目：用于验证「重复导入不覆盖本地数据」。
 EXISTING_BANGUMI_ID = 265
@@ -206,10 +207,10 @@ def test_normal_user_is_forbidden(sync_env):
     """普通用户：页面 403，提交预览/确认同样 403（不只是隐藏入口）。"""
     assert sync_env.user.get(SYNC_PATH, follow_redirects=False).status_code == 403
     assert sync_env.user.post(
-        "/admin/data/sync/preview", data={"task": "articles"}, follow_redirects=False
+        "/manage/sync/preview", data={"task": "articles"}, follow_redirects=False
     ).status_code == 403
     assert sync_env.user.post(
-        "/admin/data/sync/apply", data={"task": "articles"}, follow_redirects=False
+        "/manage/sync/apply", data={"task": "articles"}, follow_redirects=False
     ).status_code == 403
 
 
@@ -228,16 +229,16 @@ def test_admin_can_open_sync_page(sync_env):
 
 def test_data_overview_has_sync_entry(sync_env):
     """数据管理总览出现「进入数据同步」入口。"""
-    body = sync_env.admin.get("/admin/data").text
-    assert "/admin/data/sync" in body
+    body = sync_env.admin.get("/manage").text
+    assert "/manage/sync" in body
     assert "进入数据同步" in body
 
 
 def test_data_subnav_has_sync_entry(sync_env):
     """数据管理二级导航出现「数据同步」，且在同步页高亮。"""
-    body = sync_env.admin.get("/admin/data/contents").text
-    assert "数据同步" in body and "/admin/data/sync" in body
-    assert 'href="/admin/data/sync"' in sync_env.admin.get(SYNC_PATH).text
+    body = sync_env.admin.get("/manage/contents").text
+    assert "数据同步" in body and "/manage/sync" in body
+    assert 'href="/manage/sync"' in sync_env.admin.get(SYNC_PATH).text
 
 
 def test_season_form_offers_local_seasons(sync_env):
@@ -297,9 +298,9 @@ def test_preview_shows_result_and_confirm_button(sync_env, monkeypatch):
         calls.append((task_key, scope, apply, scope_limit, actor_id))
         return _preview_result()
 
-    monkeypatch.setattr(admin_pages, "run_sync_task", fake_run)
+    monkeypatch.setattr(content_admin_pages, "run_sync_task", fake_run)
     resp = sync_env.admin.post(
-        "/admin/data/sync/preview", data={"task": "bangumi", "scope": "265, 975"}
+        "/manage/sync/preview", data={"task": "bangumi", "scope": "265, 975"}
     )
     assert resp.status_code == 200
     body = resp.text
@@ -310,11 +311,11 @@ def test_preview_shows_result_and_confirm_button(sync_env, monkeypatch):
 
     # 确认入口必须在「逐条结果」明细表之前出现：明细可能很长，放在后面会被推到
     # 页面底部而让人以为只有预览、没有写入。与「预览」按钮并排一处 + 明细下方次要一处。
-    first_confirm = body.find('action="/admin/data/sync/apply"')
+    first_confirm = body.find('action="/manage/sync/apply"')
     details_pos = body.find("逐条结果")
     assert first_confirm != -1 and details_pos != -1
     assert first_confirm < details_pos
-    assert body.count('action="/admin/data/sync/apply"') == 2
+    assert body.count('action="/manage/sync/apply"') == 2
     assert "sync-confirm-prominent" in body
     assert calls and calls[0][2] is False
     assert calls[0][4] is not None  # 记录了发起人（管理员主键）
@@ -333,11 +334,11 @@ def test_preview_reports_scope_and_busy_errors(sync_env, monkeypatch, exc, expec
     def fake_run(*args, **kwargs):
         raise exc
 
-    monkeypatch.setattr(admin_pages, "run_sync_task", fake_run)
-    resp = sync_env.admin.post("/admin/data/sync/preview", data={"task": "bangumi", "scope": "x"})
+    monkeypatch.setattr(content_admin_pages, "run_sync_task", fake_run)
+    resp = sync_env.admin.post("/manage/sync/preview", data={"task": "bangumi", "scope": "x"})
     assert resp.status_code == 200
     assert expected in resp.text
-    assert 'action="/admin/data/sync/apply"' not in resp.text
+    assert 'action="/manage/sync/apply"' not in resp.text
 
 
 def test_preview_reports_unexpected_error(sync_env, monkeypatch):
@@ -346,8 +347,8 @@ def test_preview_reports_unexpected_error(sync_env, monkeypatch):
     def fake_run(*args, **kwargs):
         raise RuntimeError("内部错误")
 
-    monkeypatch.setattr(admin_pages, "run_sync_task", fake_run)
-    resp = sync_env.admin.post("/admin/data/sync/preview", data={"task": "bangumi", "scope": "1"})
+    monkeypatch.setattr(content_admin_pages, "run_sync_task", fake_run)
+    resp = sync_env.admin.post("/manage/sync/preview", data={"task": "bangumi", "scope": "1"})
     assert resp.status_code == 200
     assert "预览失败" in resp.text and "内部错误" in resp.text
 
@@ -360,9 +361,9 @@ def test_apply_redirects_to_run_detail(sync_env, monkeypatch):
         calls.append((task_key, apply))
         return _preview_result(mode=sync_tasks.MODE_APPLY, added=2, pending=0, run_id=7)
 
-    monkeypatch.setattr(admin_pages, "run_sync_task", fake_run)
+    monkeypatch.setattr(content_admin_pages, "run_sync_task", fake_run)
     resp = sync_env.admin.post(
-        "/admin/data/sync/apply", data={"task": "bangumi", "scope": "265, 975"},
+        "/manage/sync/apply", data={"task": "bangumi", "scope": "265, 975"},
         follow_redirects=False,
     )
     assert resp.status_code == 303
@@ -371,15 +372,56 @@ def test_apply_redirects_to_run_detail(sync_env, monkeypatch):
     assert calls == [("bangumi", True)]
 
 
+def test_apply_result_suggests_regression(sync_env):
+    """正式写入的结果页给出下一步：跑一次回归批次，确认接口没被这次同步影响。"""
+    db = sync_env.session_factory()
+    try:
+        run = SyncTaskRun(
+            task_key=sync_tasks.TASK_BANGUMI, source_label="Bangumi",
+            scope="1001", mode=sync_tasks.MODE_APPLY, status=sync_tasks.STATUS_OK,
+            added=2, finished_at=datetime.now(),
+        )
+        db.add(run)
+        db.commit()
+        db.refresh(run)
+        run_id = run.id
+    finally:
+        db.close()
+
+    body = sync_env.admin.get(f"/manage/sync?run={run_id}").text
+    assert "建议执行一次回归批次" in body
+    assert 'href="/testcases"' in body
+
+
+def test_preview_result_has_no_regression_hint(sync_env):
+    """预览没有写库，不提示跑回归——数据没变就不该打扰。"""
+    db = sync_env.session_factory()
+    try:
+        run = SyncTaskRun(
+            task_key=sync_tasks.TASK_BANGUMI, source_label="Bangumi",
+            scope="1001", mode=sync_tasks.MODE_PREVIEW, status=sync_tasks.STATUS_OK,
+            pending=2, finished_at=datetime.now(),
+        )
+        db.add(run)
+        db.commit()
+        db.refresh(run)
+        run_id = run.id
+    finally:
+        db.close()
+
+    body = sync_env.admin.get(f"/manage/sync?run={run_id}").text
+    assert "建议执行一次回归批次" not in body
+
+
 def test_apply_reports_errors_via_redirect(sync_env, monkeypatch):
     """确认写入的失败：303 回显原因，不产生 500，也不写业务数据。"""
 
     def busy(*args, **kwargs):
         raise sync_tasks.TaskBusyError("「官方资讯」已有同步任务在执行，请稍后再试")
 
-    monkeypatch.setattr(admin_pages, "run_sync_task", busy)
+    monkeypatch.setattr(content_admin_pages, "run_sync_task", busy)
     resp = sync_env.admin.post(
-        "/admin/data/sync/apply", data={"task": "articles"}, follow_redirects=False
+        "/manage/sync/apply", data={"task": "articles"}, follow_redirects=False
     )
     assert resp.status_code == 303
     location = resp.headers["location"]
@@ -389,9 +431,9 @@ def test_apply_reports_errors_via_redirect(sync_env, monkeypatch):
     def boom(*args, **kwargs):
         raise RuntimeError("网络中断")
 
-    monkeypatch.setattr(admin_pages, "run_sync_task", boom)
+    monkeypatch.setattr(content_admin_pages, "run_sync_task", boom)
     resp = sync_env.admin.post(
-        "/admin/data/sync/apply", data={"task": "articles"}, follow_redirects=False
+        "/manage/sync/apply", data={"task": "articles"}, follow_redirects=False
     )
     assert resp.status_code == 303
     page = sync_env.admin.get(resp.headers["location"]).text
@@ -425,14 +467,14 @@ def test_bangumi_preview_does_not_write_then_apply_writes_once(sync_env, stub_ba
     before = _count(sync_env, Content)
 
     preview = sync_env.admin.post(
-        "/admin/data/sync/preview", data={"task": "bangumi", "scope": "1001 1002"}
+        "/manage/sync/preview", data={"task": "bangumi", "scope": "1001 1002"}
     )
     assert preview.status_code == 200
     assert "待写入" in preview.text
     assert _count(sync_env, Content) == before  # 预览不写业务数据
 
     apply_resp = sync_env.admin.post(
-        "/admin/data/sync/apply", data={"task": "bangumi", "scope": "1001 1002"},
+        "/manage/sync/apply", data={"task": "bangumi", "scope": "1001 1002"},
         follow_redirects=False,
     )
     assert apply_resp.status_code == 303
@@ -442,7 +484,7 @@ def test_bangumi_preview_does_not_write_then_apply_writes_once(sync_env, stub_ba
 
     # 重复确认：全部命中唯一索引，不再新增。
     again = sync_env.admin.post(
-        "/admin/data/sync/apply", data={"task": "bangumi", "scope": "1001 1002"},
+        "/manage/sync/apply", data={"task": "bangumi", "scope": "1001 1002"},
         follow_redirects=False,
     )
     assert again.status_code == 303
@@ -459,7 +501,7 @@ def test_bangumi_preview_does_not_write_then_apply_writes_once(sync_env, stub_ba
 def test_bangumi_duplicate_does_not_overwrite_local_data(sync_env, stub_bangumi):
     """已存在的 bangumi_id 只记为重复跳过，本地标题与评分保持不动。"""
     sync_env.admin.post(
-        "/admin/data/sync/apply",
+        "/manage/sync/apply",
         data={"task": "bangumi", "scope": str(EXISTING_BANGUMI_ID)},
         follow_redirects=False,
     )
@@ -483,7 +525,7 @@ def test_bangumi_partial_failure_is_reported(sync_env, monkeypatch):
     monkeypatch.setattr(sync_tasks, "run_import", fake_run_import)
     before = _count(sync_env, Content)
     resp = sync_env.admin.post(
-        "/admin/data/sync/apply", data={"task": "bangumi", "scope": "1001 1002"},
+        "/manage/sync/apply", data={"task": "bangumi", "scope": "1001 1002"},
         follow_redirects=False,
     )
     assert resp.status_code == 303
@@ -498,7 +540,7 @@ def test_bangumi_partial_failure_is_reported(sync_env, monkeypatch):
 def test_bangumi_too_many_ids_is_rejected(sync_env, stub_bangumi):
     """超出单次上限：页面回显原因，不调用同步流程、不写记录。"""
     ids = " ".join(str(9000 + i) for i in range(sync_tasks.MAX_BANGUMI_IDS + 1))
-    resp = sync_env.admin.post("/admin/data/sync/preview",
+    resp = sync_env.admin.post("/manage/sync/preview",
                                data={"task": "bangumi", "scope": ids})
     assert resp.status_code == 200
     assert f"最多同步 {sync_tasks.MAX_BANGUMI_IDS} 个" in resp.text
@@ -508,7 +550,7 @@ def test_bangumi_too_many_ids_is_rejected(sync_env, stub_bangumi):
 @pytest.mark.parametrize("scope", ["", "abc", "0", "-3", "1 2 xx"])
 def test_bangumi_invalid_scope_is_rejected(sync_env, stub_bangumi, scope):
     """非法条目 ID：回显错误，不发起同步。"""
-    resp = sync_env.admin.post("/admin/data/sync/preview",
+    resp = sync_env.admin.post("/manage/sync/preview",
                                data={"task": "bangumi", "scope": scope})
     assert resp.status_code == 200
     assert "请填写至少一个" in resp.text or "必须是正整数" in resp.text
@@ -526,7 +568,7 @@ def test_busy_task_is_rejected_while_running_record_exists(sync_env, stub_bangum
     finally:
         db.close()
 
-    resp = sync_env.admin.post("/admin/data/sync/apply",
+    resp = sync_env.admin.post("/manage/sync/apply",
                                data={"task": "bangumi", "scope": "1001"},
                                follow_redirects=False)
     assert resp.status_code == 303
@@ -543,14 +585,14 @@ def test_articles_preview_then_apply_with_dedupe(sync_env, monkeypatch, article_
     before = _count(sync_env, Article)
 
     preview = sync_env.admin.post(
-        "/admin/data/sync/preview", data={"task": "articles"}
+        "/manage/sync/preview", data={"task": "articles"}
     )
     assert preview.status_code == 200
     assert "可新增 2 条" in preview.text and "已存在跳过 1 条" in preview.text
     assert _count(sync_env, Article) == before
 
     resp = sync_env.admin.post(
-        "/admin/data/sync/apply", data={"task": "articles"}, follow_redirects=False
+        "/manage/sync/apply", data={"task": "articles"}, follow_redirects=False
     )
     assert resp.status_code == 303
     assert _count(sync_env, Article) == before + 2
@@ -568,7 +610,7 @@ def test_articles_preview_then_apply_with_dedupe(sync_env, monkeypatch, article_
         db.close()
 
     # 再次确认：全部已存在，新增 0，标题不重复。
-    sync_env.admin.post("/admin/data/sync/apply", data={"task": "articles"},
+    sync_env.admin.post("/manage/sync/apply", data={"task": "articles"},
                         follow_redirects=False)
     assert _count(sync_env, Article) == before + 2
     assert _runs(sync_env)[-1].added == 0
@@ -585,7 +627,7 @@ def test_articles_scope_category_and_limit(sync_env, monkeypatch, article_site):
     """资讯范围：按栏目 + 条数上限抓取（上限在抓取时生效，去重在抓取之后）。"""
     monkeypatch.setattr(import_articles, "fetch_page", article_site)
     resp = sync_env.admin.post(
-        "/admin/data/sync/apply",
+        "/manage/sync/apply",
         data={"task": "articles", "scope": "动漫资讯", "limit": "2"},
         follow_redirects=False,
     )
@@ -610,7 +652,7 @@ def test_articles_detail_failure_is_partial(sync_env, monkeypatch):
     )
     monkeypatch.setattr(import_articles, "fetch_page", site)
 
-    resp = sync_env.admin.post("/admin/data/sync/apply", data={"task": "articles"},
+    resp = sync_env.admin.post("/manage/sync/apply", data={"task": "articles"},
                                follow_redirects=False)
     assert resp.status_code == 303
     run = _runs(sync_env)[-1]
@@ -626,7 +668,7 @@ def test_articles_source_unavailable_reports_reason(sync_env, monkeypatch):
 
     monkeypatch.setattr(import_articles, "fetch_page", failing_fetch)
     before = _count(sync_env, Article)
-    resp = sync_env.admin.post("/admin/data/sync/apply", data={"task": "articles"},
+    resp = sync_env.admin.post("/manage/sync/apply", data={"task": "articles"},
                                follow_redirects=False)
     assert resp.status_code == 303
     page = sync_env.admin.get(resp.headers["location"]).text
@@ -646,7 +688,7 @@ def test_articles_source_unavailable_reports_reason(sync_env, monkeypatch):
 )
 def test_articles_invalid_scope_is_rejected(sync_env, data, expected):
     """资讯范围非法：回显原因，不写库、不留记录。"""
-    resp = sync_env.admin.post("/admin/data/sync/preview", data=data)
+    resp = sync_env.admin.post("/manage/sync/preview", data=data)
     assert resp.status_code == 200
     assert expected in resp.text
     assert _runs(sync_env) == []
@@ -667,14 +709,14 @@ def test_yuc_preview_then_apply_and_idempotent(sync_env, monkeypatch):
     before = _count(sync_env, AnimeSchedule)
 
     preview = sync_env.admin.post(
-        "/admin/data/sync/preview", data={"task": "yuc_schedule", "scope": "202610"}
+        "/manage/sync/preview", data={"task": "yuc_schedule", "scope": "202610"}
     )
     assert preview.status_code == 200
     assert "预览" in preview.text and "未写入新番数据" in preview.text
     assert _count(sync_env, AnimeSchedule) == before
 
     resp = sync_env.admin.post(
-        "/admin/data/sync/apply", data={"task": "yuc_schedule", "scope": "202610"},
+        "/manage/sync/apply", data={"task": "yuc_schedule", "scope": "202610"},
         follow_redirects=False,
     )
     assert resp.status_code == 303
@@ -684,7 +726,7 @@ def test_yuc_preview_then_apply_and_idempotent(sync_env, monkeypatch):
 
     # 再次同步：同一档期条目按 source_key 更新/不变，不新增重复，也不删除本地记录。
     counted = _count(sync_env, AnimeSchedule)
-    sync_env.admin.post("/admin/data/sync/apply",
+    sync_env.admin.post("/manage/sync/apply",
                         data={"task": "yuc_schedule", "scope": "202610"},
                         follow_redirects=False)
     assert _count(sync_env, AnimeSchedule) == counted
@@ -696,7 +738,7 @@ def test_yuc_preview_then_apply_and_idempotent(sync_env, monkeypatch):
 def test_yuc_invalid_season_and_missing_season(sync_env, monkeypatch):
     """档期格式非法：直接回显；档期不在 Atom 中：回显同步流程给出的原因。"""
     resp = sync_env.admin.post(
-        "/admin/data/sync/preview", data={"task": "yuc_schedule", "scope": "2026"}
+        "/manage/sync/preview", data={"task": "yuc_schedule", "scope": "2026"}
     )
     assert resp.status_code == 200
     assert "档期码格式应为 YYYYMM" in resp.text
@@ -709,7 +751,7 @@ def test_yuc_invalid_season_and_missing_season(sync_env, monkeypatch):
 
     monkeypatch.setattr(sync_tasks, "run_sync", fake_run_sync)
     resp = sync_env.admin.post(
-        "/admin/data/sync/apply", data={"task": "yuc_schedule", "scope": "199901"},
+        "/manage/sync/apply", data={"task": "yuc_schedule", "scope": "199901"},
         follow_redirects=False,
     )
     assert resp.status_code == 303
@@ -726,7 +768,7 @@ def test_yuc_invalid_season_and_missing_season(sync_env, monkeypatch):
 def test_run_history_and_detail_view(sync_env, monkeypatch, article_site):
     """同步历史列出每次运行，可按 ?run=<id> 回看该次结果与范围。"""
     monkeypatch.setattr(import_articles, "fetch_page", article_site)
-    sync_env.admin.post("/admin/data/sync/apply", data={"task": "articles"},
+    sync_env.admin.post("/manage/sync/apply", data={"task": "articles"},
                         follow_redirects=False)
     run = _runs(sync_env)[-1]
 
@@ -740,17 +782,17 @@ def test_run_history_and_detail_view(sync_env, monkeypatch, article_site):
     assert f"分类=全部，上限={sync_tasks.ARTICLE_DEFAULT_LIMIT}" in detail
     assert "本次为正式写入结果" in detail
     # 历史回看不提供确认按钮（确认表单只在刚预览完时出现）。
-    assert 'action="/admin/data/sync/apply"' not in detail
+    assert 'action="/manage/sync/apply"' not in detail
 
 
 def test_history_detail_shows_preview_marks(sync_env, monkeypatch, article_site):
     """历史里的预览记录：模式标注为预览、状态成功，并保留逐条明细。"""
     monkeypatch.setattr(import_articles, "fetch_page", article_site)
-    sync_env.admin.post("/admin/data/sync/preview", data={"task": "articles"})
+    sync_env.admin.post("/manage/sync/preview", data={"task": "articles"})
     run = _runs(sync_env)[-1]
     detail = sync_env.admin.get(SYNC_PATH, params={"run": run.id}).text
     assert "预览" in detail and "逐条结果" in detail
-    assert 'action="/admin/data/sync/apply"' not in detail
+    assert 'action="/manage/sync/apply"' not in detail
 
 
 def test_run_task_lock_is_released_between_runs(sync_env, monkeypatch, article_site):

@@ -9,14 +9,25 @@
 
 <div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-3">
     <h1 class="h3 mb-0 section-heading">测试用例管理</h1>
+    <div class="d-flex flex-wrap gap-2">
+        {# 从路由表自动生成：先预览再勾选，不会一进来就改库 #}
+        <a class="btn btn-outline-primary btn-sm" href="/testcases/generate">从接口清单生成</a>
     {# 执行全部：不可中断的写操作 → 统一样式确认弹窗（按钮既有文案不变，确认框文案为新增 UI） #}
     <form method="post" action="/testcases/execute-all"
           data-confirm="将立即执行所有启用中的用例并生成一个回归批次，结果可在「执行历史」查看。操作不可中断。"
           data-confirm-title="执行全部启用用例" data-confirm-ok="确认执行">
         <button class="btn btn-success btn-sm" type="submit">执行全部启用用例</button>
     </form>
+    </div>
 </div>
-<p class="text-muted small">单条/批量执行仅面向本站（进程内），请求路径只允许本站本地路径；批次结果见"批次"页。</p>
+<p class="text-muted small">单条/批量执行仅面向本站（进程内），以管理员身份发起请求；请求路径只允许本站本地路径；批次结果见"批次"页。</p>
+{% if generated and (generated.added or generated.updated or generated.disabled) %}
+<div class="alert alert-success py-2 mb-3">
+    已生成：新增 {{ generated.added }} 条、更新 {{ generated.updated }} 条、停用 {{ generated.disabled }} 条。
+</div>
+{% elif generated and generated.error %}
+<div class="alert alert-warning py-2 mb-3">{{ generated.error }}</div>
+{% endif %}
 {% if error %}<div class="alert alert-danger py-2 mb-3">{{ error }}</div>{% endif %}
 
 {# ===== 统计条：总数 / 启用中 / 已停用（来自当前列表全量，与筛选条件无关） ===== #}

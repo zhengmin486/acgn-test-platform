@@ -12,16 +12,27 @@
   ``MAX_TAGS_PER_SUBJECT`` 个，经 ``crud.replace_content_tags`` 替换式写入
   （不复制标签逻辑，与站内筛选共用同一套表）；标签是可选增强，
   解析不到不影响作品本身入库。
+- **作者/公司关系随作品一起识别**：从条目信息卡（infobox）按白名单识别
+  原作 / 导演 / 动画制作等角色，经 ``crud.replace_content_entity_links``
+  替换式写入（见 app/entity_links.py）；信息卡没有可用键时静默跳过，
+  不影响作品本身入库。存量作品补识别用 scripts/link_entities.py。
+- **封面随作品一起落地**（--apply 时）：取 API images 里最大的一张图下载到
+  ``cover_storage_dir``（见 app/config.py），``Content.image_url`` 存站内相对
+  地址（/covers/cover_{bangumi_id}.jpg），页面不再热链 Bangumi。下载失败
+  不阻塞作品入库，只在结果里注明原因；``COVER_DOWNLOAD_ENABLED=false`` 或
+  ``--no-cover`` 时完全跳过下载。已有库补封面用 scripts/fetch_covers.py。
 
 用法示例：
     # 预览（默认，不写库）
     python scripts/import_bangumi.py 265 975
-    # 正式入库
+    # 正式入库（含封面本地化）
     python scripts/import_bangumi.py 265 975 --apply
     # 走本机代理
     python scripts/import_bangumi.py 265 --proxy http://127.0.0.1:9910
     # 或用环境变量
     set BANGUMI_PROXY=http://127.0.0.1:9910 && python scripts/import_bangumi.py 265
+    # 只导数据不下图
+    python scripts/import_bangumi.py 265 --apply --no-cover
 
 本文件同时是可复用模块：核心函数（map_subject / fetch_subject / run_import）
 可被测试或后续功能直接调用，见 tests/test_bangumi_import.py。
@@ -36,6 +47,7 @@ import os
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -50,6 +62,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError  # noqa: E402
 from sqlalchemy.orm import sessionmaker  # noqa: E402
 
 from app import crud  # noqa: E402
+from app import entity_links  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.database import build_engine  # noqa: E402
 from app.models import Content  # noqa: E402
@@ -75,6 +88,147 @@ RETRYABLE_HTTP_STATUS = {429, 500, 502, 503, 504}
 
 TITLE_MAX_LENGTH = 200  # 与 Content.title 的 String(200) 一致
 
+# ---------- 封面图 ----------
+
+# Bangumi images 字段里的尺寸键，按偏好从大到小取（large 优先）。
+COVER_SIZE_PREFERENCE = ("large", "common", "medium")
+
+# 封面文件大小上限：Bangumi 封面一般几十~几百 KB，5 MB 足够兜底异常响应。
+COVER_MAX_BYTES = 5 * 1024 * 1024
+
+# 允许的扩展名白名单（按 URL 路径后缀判断，不在表内一律按 .jpg 存）。
+COVER_ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+
+# 简易文件魔数校验：避免把 HTML 错误页 / 限流页当成图片存下来。
+COVER_IMAGE_MAGICS: tuple[tuple[bytes, str], ...] = (
+    (b"\xff\xd8\xff", "jpg"),
+    (b"\x89PNG\r\n\x1a\n", "png"),
+    (b"GIF87a", "gif"),
+    (b"GIF89a", "gif"),
+)
+
+
+class CoverDownloadError(RuntimeError):
+    """封面下载或校验失败（网络错误、超限、响应不是图片等）。"""
+
+
+def extract_cover_url(payload: dict) -> str | None:
+    """从 Bangumi 条目 JSON 提取封面地址：按尺寸偏好取最大的一张。
+
+    - images 形如 ``{"large": url, "common": url, "medium": url, ...}``；
+    - 按 COVER_SIZE_PREFERENCE 顺序找第一个非空 http(s) 地址；
+    - 字段缺失 / 不是字典 / 全部为空时返回 None——封面是可选增强，
+      取不到不影响作品本身入库（模板回退渐变占位图）。
+    """
+    images = payload.get("images")
+    if not isinstance(images, dict):
+        return None
+    for size in COVER_SIZE_PREFERENCE:
+        url = images.get(size)
+        if isinstance(url, str) and url.startswith(("http://", "https://")):
+            return url
+    return None
+
+
+def cover_filename(remote_url: str, bangumi_id: int) -> str:
+    """由远端地址与条目 ID 生成本地封面文件名（扩展名走白名单）。"""
+    path = urllib.parse.urlsplit(remote_url).path
+    suffix = Path(path).suffix.lower()
+    if suffix not in COVER_ALLOWED_EXTENSIONS:
+        suffix = ".jpg"
+    return f"cover_{bangumi_id}{suffix}"
+
+
+def _looks_like_image(body: bytes) -> bool:
+    """按文件头判断响应体是否为图片（webp 需再校验 RIFF 后的 WEBP 标记）。"""
+    if body[:4] == b"RIFF" and body[8:12] == b"WEBP":
+        return True
+    return any(body.startswith(magic) for magic, _ in COVER_IMAGE_MAGICS)
+
+
+def download_cover(
+    remote_url: str,
+    *,
+    bangumi_id: int,
+    storage_dir,
+    opener: urllib.request.OpenerDirector,
+    timeout: float = DEFAULT_TIMEOUT,
+    retries: int = DEFAULT_RETRIES,
+    user_agent: str = DEFAULT_USER_AGENT,
+    sleep=time.sleep,
+    max_bytes: int = COVER_MAX_BYTES,
+) -> str:
+    """把远端封面下载到本地存储目录，返回站内相对地址（/covers/<文件名>）。
+
+    - 与 fetch_subject 同一套重试策略（限流 / 服务端故障才重试）；
+    - 超过 max_bytes 或文件头不是图片一律判失败（CoverDownloadError），
+      不把错误页写成 .jpg；
+    - 失败抛异常由调用方处置：封面是可选增强，绝不阻塞作品入库。
+    """
+    if not isinstance(remote_url, str) or not remote_url.startswith(("http://", "https://")):
+        raise CoverDownloadError(f"封面地址不合法：{remote_url!r}")
+
+    storage = Path(storage_dir)
+    storage.mkdir(parents=True, exist_ok=True)
+    filename = cover_filename(remote_url, bangumi_id)
+    destination = storage / filename
+
+    last_reason = "未知错误"
+    for attempt in range(retries + 1):
+        if attempt:
+            sleep(min(0.5 * 2 ** (attempt - 1), 5))
+        try:
+            request = urllib.request.Request(
+                remote_url,
+                headers={"User-Agent": user_agent, "Accept": "image/*"},
+            )
+            with opener.open(request, timeout=timeout) as response:
+                body = response.read(max_bytes + 1)
+        except urllib.error.HTTPError as exc:
+            last_reason = f"HTTP {exc.code} {exc.reason}"
+            if exc.code in RETRYABLE_HTTP_STATUS and attempt < retries:
+                continue
+            raise CoverDownloadError(f"下载封面失败：{last_reason}（{remote_url}）") from exc
+        except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
+            last_reason = f"网络错误：{exc}" if not isinstance(exc, TimeoutError) else "请求超时"
+            if attempt < retries:
+                continue
+            raise CoverDownloadError(f"下载封面失败：{last_reason}（{remote_url}）") from exc
+
+        if len(body) > max_bytes:
+            raise CoverDownloadError(f"封面超过 {max_bytes // 1024} KB 上限，已放弃")
+        if not _looks_like_image(body):
+            raise CoverDownloadError("响应不是图片文件（可能是错误页），已放弃")
+        destination.write_bytes(body)
+        return f"/covers/{filename}"
+
+    raise CoverDownloadError(f"下载封面失败：{last_reason}（{remote_url}）")
+
+
+def _make_cover_downloader(
+    *,
+    opener: urllib.request.OpenerDirector,
+    timeout: float,
+    retries: int,
+    user_agent: str,
+    sleep=time.sleep,
+):
+    """把 download_cover 的固定参数绑定为 download(remote_url, bangumi_id) -> 站内地址。"""
+
+    def download(remote_url: str, bangumi_id: int) -> str:
+        return download_cover(
+            remote_url,
+            bangumi_id=bangumi_id,
+            storage_dir=settings.cover_storage_dir,
+            opener=opener,
+            timeout=timeout,
+            retries=retries,
+            user_agent=user_agent,
+            sleep=sleep,
+        )
+
+    return download
+
 
 class BangumiAPIError(RuntimeError):
     """访问 Bangumi API 失败（网络错误、超时、HTTP 错误状态等）。"""
@@ -93,6 +247,7 @@ class MappedSubject:
 
     tags 为随作品一起导入的标签名列表（已按标注数截断）；列表为空表示
     该条目没有可用标签，不影响作品本身入库。
+    image_url 为 Bangumi 远端封面地址（未本地化）；为空表示该条目没有封面。
     """
 
     bangumi_id: int
@@ -102,6 +257,7 @@ class MappedSubject:
     rating: float
     source_url: str
     tags: list[str] = field(default_factory=list)
+    image_url: str | None = None
 
 
 @dataclass
@@ -245,6 +401,68 @@ def fetch_subject(
     raise BangumiAPIError(f"获取条目 {subject_id} 失败：{last_reason}（{url}）")
 
 
+def fetch_related_subjects(
+    subject_id: int,
+    *,
+    opener: urllib.request.OpenerDirector,
+    timeout: float = DEFAULT_TIMEOUT,
+    retries: int = DEFAULT_RETRIES,
+    user_agent: str = DEFAULT_USER_AGENT,
+    base_url: str = BANGUMI_API_BASE,
+    sleep=time.sleep,
+) -> list:
+    """获取单个条目的关联条目列表（/v0/subjects/{id}/subjects）。
+
+    与 fetch_subject 同一套网络规则（UA / 超时 / 有限重试）；返回原始的
+    JSON 列表，解析与防御性裁剪交给 app.entity_links.parse_related_subjects
+    ——本函数不猜响应结构，只保证「拿到的是 list」。
+    """
+    url = f"{base_url.rstrip('/')}/v0/subjects/{int(subject_id)}/subjects"
+    last_reason = "未知错误"
+
+    for attempt in range(retries + 1):
+        if attempt:
+            sleep(min(0.5 * 2 ** (attempt - 1), 5))  # 0.5s, 1s, 2s... 封顶 5s
+
+        try:
+            request = urllib.request.Request(
+                url,
+                headers={"User-Agent": user_agent, "Accept": "application/json"},
+            )
+            with opener.open(request, timeout=timeout) as response:
+                body = response.read()
+            payload = json.loads(body.decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            last_reason = f"HTTP {exc.code} {exc.reason}"
+            if exc.code in RETRYABLE_HTTP_STATUS and attempt < retries:
+                continue
+            raise BangumiAPIError(
+                f"获取条目 {subject_id} 的关联条目失败：{last_reason}（{url}）"
+            ) from exc
+        except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
+            last_reason = f"网络错误：{exc}" if not isinstance(exc, TimeoutError) else "请求超时"
+            if attempt < retries:
+                continue
+            raise BangumiAPIError(
+                f"获取条目 {subject_id} 的关联条目失败：{last_reason}（{url}）"
+            ) from exc
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            last_reason = f"响应不是有效 JSON：{exc}"
+            if attempt < retries:
+                continue
+            raise BangumiAPIError(
+                f"获取条目 {subject_id} 的关联条目失败：{last_reason}（{url}）"
+            ) from exc
+
+        if not isinstance(payload, list):
+            raise BangumiAPIError(
+                f"获取条目 {subject_id} 的关联条目失败：响应不是列表（{url}）"
+            )
+        return payload
+
+    raise BangumiAPIError(f"获取条目 {subject_id} 的关联条目失败：{last_reason}（{url}）")
+
+
 # ---------- 数据映射（纯函数，便于单独测试） ----------
 
 
@@ -332,6 +550,7 @@ def map_subject(payload: dict) -> MappedSubject:
         rating=float(score),
         source_url=SOURCE_URL_TEMPLATE.format(subject_id=bangumi_id),
         tags=extract_tags(payload),
+        image_url=extract_cover_url(payload),
     )
 
 
@@ -363,15 +582,21 @@ def _make_fetcher(
     return fetch
 
 
-def _map_and_store(db, payload: dict, *, apply: bool) -> SubjectOutcome:
+def _map_and_store(db, payload: dict, *, apply: bool, cover_downloader=False) -> SubjectOutcome:
     """对已成功获取的条目做映射、查重、入库，返回处理结果。
 
     - bangumi_id 已存在 -> duplicate，直接跳过不覆盖（含标签）；
-    - 预览模式 -> preview，不写库；
+    - 预览模式 -> preview，不写库、不下图；
     - 正式模式写入失败（含唯一索引冲突、数据库错误）会回滚并归入对应结果，
       不中断其余条目的导入；
     - 正式入库成功后，标签经 ``crud.replace_content_tags`` 替换式写入
-      （与站内筛选同一套表，不另写标签逻辑）。
+      （与站内筛选同一套表，不另写标签逻辑）；
+    - 正式入库成功后，信息卡（infobox）经 ``app.entity_links`` 白名单识别
+      作者/公司关系，``crud.replace_content_entity_links`` 替换式写入；
+      没有可用键时静默跳过，识别失败（数据库错误）归入 failed；
+    - 正式入库成功后，若传入了 cover_downloader（callable）且条目有远端封面，
+      下载封面并回写 ``Content.image_url``；下载失败只在 reason 里注明，
+      不影响入库结果本身。
     """
     try:
         subject = map_subject(payload)
@@ -415,12 +640,20 @@ def _map_and_store(db, payload: dict, *, apply: bool) -> SubjectOutcome:
         db.commit()
         # 标签与作品一起落库：替换式写入，重复导入不会堆叠关联行
         crud.replace_content_tags(db, content.id, subject.tags)
+
+        # 作者/公司关系与作品一起落库：infobox 白名单识别，替换式写入
+        entity_note = _link_entities(db, content.id, payload)
+
+        # 封面本地化：失败不阻塞入库，仅在结果里注明
+        cover_note = _localize_cover(db, content, subject, cover_downloader)
         return SubjectOutcome(
             bangumi_id=subject.bangumi_id,
             status="imported",
             title=subject.title,
             reason=f"已写入 contents.id={content.id}"
-            + (f"，标签 {len(subject.tags)} 个" if subject.tags else ""),
+            + (f"，标签 {len(subject.tags)} 个" if subject.tags else "")
+            + entity_note
+            + cover_note,
         )
     except IntegrityError:
         db.rollback()
@@ -440,6 +673,39 @@ def _map_and_store(db, payload: dict, *, apply: bool) -> SubjectOutcome:
         )
 
 
+def _link_entities(db, content_id: int, payload: dict) -> str:
+    """识别并写入作者/公司关系，返回追加到导入结果里的说明。
+
+    信息卡里没有可用键（绝大多数书籍/游戏条目）时返回空串；识别算法本身
+    防御性解析（app/entity_links.recognize 不抛），数据库错误向上传播，
+    由 _map_and_store 的统一 handler 归入 failed——与标签写入同一语义。
+    """
+    recognition = entity_links.recognize(content_id, payload)
+    if not recognition.has_data():
+        return ""
+    entity_links.apply_recognition(db, recognition)
+    return f"，{recognition.describe()}"
+
+
+def _localize_cover(db, content: Content, subject: MappedSubject, cover_downloader) -> str:
+    """下载并回写封面，返回追加到导入结果里的说明（没有封面时为空串）。"""
+    if not subject.image_url:
+        return ""
+    if cover_downloader is False or cover_downloader is None:
+        return "，封面未本地化（本次运行关闭了封面下载）"
+    if not callable(cover_downloader):
+        return "，封面未本地化（未提供下载器）"
+    try:
+        local_url = cover_downloader(subject.image_url, subject.bangumi_id)
+    except CoverDownloadError as exc:
+        return f"，封面下载失败（{exc}）"
+    if not local_url:
+        return "，封面未本地化"
+    content.image_url = local_url
+    db.commit()
+    return f"，封面已本地化（{local_url}）"
+
+
 def run_import(
     bangumi_ids,
     *,
@@ -452,6 +718,7 @@ def run_import(
     base_url: str = BANGUMI_API_BASE,
     fetch=None,
     sleep=time.sleep,
+    cover_downloader=None,
 ) -> ImportSummary:
     """导入主流程：逐个获取 -> 映射 -> 查重/入库，返回汇总。
 
@@ -459,7 +726,10 @@ def run_import(
     - session_factory：产生 SQLAlchemy Session 的工厂（如 SessionLocal），
       本函数负责打开与关闭会话；
     - fetch：可选的 fetch(subject_id) -> dict 注入点，测试用它替代真实 API；
-      不传时按 proxy/timeout 等参数构造真实请求器。
+      不传时按 proxy/timeout 等参数构造真实请求器；
+    - cover_downloader：封面下载器 download(remote_url, bangumi_id) -> 站内地址。
+      默认 None 表示按 settings.cover_download_enabled 自动构造；
+      显式传 False 可强制不下载（CLI --no-cover 即走此路）。
     任何单条失败都不会中断整体流程，全部结果汇总在 ImportSummary.outcomes。
     """
     ids = [int(subject_id) for subject_id in bangumi_ids]
@@ -472,6 +742,18 @@ def run_import(
             base_url=base_url,
             sleep=sleep,
         )
+
+    if cover_downloader is None:
+        if settings.cover_download_enabled:
+            cover_downloader = _make_cover_downloader(
+                opener=build_opener(proxy),
+                timeout=timeout,
+                retries=retries,
+                user_agent=user_agent,
+                sleep=sleep,
+            )
+        else:
+            cover_downloader = False
 
     outcomes: list[SubjectOutcome] = []
     fetched = 0
@@ -495,7 +777,9 @@ def run_import(
                 )
                 continue
             fetched += 1
-            outcomes.append(_map_and_store(db, payload, apply=apply))
+            outcomes.append(
+                _map_and_store(db, payload, apply=apply, cover_downloader=cover_downloader)
+            )
     finally:
         db.close()
 
@@ -538,6 +822,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--apply",
         action="store_true",
         help="正式写入数据库；不加此参数则只预览，不写库",
+    )
+    parser.add_argument(
+        "--no-cover",
+        action="store_true",
+        help="正式入库时跳过封面下载（只写数据，不落图）",
     )
     parser.add_argument(
         "--proxy",
@@ -586,6 +875,13 @@ def main(argv=None) -> int:
     print(f"数据库：{database_url}")
     print(f"模式：{'正式导入（--apply）' if args.apply else '预览（不写数据库）'}")
     print(f"代理：{proxy if proxy else '未启用（直连）'}")
+    if args.apply:
+        cover_state = (
+            "关闭（--no-cover）"
+            if args.no_cover
+            else ("开启" if settings.cover_download_enabled else "关闭（COVER_DOWNLOAD_ENABLED=false）")
+        )
+        print(f"封面本地化：{cover_state}（目录 {settings.cover_storage_dir}）")
 
     engine = build_engine(database_url)
     session_factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
@@ -603,6 +899,7 @@ def main(argv=None) -> int:
             session_factory=session_factory,
             apply=args.apply,
             fetch=fetch,
+            cover_downloader=False if args.no_cover else None,
         )
     finally:
         engine.dispose()

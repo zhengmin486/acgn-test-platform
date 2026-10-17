@@ -3,11 +3,13 @@
 设计要点：
 - 会话使用「签名 Cookie + 服务端查库」：Cookie 只保存用户 id，角色每次请求
   从数据库读取，账号被停用或改角色后即时生效；
+- 角色分三级：user（普通用户）< admin（管理员）< owner（站长）。
+  管理员与站长都能进测试管理平台（``is_staff``），站长额外独占角色管理等站点级操作。
 - 页面与 API 使用两套守卫，拒绝方式不同：
-  * 页面：未登录 -> 303 跳转登录页；已登录但非管理员 -> 403 页面；
-  * API ：未登录 -> 401；已登录但非管理员 -> 403（均为 JSON 响应）；
-- 仅「测试管理平台」（页面 /testcases、/runs、/batches、/schedule/runs 与
-  对应的测试管理 API）需要管理员；内容平台对所有人（含未登录）开放。
+  * 页面：未登录 -> 303 跳转登录页；已登录但角色不足 -> 403 页面；
+  * API ：未登录 -> 401；已登录但角色不足 -> 403（均为 JSON 响应）；
+- 仅「测试管理平台」（页面 /testcases、/runs、/batches、/manage/sync/runs 与
+  对应的测试管理 API）需要管理员及以上；内容平台对所有人（含未登录）开放。
 - **注册入口只创建普通用户（user）**：角色由服务端常量决定，表单与查询串中
   出现的任何 role 值一律忽略，管理员账号只能通过 scripts/create_user.py 创建。
 - **邮箱验证可插拔**：注册带邮箱的账号后不直接登录，需点验证链接；未配置 SMTP 时
@@ -40,6 +42,7 @@ PENDING_COOKIE_MAX_AGE = 24 * 60 * 60
 
 ROLE_ADMIN = crud.ROLE_ADMIN
 ROLE_USER = crud.ROLE_USER
+ROLE_OWNER = crud.ROLE_OWNER
 
 # ---------- 注册规则 ----------
 # 注册只开放给普通用户：角色固定为 ROLE_USER，不接受任何外部传入值。
@@ -68,12 +71,18 @@ class CurrentUser:
     role: str
 
     @property
-    def is_admin(self) -> bool:
-        return self.role == ROLE_ADMIN
+    def is_staff(self) -> bool:
+        """是否可进入管理后台：站长与管理员均可，普通用户不可。"""
+        return crud.has_role(self.role, ROLE_ADMIN)
+
+    @property
+    def is_owner(self) -> bool:
+        """是否为站长——最高级角色，独占角色管理等站点级操作。"""
+        return self.role == ROLE_OWNER
 
     @property
     def role_label(self) -> str:
-        return "管理员" if self.is_admin else "普通用户"
+        return crud.ROLE_LABELS.get(self.role, self.role)
 
 
 class LoginRequired(Exception):
@@ -134,11 +143,24 @@ def safe_next_url(next_url: str | None) -> str:
 
 
 def require_admin_page(request: Request, db: DbSession) -> CurrentUser:
-    """页面守卫：未登录跳登录页；已登录但非管理员拒绝访问。"""
+    """页面守卫：未登录跳登录页；已登录但角色不足（非管理员 / 站长）拒绝访问。
+
+    站长等级高于管理员，因此同样放行。
+    """
     user = get_current_user(request, db)
     if user is None:
         raise LoginRequired(next_url=request.url.path)
-    if not user.is_admin:
+    if not user.is_staff:
+        raise PermissionDenied()
+    return user
+
+
+def require_owner_page(request: Request, db: DbSession) -> CurrentUser:
+    """页面守卫：未登录跳登录页；已登录但非站长拒绝（站长专属，如角色管理）。"""
+    user = get_current_user(request, db)
+    if user is None:
+        raise LoginRequired(next_url=request.url.path)
+    if not user.is_owner:
         raise PermissionDenied()
     return user
 
@@ -156,12 +178,25 @@ def require_login_page(request: Request, db: DbSession) -> CurrentUser:
 
 
 def require_admin_api(request: Request, db: DbSession) -> CurrentUser:
-    """API 守卫：未登录 401；已登录但非管理员 403（均返回 JSON）。"""
+    """API 守卫：未登录 401；已登录但角色不足 403（均返回 JSON）。
+
+    站长等级高于管理员，同样放行。
+    """
     user = get_current_user(request, db)
     if user is None:
         raise HTTPException(status_code=401, detail="需要登录后才能访问测试管理接口")
-    if not user.is_admin:
+    if not user.is_staff:
         raise HTTPException(status_code=403, detail="需要管理员权限才能访问测试管理接口")
+    return user
+
+
+def require_owner_api(request: Request, db: DbSession) -> CurrentUser:
+    """API 守卫：未登录 401；已登录但非站长 403（均返回 JSON）。"""
+    user = get_current_user(request, db)
+    if user is None:
+        raise HTTPException(status_code=401, detail="需要登录后才能访问")
+    if not user.is_owner:
+        raise HTTPException(status_code=403, detail="需要站长权限才能访问")
     return user
 
 
@@ -324,7 +359,7 @@ def logout_via_link() -> RedirectResponse:
 
 
 def _register_page(request: Request, *, next_url: str, error: str = "",
-                   username: str = "", email: str = "",
+                   username: str = "", email: str = "", invite_code: str = "",
                    status_code: int = 200) -> HTMLResponse:
     return templates.TemplateResponse(
         request=request,
@@ -334,6 +369,8 @@ def _register_page(request: Request, *, next_url: str, error: str = "",
             "error": error,
             "username": username,
             "email": email,
+            "invite_code": invite_code,
+            "invite_required": settings.registration_invite_only,
             "require_email": settings.email_verification_enabled,
             "max_email_length": MAX_EMAIL_LENGTH,
             "min_username_length": MIN_USERNAME_LENGTH,
@@ -491,17 +528,22 @@ def register_submit(
     password: str = Form(""),
     confirm: str = Form(""),
     email: str = Form(""),
+    invite_code: str = Form(""),
     next_url: str = Form("/", alias="next"),
 ):
     """注册普通用户账号。
 
     - 角色恒为 **普通用户**（`REGISTRATION_ROLE`），忽略表单里的任何 role 值；
     - 用户名/邮箱被占用、参数不合法一律回显原因（400），不抛异常；
+    - **邀请码模式（REGISTRATION_MODE=invite，默认）**：必须提供有效邀请码，
+      注册成功后原子消费（条件 UPDATE 兜并发，失败则删除刚建的账号）；
+      模式为 open 时完全不校验邀请码，行为退回公开注册；
     - **启用邮箱验证时注册后不签发会话**，改为跳转待验证页，完成验证后才能登录；
       功能关闭（或该账号无邮箱）时沿用「注册即登录」的旧行为。
     """
     target = safe_next_url(next_url)
     address = crud.normalize_email(email)
+    code = (invite_code or "").strip()
     # 传入原始输入（可能为空串），由 validate_registration 判断是否校验邮箱。
     name, error = validate_registration(username, password, confirm, email)
     if error:
@@ -511,8 +553,22 @@ def register_submit(
             error=error,
             username=name,
             email=email,
+            invite_code=code,
             status_code=400,
         )
+    # 邀请码先校验后消费：校验只读、给出准确原因；消费在建号之后条件 UPDATE。
+    if settings.registration_invite_only:
+        _invite, invite_error = crud.check_invite_code(db, code)
+        if invite_error:
+            return _register_page(
+                request,
+                next_url=target,
+                error=invite_error,
+                username=name,
+                email=email,
+                invite_code=code,
+                status_code=400,
+            )
     try:
         account = crud.create_user(
             db,
@@ -534,6 +590,7 @@ def register_submit(
             error=message,
             username=name,
             email=email,
+            invite_code=code,
             status_code=400,
         )
     except ValueError as exc:  # 数据层校验（空用户名 / 非法角色 / 重名 / 邮箱重名）
@@ -543,6 +600,7 @@ def register_submit(
             error=str(exc),
             username=name,
             email=email,
+            invite_code=code,
             status_code=400,
         )
     except Exception as exc:
@@ -553,8 +611,24 @@ def register_submit(
             error=f"注册失败：{exc}",
             username=name,
             email=email,
+            invite_code=code,
             status_code=400,
         )
+
+    if settings.registration_invite_only:
+        # 并发兜底：同一邀请码同时只放行一个账号，消费失败则删号回显。
+        consumed, consume_error = crud.consume_invite_code(db, code, account.id)
+        if not consumed:
+            crud.delete_user(db, account)
+            return _register_page(
+                request,
+                next_url=target,
+                error=consume_error,
+                username=name,
+                email=email,
+                invite_code=code,
+                status_code=400,
+            )
 
     if not settings.email_verification_enabled or not account.email:
         # 关闭验证或历史账号（无邮箱）：保持注册即登录的旧行为。
@@ -953,7 +1027,16 @@ def login_required_handler(request: Request, exc: LoginRequired) -> RedirectResp
 
 
 def permission_denied_handler(request: Request, exc: PermissionDenied) -> HTMLResponse:
-    """已登录但无权访问管理区域 -> 渲染 403 页面。"""
+    """已登录但无权访问管理区域 -> 渲染 403 页面。
+
+    文案按所属界面域区分：测试平台页面说「测试管理平台」，内容管理 / 站点设置
+    说「内容管理」——否则内容管理的越权提示会把人指向另一个产品域。
+    """
+    path = request.url.path
+    test_area = path.startswith(("/testcases", "/runs", "/batches"))
     return templates.TemplateResponse(
-        request=request, name="403.html", context={}, status_code=403
+        request=request,
+        name="403.html",
+        context={"test_area": test_area},
+        status_code=403,
     )

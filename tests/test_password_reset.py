@@ -40,6 +40,16 @@ RESET_PATH = "/reset-password"
 MAIL = "resetuser@example.com"
 
 
+@pytest.fixture(autouse=True)
+def _open_registration(monkeypatch):
+    """本文件聚焦找回密码流程：显式切到公开注册模式。
+
+    默认的 invite 模式下每个注册用例都要配邀请码，会淹没重置本身的断言；
+    邀请码与注册流程的交互在 tests/test_invites.py 专门覆盖。
+    """
+    monkeypatch.setattr(settings, "registration_mode", "open")
+
+
 @pytest.fixture
 def env(tmp_path):
     """独立临时库 + 预置管理员账号 + get_db 覆盖。"""
@@ -407,4 +417,4 @@ class TestLegacyAccounts:
         resp = login(env.client, ADMIN_USERNAME, ADMIN_PASSWORD)
         assert resp.status_code == 303
         assert env.client.cookies.get("acgn_session")
-        assert env.client.get("/admin/data").status_code == 200
+        assert env.client.get("/manage").status_code == 200

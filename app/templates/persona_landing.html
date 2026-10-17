@@ -1,0 +1,75 @@
+{% extends "base_content.html" %}
+{% block title %}测测我的阿宅画像 - ACGN 内容平台{% endblock %}
+{% block content %}
+<div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-3">
+    <div>
+        <h1 class="h3 mb-1 section-heading">测测我的阿宅画像</h1>
+        <p class="text-muted small mb-0">填一个 Bangumi 用户名，读公开收藏，算六维口味与二次元人格。免登录，先看一版。</p>
+    </div>
+    <a class="btn btn-outline-secondary btn-sm" href="/login?next=/me/persona">已有账号，去登录</a>
+</div>
+
+{% if error %}
+<div class="alert alert-danger py-2">{{ error }}</div>
+{% endif %}
+
+<div class="card app-card mb-3">
+    <div class="card-body">
+        <form method="post" action="/persona/preview" class="row g-2 align-items-end"
+              onsubmit="var b=this.querySelector('button[type=submit]'); b.disabled=true; b.textContent='正在读取收藏，请稍候…';">
+            <div class="col-sm-6 col-md-4">
+                <label class="form-label small mb-0" for="guest-bgm">Bangumi 用户名</label>
+                <input class="form-control" id="guest-bgm" name="username" value="{{ username }}"
+                       placeholder="例如 sai" maxlength="100" required>
+            </div>
+            <div class="col-auto">
+                <button class="btn btn-primary" type="submit">开始试算</button>
+            </div>
+        </form>
+        <p class="small text-muted mt-2 mb-0">
+            最多读取最近 {{ max_items }} 条公开收藏，通常 10–30 秒（收藏越多越慢）；结果不保存、不建账号。
+            私有收藏看不到（需要 OAuth，暂未接入）。
+        </p>
+    </div>
+</div>
+
+<div class="row g-3 mb-3">
+    <div class="col-md-4">
+        <div class="card app-card h-100">
+            <div class="card-body">
+                <h2 class="h6">不用授权</h2>
+                <p class="small text-muted mb-0">只读公开收藏，不索取密码、不存凭据，试算结果算完即走。</p>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card app-card h-100">
+            <div class="card-body">
+                <h2 class="h6">有据可查</h2>
+                <p class="small text-muted mb-0">六维雷达、本命 / 避雷类型、人格标签都由规则算出，结论能追到具体作品与标签。</p>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card app-card h-100">
+            <div class="card-body">
+                <h2 class="h6">登录后更进一步</h2>
+                <p class="small text-muted mb-0">保存画像、按标注筛选，还能把收藏里站内没有的作品同步进作品库。</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card app-card">
+    <div class="card-body d-flex flex-wrap align-items-center justify-content-between gap-2">
+        <div>
+            <h2 class="h6 mb-1">试完想留下这份报告？</h2>
+            <p class="small text-muted mb-0">登录后自动保存快照，之后可以随时重新生成、切换语气、导入本站。</p>
+        </div>
+        <div class="d-flex flex-wrap gap-2">
+            <a class="btn btn-primary" href="/login?next=/me/persona">登录</a>
+            <a class="btn btn-outline-secondary" href="/register">注册</a>
+        </div>
+    </div>
+</div>
+{% endblock %}

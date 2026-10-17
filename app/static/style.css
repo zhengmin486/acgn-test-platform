@@ -1324,6 +1324,25 @@ img.work-cover {
     border-bottom: 1px solid #dbe7f3;
 }
 
+/* 二级导航的分组标签（内容 / 站点）：纯文字，不做成可点击胶囊 */
+.subnav-group {
+    display: inline-flex;
+    align-items: center;
+    align-self: center;
+    padding-right: 0.15rem;
+    color: var(--ink-500);
+    font-size: 0.75rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    white-space: nowrap;
+}
+
+.subnav-group-sep {
+    padding-left: 0.85rem;
+    margin-left: 0.15rem;
+    border-left: 1px solid #dbe7f3;
+}
+
 .data-subnav .nav-link {
     padding: 0.3rem 0.95rem;
     border: 1px solid #d3e1ef;
@@ -1599,6 +1618,35 @@ img.work-cover {
 .status-pill-sm {
     padding: 0.2rem 0.6rem;
     font-size: 0.8rem;
+}
+
+/* 阿宅画像：人格标题、雷达图、长文文案、提示词框 */
+.persona-title {
+    font-size: 1.3rem;
+    font-weight: 700;
+    color: var(--ink-700);
+}
+
+.persona-subtitle {
+    color: var(--ink-500);
+}
+
+.persona-radar {
+    display: block;
+    max-width: 340px;
+    margin: 0 auto;
+}
+
+.persona-narrative {
+    white-space: pre-wrap;
+    line-height: 1.9;
+    color: var(--ink-700);
+}
+
+.persona-prompt {
+    font-family: monospace;
+    font-size: 0.78rem;
+    line-height: 1.5;
 }
 
 /* ==========================================================================

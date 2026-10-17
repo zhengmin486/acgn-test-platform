@@ -138,6 +138,7 @@ def space_page(
             "page": page,
             "total_pages": total_pages,
             "type_labels": CONTENT_TYPE_LABELS,
+            "role_labels": crud.ROLE_LABELS,
             "content_type": content_type,
             "favorite_type_labels": FAVORITE_CATEGORY_LABELS,
             "favorite_type_counts": crud.favorite_type_counts(db, account.id),

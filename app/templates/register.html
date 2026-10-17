@@ -9,7 +9,7 @@
                     <span class="brand-mark" aria-hidden="true"></span>
                     <h1 class="h4 mb-1">注册普通用户</h1>
                     <p class="small mb-0" style="color: rgba(255,255,255,.85);">
-                        {% if require_email %}注册后需验证邮箱才能登录{% else %}注册后即可使用 ACGN 内容平台{% endif %}
+                        {% if invite_required %}本站已关闭公开注册，需有效邀请码{% endif %}{% if invite_required and require_email %}；{% endif %}{% if require_email %}注册后需验证邮箱才能登录{% if not invite_required %}；{% endif %}{% else %}{% if not invite_required %}注册后即可使用 ACGN 内容平台{% endif %}{% endif %}
                     </p>
                 </div>
 
@@ -17,6 +17,17 @@
 
                 <form method="post" action="/register">
                     <input type="hidden" name="next" value="{{ next }}">
+                    {% if invite_required %}
+                    <div class="mb-3">
+                        <label class="form-label" for="register-invite">邀请码</label>
+                        <input class="form-control" id="register-invite" name="invite_code"
+                               value="{{ invite_code }}" required autofocus autocomplete="off"
+                               maxlength="32" placeholder="8 位邀请码">
+                        <div class="form-text">
+                            公开注册已关闭，需填写管理员发放的邀请码（<a href="/admin/invites">管理员生成入口</a>）。
+                        </div>
+                    </div>
+                    {% endif %}
                     <div class="mb-3">
                         <label class="form-label" for="register-username">用户名</label>
                         <input class="form-control" id="register-username" name="username"

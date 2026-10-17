@@ -1,11 +1,11 @@
-{% extends "base_admin.html" %}
+{% extends "base_content.html" %}
 {% from "_pager.html" import pager %}
 {# 词条审核：用户提交的新增 / 修改提案 → 管理员通过或驳回。 #}
-{% block title %}词条审核 - 测试管理平台{% endblock %}
+{% block title %}词条审核 - ACGN 内容平台{% endblock %}
 {% block content %}
 <h1 class="h3 mb-1 section-heading">词条审核</h1>
 <p class="text-muted small mb-3">用户提交的新增 / 修改提案，通过后才会写入内容库。</p>
-{% include "_data_nav.html" %}
+{% include "_manage_nav.html" %}
 
 {% if decided == 'ok' %}
 <div class="alert alert-success py-2">已处理该词条申请。</div>
@@ -22,7 +22,7 @@
 <div class="tag-filter mb-3">
     {% for key, label, count_key in filter_items %}
     <a class="tag-chip{% if status_filter == key %} active{% endif %}"
-       href="/admin/submissions?status={{ key }}">
+       href="/manage/submissions?status={{ key }}">
         {{ label }}<span class="tag-count">{{ counts.get(count_key, 0) }}</span>
     </a>
     {% endfor %}
@@ -71,10 +71,10 @@
                     <td class="text-muted small">{{ s.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
                     <td style="min-width: 12rem;">
                         {% if s.status == 'pending' %}
-                        <form method="post" action="/admin/submissions/{{ s.id }}/approve" class="d-inline">
+                        <form method="post" action="/manage/submissions/{{ s.id }}/approve" class="d-inline">
                             <button class="btn btn-sm btn-success" type="submit">通过</button>
                         </form>
-                        <form method="post" action="/admin/submissions/{{ s.id }}/reject" class="d-inline">
+                        <form method="post" action="/manage/submissions/{{ s.id }}/reject" class="d-inline">
                             <input class="form-control form-control-sm d-inline-block align-middle"
                                    style="width: 7rem;" name="note" placeholder="驳回说明（可选）">
                             <button class="btn btn-sm btn-outline-danger align-middle" type="submit">驳回</button>
@@ -94,7 +94,7 @@
 
 {% if total_pages > 1 %}
 <div class="mt-3">
-    {{ pager('/admin/submissions?status=' ~ (status_filter|urlencode) ~ '&', page, total_pages) }}
+    {{ pager('/manage/submissions?status=' ~ (status_filter|urlencode) ~ '&', page, total_pages) }}
 </div>
 {% endif %}
 {% endif %}

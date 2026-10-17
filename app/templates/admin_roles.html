@@ -1,0 +1,71 @@
+{% extends "base_content.html" %}
+{# 角色管理（仅站长）：三级角色 user < admin < owner，可调整他人角色。 #}
+{% block title %}角色管理 - ACGN 内容平台{% endblock %}
+{% block content %}
+<h1 class="h3 mb-1 section-heading">角色管理</h1>
+<p class="text-muted small mb-3">
+    三级角色：<strong>站长</strong>（最高，含管理员全部能力） / 管理员 / 普通用户。
+    站长可调整其他账号的角色。
+</p>
+{% include "_settings_nav.html" %}
+
+{% if error %}
+<div class="alert alert-danger py-2">{{ error }}</div>
+{% endif %}
+{% if changed %}
+<div class="alert alert-success py-2">
+    已将 <strong>{{ changed }}</strong> 的角色改为「{{ role_labels.get(to, to) }}」。
+</div>
+{% endif %}
+
+<div class="card app-card">
+    <div class="card-body">
+        <table class="table table-hover align-middle mb-0">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>用户名</th>
+                    <th>邮箱</th>
+                    <th>当前角色</th>
+                    <th>注册时间</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for user in users %}
+                <tr>
+                    <td>{{ user.id }}</td>
+                    <td>{{ user.username }}</td>
+                    <td class="small text-muted">{{ user.email or '—' }}</td>
+                    <td>
+                        <span class="badge {% if user.role == 'owner' %}bg-danger{% elif user.role == 'admin' %}bg-primary{% else %}bg-secondary{% endif %}">
+                            {{ role_labels.get(user.role, user.role) }}
+                        </span>
+                    </td>
+                    <td class="small text-muted">{{ user.created_at.strftime('%Y-%m-%d') }}</td>
+                    <td>
+                        {% if user.id == current_user_id %}
+                        <span class="small text-muted">当前登录账号</span>
+                        {% else %}
+                        <div class="d-flex flex-wrap gap-1">
+                            {% for role in assignable_roles %}
+                            {% if role != user.role %}
+                            <form method="post" action="/admin/roles/{{ user.id }}" class="m-0"
+                                  data-confirm="确定将「{{ user.username }}」的角色改为「{{ role_labels.get(role, role) }}」吗？"
+                                  data-confirm-title="修改角色">
+                                <input type="hidden" name="role" value="{{ role }}">
+                                <button class="btn btn-sm {% if role == 'owner' %}btn-outline-danger{% elif role == 'admin' %}btn-outline-primary{% else %}btn-outline-secondary{% endif %}"
+                                        type="submit">设为{{ role_labels.get(role, role) }}</button>
+                            </form>
+                            {% endif %}
+                            {% endfor %}
+                        </div>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% endblock %}

@@ -40,6 +40,10 @@
         <label class="form-label small mb-0" for="works-q">关键词</label>
         <input type="text" name="q" id="works-q" value="{{ q }}" class="form-control form-control-sm" placeholder="搜索标题 / 简介">
     </div>
+    <div class="col">
+        <label class="form-label small mb-0" for="works-creator">作者 / 公司</label>
+        <input type="text" name="creator" id="works-creator" value="{{ creator or '' }}" class="form-control form-control-sm" placeholder="按作者 / 公司筛选">
+    </div>
     <div class="col-auto">
         <button class="btn btn-primary btn-sm" type="submit">筛选</button>
         <a class="btn btn-outline-secondary btn-sm" href="/contents">重置</a>
@@ -48,24 +52,28 @@
 
 {% if search_mode %}
 <p class="text-muted small">
-    搜索结果：{% if keyword %}关键词“{{ keyword }}”{% endif %}{% if content_type %}{% if keyword %} · {% endif %}类型：{{ type_labels.get(content_type, content_type) }}{% endif %}{% if tag %}{% if keyword or content_type %} · {% endif %}标签：{{ tag }}{% endif %} · 共 {{ total }} 条 · 第 {{ page }}/{{ total_pages }} 页
+    搜索结果：{% if keyword %}关键词“{{ keyword }}”{% endif %}{% if content_type %}{% if keyword %} · {% endif %}类型：{{ type_labels.get(content_type, content_type) }}{% endif %}{% if tag %}{% if keyword or content_type %} · {% endif %}标签：{{ tag }}{% endif %}{% if creator %}{% if keyword or content_type or tag %} · {% endif %}作者/公司：{{ creator }}{% endif %} · 共 {{ total }} 条 · 第 {{ page }}/{{ total_pages }} 页
 </p>
 {% else %}
 <p class="text-muted small">共 {{ total }} 部作品 · 第 {{ page }}/{{ total_pages }} 页</p>
 {% endif %}
 
 {# ===== 标签筛选：标签随 Bangumi 导入（按标注数取前 5），可与类型/关键词叠加 ===== #}
-{% if tag_options %}
+{% if tag_options or creator %}
 <div class="tag-filter mb-3">
     {% for name, count in tag_options %}
     <a class="tag-chip{% if tag == name %} active{% endif %}"
-       href="/contents?q={{ q|urlencode }}&amp;type={{ (content_type or '')|urlencode }}&amp;tag={{ name|urlencode }}">
+       href="/contents?q={{ q|urlencode }}&amp;type={{ (content_type or '')|urlencode }}&amp;tag={{ name|urlencode }}&amp;creator={{ (creator or '')|urlencode }}">
         {{ name }}<span class="tag-count">{{ count }}</span>
     </a>
     {% endfor %}
     {% if tag %}
     <a class="tag-chip tag-chip-clear"
-       href="/contents?q={{ q|urlencode }}&amp;type={{ (content_type or '')|urlencode }}">清除标签</a>
+       href="/contents?q={{ q|urlencode }}&amp;type={{ (content_type or '')|urlencode }}&amp;creator={{ (creator or '')|urlencode }}">清除标签</a>
+    {% endif %}
+    {% if creator %}
+    <a class="tag-chip tag-chip-clear"
+       href="/contents?q={{ q|urlencode }}&amp;type={{ (content_type or '')|urlencode }}&amp;tag={{ (tag or '')|urlencode }}">清除作者/公司</a>
     {% endif %}
 </div>
 {% endif %}
@@ -106,9 +114,13 @@
     {% endfor %}
 </div>
 
+{# 分页链接前缀：带上全部当前筛选条件，翻页不丢状态。
+   creator 为空时不拼该参数，保持既有地址形状不变（测试按此断言）。 #}
+{% set pager_prefix = '/contents?q=' ~ q|urlencode ~ '&type=' ~ (content_type or '')|urlencode ~ '&tag=' ~ (tag or '')|urlencode ~ ('&creator=' ~ (creator or '')|urlencode if creator else '') ~ '&' %}
+
 {% if total_pages > 1 %}
 <div class="mt-3">
-    {{ pager('/contents?q=' ~ q|urlencode ~ '&type=' ~ (content_type or '')|urlencode ~ '&tag=' ~ (tag or '')|urlencode ~ '&', page, total_pages) }}
+    {{ pager(pager_prefix, page, total_pages) }}
 </div>
 {% endif %}
 {% endif %}

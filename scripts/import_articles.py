@@ -19,6 +19,10 @@
 - 幂等与「不覆盖本地数据」：original_url 命中库中已有记录即跳过（省掉该条的详情请求）；
   标题命中同样跳过。任何情况下都不 UPDATE 已存在的 article 行。
 - 只取正文抓取成功的条目入库：详情页抓不到就不写半条数据，该条计为 failed 并在明细里说明。
+- 正式导入后自动「识别标签 + 关联作品」（app/article_tags）：拿库中作品标签与
+  作品标题当词表，在新文章的标题/摘要/正文里做子串匹配，替换式写入
+  article_tags / article_content_links；预览模式不做识别（不写库）。
+  存量资讯用 scripts/link_articles.py 回填。
 - 只用 Python 标准库（urllib + concurrent.futures），不新增第三方依赖。
 - 抓取失败（网络/站点结构变化）抛 ArticleFetchError，由调用方回显原因，不影响其它功能。
 
@@ -53,6 +57,7 @@ from sqlalchemy import select
 # Allow execution as `python scripts\import_articles.py` from project root.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from app import article_tags
 from app.config import settings
 from app.database import SessionLocal
 from app.models import Article
@@ -438,24 +443,26 @@ class ArticleImportSummary:
     pending: int = 0
     added: int = 0
     failed: int = 0
+    recognized: int = 0  # apply 模式下实际执行「识别标签 + 关联作品」的文章数
     outcomes: list[ArticleOutcome] = field(default_factory=list)
 
     def describe(self) -> str:
         """汇总信息的多行文本。"""
         mode_label = "正式导入（--apply）" if self.mode == "apply" else "预览（dry-run）"
-        return "\n".join(
-            [
-                f"数据源：{SOURCE_NAME}（{SITE_LABEL}）",
-                f"栏目：{self.category or '全部'}",
-                f"模式：{mode_label}",
-                "导入汇总：",
-                f"  抓取条目：{self.requested}",
-                f"  已存在跳过：{self.existing}",
-                f"  待新增：{self.pending}",
-                f"  实际新增：{self.added}",
-                f"  抓取失败：{self.failed}",
-            ]
-        )
+        lines = [
+            f"数据源：{SOURCE_NAME}（{SITE_LABEL}）",
+            f"栏目：{self.category or '全部'}",
+            f"模式：{mode_label}",
+            "导入汇总：",
+            f"  抓取条目：{self.requested}",
+            f"  已存在跳过：{self.existing}",
+            f"  待新增：{self.pending}",
+            f"  实际新增：{self.added}",
+            f"  抓取失败：{self.failed}",
+        ]
+        if self.mode == "apply":
+            lines.append(f"  识别标签/关联作品：{self.recognized} 篇")
+        return "\n".join(lines)
 
 
 def run_import_articles(
@@ -508,6 +515,7 @@ def run_import_articles(
             prepared.append(item)
 
         existing_titles = _existing_values(db, Article.title, [item.title for item in prepared])
+        added: list[tuple[Article, str]] = []  # (新文章, 列表页的作品名前缀)
         for item in prepared:
             if item.title in existing_titles:
                 summary.existing += 1
@@ -521,22 +529,32 @@ def run_import_articles(
                     ArticleOutcome(item.title, "pending", "预览模式：未写入数据库", item.url)
                 )
                 continue
-            db.add(
-                Article(
-                    title=item.title,
-                    category=channel.label,
-                    summary=item.summary,
-                    body=item.body,
-                    source=SOURCE_NAME,
-                    original_url=item.url,
-                    is_published=True,
-                    published_at=item.published_at,
-                )
+            article = Article(
+                title=item.title,
+                category=channel.label,
+                summary=item.summary,
+                body=item.body,
+                source=SOURCE_NAME,
+                original_url=item.url,
+                is_published=True,
+                published_at=item.published_at,
             )
+            db.add(article)
+            added.append((article, item.ip_name))
             summary.added += 1
             summary.outcomes.append(ArticleOutcome(item.title, "added", "已写入", item.url))
 
-        if apply and summary.added:
+        if apply and added:
+            db.flush()  # 先分配文章 id，供识别关联行引用
+            article_tags.link_articles(
+                db,
+                [article for article, _ in added],
+                extra_names_map={
+                    article.id: [ip_name] if ip_name else []
+                    for article, ip_name in added
+                },
+            )
+            summary.recognized = len(added)
             db.commit()
     finally:
         db.close()

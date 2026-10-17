@@ -37,8 +37,11 @@ from auth_helpers import (
     login_as_user,
 )
 
-# 仅管理员可访问的测试管理页面
-ADMIN_PAGES = ["/testcases", "/runs", "/batches", "/schedule/runs"]
+# 仅管理员可访问的测试平台页面（测试域）
+ADMIN_PAGES = ["/testcases", "/runs", "/batches"]
+
+# 仅管理员可访问的内容管理页面（内容域）：403 文案应为「内容管理」而不是「测试管理平台」
+CONTENT_ADMIN_PAGES = ["/manage", "/manage/contents", "/manage/sync/runs"]
 
 # 仅管理员可访问的测试管理接口（方法, 路径）
 ADMIN_APIS = [
@@ -227,6 +230,58 @@ class TestAdminPageGuard:
         assert resp.status_code == 303
         login_as_user(auth_env.client)
         assert auth_env.client.get("/runs/1", follow_redirects=False).status_code == 403
+
+
+class TestContentAdminPageGuard:
+    """内容管理页面同属管理员区域，但界面域与提示文案必须落在内容平台。"""
+
+    @pytest.mark.parametrize("path", CONTENT_ADMIN_PAGES)
+    def test_anonymous_is_redirected_to_login(self, auth_env, path):
+        resp = auth_env.client.get(path, follow_redirects=False)
+        assert resp.status_code == 303
+        assert resp.headers["location"] == f"/login?next={path}"
+
+    @pytest.mark.parametrize("path", CONTENT_ADMIN_PAGES)
+    def test_normal_user_gets_403_with_content_wording(self, auth_env, path):
+        login_as_user(auth_env.client)
+        resp = auth_env.client.get(path, follow_redirects=False)
+        assert resp.status_code == 403
+        assert "无权访问内容管理" in resp.text
+        assert "无权访问测试管理平台" not in resp.text
+
+    @pytest.mark.parametrize("path", CONTENT_ADMIN_PAGES)
+    def test_admin_can_open_in_content_layout(self, auth_env, path):
+        login_as_admin(auth_env.client)
+        resp = auth_env.client.get(path, follow_redirects=False)
+        assert resp.status_code == 200
+        assert "ACGN 内容平台" in resp.text
+
+
+class TestLegacyRedirects:
+    """旧的 /admin/data* 与 /schedule/runs 兼容跳转（内容管理迁到 /manage 之后）。"""
+
+    def test_old_overview_redirects_to_manage(self, auth_env):
+        resp = auth_env.client.get("/admin/data", follow_redirects=False)
+        assert resp.status_code == 302
+        assert resp.headers["location"] == "/manage"
+
+    def test_old_subpage_keeps_query_string(self, auth_env):
+        resp = auth_env.client.get("/admin/data/contents?q=abc&page=2", follow_redirects=False)
+        assert resp.status_code == 302
+        assert resp.headers["location"] == "/manage/contents?q=abc&page=2"
+
+    def test_old_sync_history_redirects(self, auth_env):
+        resp = auth_env.client.get("/schedule/runs", follow_redirects=False)
+        assert resp.status_code == 302
+        assert resp.headers["location"] == "/manage/sync/runs"
+
+    def test_old_post_redirect_preserves_method(self, auth_env):
+        """旧页面提交的删除请求用 307 跳转，避免变成 GET 丢表单。"""
+        resp = auth_env.client.post(
+            "/admin/data/contents/delete", data={"ids": "1"}, follow_redirects=False
+        )
+        assert resp.status_code == 307
+        assert resp.headers["location"] == "/manage/contents/delete"
 
 
 # ---------- 管理 API 保护 ----------

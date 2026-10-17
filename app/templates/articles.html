@@ -29,6 +29,14 @@
             {{ article.summary[:80] }}{% if article.summary|length > 80 %}…{% endif %}
         </p>
         {% endif %}
+        {# 识别标签（自动识别写入）：点击跳全部作品页按该标签筛选 #}
+        {% if article_tags_map.get(article.id) %}
+        <div class="d-flex flex-wrap align-items-center gap-2 mt-2">
+            {% for name in article_tags_map.get(article.id) %}
+            <a class="tag-chip" href="/contents?tag={{ name|urlencode }}">{{ name }}</a>
+            {% endfor %}
+        </div>
+        {% endif %}
     </article>
     {% endfor %}
 </div>

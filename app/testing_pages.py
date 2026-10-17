@@ -1,10 +1,12 @@
 """测试平台页面路由：测试用例管理、执行历史与批次结果（数据来源：数据库访问层）。"""
 
+from urllib.parse import urlencode
+
 from fastapi import APIRouter, Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import ValidationError
 
-from app import crud, runner
+from app import case_discovery, crud, runner
 from app.page_common import DbSession, render_missing, templates
 from app.schemas import TestCaseCreate
 
@@ -69,15 +71,22 @@ def _case_filter_view(q: str, method: str, enabled: str) -> dict:
 @router.get("/testcases", response_class=HTMLResponse)
 def testcases_page(request: Request, db: DbSession,
                    q: str = Query(default=""), method: str = Query(default=""),
-                   enabled: str = Query(default="")):
-    """用例管理首页：用例列表 + 新建表单；支持关键词/方法/状态筛选（GET，可分享）。"""
+                   enabled: str = Query(default=""),
+                   added: int = Query(default=0), updated: int = Query(default=0),
+                   disabled: int = Query(default=0), generated: str = Query(default="")):
+    """用例管理首页：用例列表 + 新建表单；支持关键词/方法/状态筛选（GET，可分享）。
+
+    added / updated / disabled / generated 来自「从接口清单生成」后的 PRG 回显。
+    """
     all_cases = crud.list_cases(db)
     cases = _filter_cases(all_cases, q, method, enabled)
     return templates.TemplateResponse(
         request=request,
         name="testcases.html",
         context={"cases": cases, "all_cases": all_cases, "error": "", "form": {},
-                 "filter": _case_filter_view(q, method, enabled)},
+                 "filter": _case_filter_view(q, method, enabled),
+                 "generated": {"added": added, "updated": updated,
+                               "disabled": disabled, "error": generated}},
     )
 
 
@@ -201,6 +210,38 @@ def run_detail_page(request: Request, run_id: int, db: DbSession):
         request=request,
         name="run_detail.html",
         context={"run": run},
+    )
+
+
+# ---------- 从接口清单自动生成用例 ----------
+
+
+def _query(**params) -> str:
+    """拼装带查询参数的站内地址；空值自动忽略（PRG 回显用）。"""
+    clean = {key: value for key, value in params.items() if value not in (None, "", 0)}
+    return f"/testcases?{urlencode(clean)}" if clean else "/testcases"
+
+
+@router.get("/testcases/generate", response_class=HTMLResponse)
+def generate_cases_page(request: Request, db: DbSession):
+    """生成预览：列出将新增 / 更新 / 下线 / 跳过的接口，勾选后才写库。"""
+    plan = case_discovery.build_plan(db)
+    return templates.TemplateResponse(
+        request=request,
+        name="case_generate.html",
+        context={"plan": plan, "error": plan.get("error", "")},
+    )
+
+
+@router.post("/testcases/generate/apply")
+async def apply_generated_cases(request: Request, db: DbSession):
+    """按勾选结果落库（PRG 303 回列表并回显计数）。"""
+    form = await request.form()
+    summary = case_discovery.apply_plan(db, form.getlist("select"))
+    return RedirectResponse(
+        _query(added=summary.get("added"), updated=summary.get("updated"),
+               disabled=summary.get("disabled"), generated=summary.get("error", "")),
+        status_code=303,
     )
 
 
