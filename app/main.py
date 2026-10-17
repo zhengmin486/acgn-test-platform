@@ -10,7 +10,17 @@ from pathlib import Path
 from fastapi import Depends, FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from app import admin_pages, api, auth, business_pages, cases, crud, space_pages, testing_pages
+from app import (
+    admin_pages,
+    api,
+    auth,
+    business_pages,
+    cases,
+    crud,
+    space_pages,
+    submission_pages,
+    testing_pages,
+)
 from app.auth import (
     LoginRequired,
     PermissionDenied,
@@ -39,6 +49,8 @@ app.include_router(cases.router, dependencies=[Depends(require_admin_api)])
 app.include_router(business_pages.router)
 # 个人空间页面（/me）：内容平台的登录用户功能，未登录跳登录页（路由内部校验）。
 app.include_router(space_pages.router)
+# 词条申请（/submit、/contents/{id}/edit）：登录用户提交新增 / 修改提案，等待审核。
+app.include_router(submission_pages.router)
 # 测试管理平台页面：仅管理员可访问（未登录跳登录页、越权 403）。
 app.include_router(testing_pages.router, dependencies=[Depends(require_admin_page)])
 # 数据管理页面（测试管理平台 → 数据管理）：同样仅管理员可访问。

@@ -27,8 +27,9 @@ def health() -> dict:
 def list_contents(
     db: DbSession,
     content_type: str | None = Query(default=None, alias="type"),
+    tag: str | None = Query(default=None),
 ) -> dict:
-    """返回内容列表；可按 ACGN 类型筛选。"""
+    """返回内容列表；可按 ACGN 类型与标签筛选（二者可叠加）。"""
     if content_type is not None:
         content_type = content_type.strip().lower()
         if content_type not in CONTENT_TYPES:
@@ -37,7 +38,7 @@ def list_contents(
                 detail="类型不合法，可选值：anime、comic、game、novel",
             )
 
-    items = crud.list_contents(db, content_type=content_type)
+    items = crud.list_contents(db, content_type=content_type, tag=tag)
     return {"total": len(items), "items": [item.as_dict() for item in items]}
 
 @router.get("/contents/search")

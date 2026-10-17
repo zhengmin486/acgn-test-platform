@@ -10,6 +10,7 @@
     ("测试用例", "/testcases", nav_path.startswith("/testcases")),
     ("执行历史", "/runs", nav_path.startswith("/runs")),
     ("回归批次", "/batches", nav_path.startswith("/batches")),
+    ("词条审核", "/admin/submissions", nav_path.startswith("/admin/submissions")),
     ("数据同步", "/schedule/runs", nav_path.startswith("/schedule/runs"))
 ] %}
 {% set data_path = nav_path.startswith("/admin/data") %}

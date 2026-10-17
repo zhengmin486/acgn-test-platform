@@ -39,6 +39,9 @@ PAGE_SIZE = 20
 # 同步历史展示条数：够看清最近几次同步即可，避免页面过长。
 SYNC_HISTORY_LIMIT = 20
 
+# 词条审核列表每页条数：与作品数据列表保持一致，便于逐页核对。
+SUBMISSION_PAGE_SIZE = 20
+
 # 重新同步失败原因的展示上限：过长信息截断，避免撑爆地址栏与页面。
 RESYNC_REASON_MAX = 300
 
@@ -586,5 +589,108 @@ def account_verification_link(request: Request, db: DbSession, user_id: int):
     verify_url = f"{base}/verify/email?token={quote(token)}"
     return RedirectResponse(
         _url("/admin/accounts", link=verify_url, link_user=account.username),
+        status_code=303,
+    )
+
+
+# ---------- 词条审核 ----------
+
+
+@router.get("/admin/submissions", response_class=HTMLResponse)
+def submissions_page(
+    request: Request,
+    db: DbSession,
+    status: str = Query(default="pending"),
+    page: int = Query(default=1, ge=1),
+    decided: str = Query(default=""),
+    reason: str = Query(default=""),
+):
+    """词条审核：按状态筛选的申请列表，支持直接通过 / 驳回。"""
+    status_filter = status if status in crud.SUBMISSION_STATUSES else None
+    total, submissions = crud.list_content_submissions(
+        db, status=status_filter, page=page, page_size=SUBMISSION_PAGE_SIZE
+    )
+    target_ids = [
+        submission.content_id
+        for submission in submissions
+        if submission.kind == crud.SUBMISSION_KIND_UPDATE
+        and submission.content_id is not None
+    ]
+    target_contents = {
+        content.id: content for content in crud.get_contents_by_ids(db, target_ids)
+    }
+    counts = {
+        "pending": crud.count_content_submissions(
+            db, status=crud.SUBMISSION_STATUS_PENDING
+        ),
+        "approved": crud.count_content_submissions(
+            db, status=crud.SUBMISSION_STATUS_APPROVED
+        ),
+        "rejected": crud.count_content_submissions(
+            db, status=crud.SUBMISSION_STATUS_REJECTED
+        ),
+        "all": crud.count_content_submissions(db),
+    }
+    return templates.TemplateResponse(
+        request=request,
+        name="admin_submissions.html",
+        context={
+            "submissions": submissions,
+            "total": total,
+            "page": page,
+            "total_pages": _pages(total, SUBMISSION_PAGE_SIZE),
+            "status_filter": status_filter or "",
+            "counts": counts,
+            "contents": target_contents,
+            "decided": decided,
+            "reason": reason,
+            "status_labels": crud.SUBMISSION_STATUS_LABELS,
+            "kind_labels": crud.SUBMISSION_KIND_LABELS,
+            "type_labels": CONTENT_TYPE_LABELS,
+        },
+    )
+
+
+@router.post("/admin/submissions/{submission_id}/approve")
+def approve_submission(request: Request, db: DbSession, submission_id: int):
+    """通过词条申请：写入 / 更新 contents；重复处理返回错误提示。"""
+    reviewer = getattr(request.state, "current_user", None)
+    _, error = crud.decide_content_submission(
+        db,
+        submission_id,
+        approve=True,
+        reviewer_id=reviewer.id if reviewer else 0,
+    )
+    return RedirectResponse(
+        _url(
+            "/admin/submissions",
+            status="approved",
+            decided="ok" if error is None else "error",
+            reason=error,
+        ),
+        status_code=303,
+    )
+
+
+@router.post("/admin/submissions/{submission_id}/reject")
+async def reject_submission(request: Request, db: DbSession, submission_id: int):
+    """驳回词条申请：可附驳回说明，内容库不变。"""
+    form = await request.form()
+    note = str(form.get("note", "")).strip()
+    reviewer = getattr(request.state, "current_user", None)
+    _, error = crud.decide_content_submission(
+        db,
+        submission_id,
+        approve=False,
+        reviewer_id=reviewer.id if reviewer else 0,
+        note=note,
+    )
+    return RedirectResponse(
+        _url(
+            "/admin/submissions",
+            status="rejected",
+            decided="ok" if error is None else "error",
+            reason=error,
+        ),
         status_code=303,
     )

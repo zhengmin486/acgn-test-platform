@@ -6,6 +6,20 @@
     {% if case_id %}<a class="btn btn-outline-secondary btn-sm" href="/testcases">返回用例列表</a>{% endif %}
 </div>
 <p class="text-muted small mb-3">{% if case_id %}仅显示该用例的执行记录。{% else %}全部用例的执行记录，可在测试用例页发起执行。{% endif %}</p>
+{# ===== 结果筛选 chips：全部/通过/失败（带计数，GET 可分享；按用例过滤时不显示） ===== #}
+{% if not case_id %}
+{% set passed_count = runs_all | selectattr("passed") | list | length %}
+{% set failed_count = (runs_all | length) - passed_count %}
+<form class="d-flex flex-wrap align-items-center gap-2 mb-2" method="get" action="/runs">
+    <span class="small text-muted">结果筛选：</span>
+    <button type="submit" name="result" value="" class="btn btn-sm {{ 'btn-primary' if not result_filter else 'btn-outline-secondary' }}">全部 {{ runs_all | length }}</button>
+    <button type="submit" name="result" value="passed" class="btn btn-sm {{ 'btn-primary' if result_filter == 'passed' else 'btn-outline-secondary' }}">通过 {{ passed_count }}</button>
+    <button type="submit" name="result" value="failed" class="btn btn-sm {{ 'btn-primary' if result_filter == 'failed' else 'btn-outline-secondary' }}">失败 {{ failed_count }}</button>
+</form>
+{% endif %}
+{% if result_filter %}
+<p class="text-muted small">当前筛选：{% if result_filter == 'passed' %}仅通过{% else %}仅失败{% endif %} · 共 {{ runs | length }} 条</p>
+{% endif %}
 {% if runs %}
 <div class="table-responsive table-card">
 <table class="table table-hover align-middle">
@@ -14,7 +28,7 @@
     </thead>
     <tbody>
     {% for r in runs %}
-    <tr>
+    <tr{% if not r.passed %} class="run-row-fail"{% endif %}>
         <td>{{ r.id }}</td>
         <td>{{ r.case_id }}</td>
         <td>{{ r.case_name }}</td>

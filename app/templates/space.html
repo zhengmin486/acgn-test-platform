@@ -1,7 +1,7 @@
 {% extends "base_content.html" %}
 {% from "_pager.html" import pager %}
-{# 个人空间：用户信息 + 简介编辑 + 作品收藏 / 浏览记录（Tab 切换 + 分页）。
-   仅登录用户可达（路由层保证）；收藏与记录均只属于当前账号。 #}
+{# 个人空间：用户信息 + 简介编辑 + 收藏 / 浏览记录 / 标注（Tab 切换 + 分页）。
+   仅登录用户可达（路由层保证）；收藏、记录与标注均只属于当前账号。 #}
 {% block title %}个人空间 - ACGN 内容平台{% endblock %}
 
 {% macro stars(rating) %}
@@ -13,7 +13,7 @@
 <div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-3">
     <div>
         <h1 class="h3 mb-1 section-heading">个人空间</h1>
-        <p class="text-muted small mb-0">账号信息、个人简介、作品收藏与浏览记录，只属于你本人。</p>
+        <p class="text-muted small mb-0">账号信息、个人简介、收藏、浏览记录与作品标注，只属于你本人。</p>
     </div>
     <a class="btn btn-outline-secondary btn-sm" href="/">&larr; 返回首页</a>
 </div>
@@ -72,6 +72,22 @@
                     </div>
                 </div>
             </div>
+            <div class="col-6 col-md-3">
+                <div class="card app-card stat-card text-center h-100">
+                    <div class="card-body py-3">
+                        <div class="stat-num">{{ status_counts.get('seen', 0) }}</div>
+                        <div class="small text-muted">看过</div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-6 col-md-3">
+                <div class="card app-card stat-card text-center h-100">
+                    <div class="card-body py-3">
+                        <div class="stat-num">{{ status_counts.get('want', 0) }}</div>
+                        <div class="small text-muted">想看</div>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
 </div>
@@ -100,7 +116,7 @@
     </div>
 </div>
 
-{# ===== Tab：作品收藏 / 浏览记录 ===== #}
+{# ===== Tab：作品收藏 / 浏览记录 / 作品标注 ===== #}
 <ul class="nav space-tabs mb-3">
     <li class="nav-item">
         <a class="nav-link space-tab{% if tab == 'favorites' %} active{% endif %}"
@@ -110,16 +126,40 @@
         <a class="nav-link space-tab{% if tab == 'history' %} active{% endif %}"
            href="/me?tab=history">浏览记录（{{ history_count }}）</a>
     </li>
+    <li class="nav-item">
+        <a class="nav-link space-tab{% if tab == 'marks' %} active{% endif %}"
+           href="/me?tab=marks">作品标注（{{ marks_count }}）</a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link space-tab{% if tab == 'submissions' %} active{% endif %}"
+           href="/me?tab=submissions">词条申请（{{ submissions_count }}）</a>
+    </li>
 </ul>
 
 {% if tab == 'favorites' %}
-{# ===== 作品收藏：卡片网格 + 单条取消 + 清空 ===== #}
+{# ===== 作品收藏：分类筛选（追番 / 漫画 / 游戏 / 轻小说）+ 卡片网格 + 单条取消 + 清空 ===== #}
+{% if favorites_count %}
+<div class="tag-filter mb-3">
+    <a class="tag-chip{% if not content_type %} active{% endif %}" href="/me?tab=favorites">
+        全部<span class="tag-count">{{ favorites_count }}</span>
+    </a>
+    {% for key, label in favorite_type_labels.items() %}
+    <a class="tag-chip{% if content_type == key %} active{% endif %}"
+       href="/me?tab=favorites&amp;type={{ key }}">
+        {{ label }}<span class="tag-count">{{ favorite_type_counts.get(key, 0) }}</span>
+    </a>
+    {% endfor %}
+</div>
+{% endif %}
+
 {% if favorites %}
 <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
-    <p class="text-muted small mb-0">共 {{ favorites_total }} 条收藏 · 第 {{ page }}/{{ total_pages }} 页</p>
+    <p class="text-muted small mb-0">共 {{ favorites_total }} 条{% if content_type %}{{ favorite_type_labels.get(content_type, '收藏') }}{% else %}收藏{% endif %} · 第 {{ page }}/{{ total_pages }} 页</p>
     <form method="post" action="/me/favorites/clear" class="m-0"
-          onsubmit="return confirm('确定清空全部收藏吗？');">
-        <button class="btn btn-outline-danger btn-sm" type="submit">清空收藏</button>
+          data-confirm="{% if content_type %}确定清空该分类的全部收藏吗？{% else %}确定清空全部收藏吗？{% endif %}"
+          data-confirm-title="清空收藏">
+        {% if content_type %}<input type="hidden" name="cat" value="{{ content_type }}">{% endif %}
+        <button class="btn btn-outline-danger btn-sm" type="submit">{% if content_type %}清空该分类{% else %}清空收藏{% endif %}</button>
     </form>
 </div>
 <div class="row g-3">
@@ -135,35 +175,47 @@
                 <span class="d-flex align-items-center gap-2 mt-1">
                     {{ stars(item.rating) }}
                     <span class="small text-muted">{{ '%.1f' % item.rating }}</span>
+                    {% set st = fav_statuses.get(item.id) %}
+                    {% if st == 'seen' %}<span class="badge bg-success">{{ status_labels.get(st, st) }}</span>
+                    {% elif st == 'unseen' %}<span class="badge bg-secondary">{{ status_labels.get(st, st) }}</span>
+                    {% elif st == 'want' %}<span class="badge bg-warning text-dark">{{ status_labels.get(st, st) }}</span>{% endif %}
                 </span>
                 <span class="small text-secondary mt-1 work-card-summary">{{ item.summary[:60] }}{% if item.summary|length > 60 %}…{% endif %}</span>
             </span>
         </a>
         <form method="post" action="/me/favorites/{{ item.id }}/remove" class="mt-2">
+            {% if content_type %}<input type="hidden" name="cat" value="{{ content_type }}">{% endif %}
             <button class="btn btn-outline-secondary btn-sm w-100" type="submit">取消收藏</button>
         </form>
     </div>
     {% endfor %}
 </div>
 {% if total_pages > 1 %}
+{% set fav_pager_base = '/me?tab=favorites&' ~ ('type=' ~ content_type ~ '&' if content_type else '') %}
 <div class="mt-3">
-    {{ pager('/me?tab=favorites&', page, total_pages) }}
+    {{ pager(fav_pager_base, page, total_pages) }}
 </div>
 {% endif %}
 {% else %}
 <div class="detail-empty">
+    {% if content_type and favorites_count %}
+    {% set cat_label = favorite_type_labels.get(content_type, '收藏') %}
+    还没有{{ cat_label }}。<br>
+    <a class="small" href="/contents?type={{ content_type }}">去{{ type_labels.get(content_type, '作品') }}分类挑一部</a>
+    {% else %}
     还没有收藏任何作品。<br>
     <a class="small" href="/contents">去全部作品挑一部收藏</a>
+    {% endif %}
 </div>
 {% endif %}
 
-{% else %}
+{% elif tab == 'history' %}
 {# ===== 浏览记录：表格（作品 / 类型 / 评分 / 浏览时间）+ 单条删除 + 清空 ===== #}
 {% if history %}
 <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
     <p class="text-muted small mb-0">共 {{ history_total }} 条记录 · 第 {{ page }}/{{ total_pages }} 页</p>
     <form method="post" action="/me/history/clear" class="m-0"
-          onsubmit="return confirm('确定清空全部浏览记录吗？');">
+          data-confirm="确定清空全部浏览记录吗？" data-confirm-title="清空浏览记录">
         <button class="btn btn-outline-danger btn-sm" type="submit">清空记录</button>
     </form>
 </div>
@@ -208,5 +260,134 @@
     <a class="small" href="/contents">去全部作品看看</a>
 </div>
 {% endif %}
+
+{% elif tab == 'submissions' %}
+{# ===== 词条申请：我提交的新增 / 修改提案与审核状态 ===== #}
+{% if submissions %}
+<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+    <p class="text-muted small mb-0">共 {{ submissions_total }} 条申请 · 第 {{ page }}/{{ total_pages }} 页</p>
+    <a class="btn btn-primary btn-sm" href="/submit">新增词条申请</a>
+</div>
+<div class="card table-card">
+    <div class="table-responsive">
+        <table class="table table-hover align-middle mb-0">
+            <thead>
+                <tr>
+                    <th>申请</th>
+                    <th>标题</th>
+                    <th>类型</th>
+                    <th>评分</th>
+                    <th>状态</th>
+                    <th>提交时间</th>
+                    <th>审核说明</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for s in submissions %}
+                <tr>
+                    <td><span class="badge bg-info text-dark">{{ submission_kind_labels.get(s.kind, s.kind) }}</span></td>
+                    <td>
+                        {% if s.kind == 'update' %}
+                        <a class="fw-semibold" href="/contents/{{ s.content_id }}">{{ s.title }}</a>
+                        {% else %}
+                        <span class="fw-semibold">{{ s.title }}</span>
+                        {% endif %}
+                    </td>
+                    <td><span class="badge detail-type-badge-sm">{{ type_labels.get(s.content_type, s.content_type) }}</span></td>
+                    <td>{{ '%.1f' % s.rating }}</td>
+                    <td>
+                        {% if s.status == 'pending' %}<span class="badge bg-warning text-dark">{{ submission_status_labels.get(s.status, s.status) }}</span>
+                        {% elif s.status == 'approved' %}<span class="badge bg-success">{{ submission_status_labels.get(s.status, s.status) }}</span>
+                        {% else %}<span class="badge bg-secondary">{{ submission_status_labels.get(s.status, s.status) }}</span>{% endif %}
+                    </td>
+                    <td class="text-muted small">{{ s.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+                    <td class="small text-muted">{{ s.review_note or '—' }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% if total_pages > 1 %}
+<div class="mt-3">
+    {{ pager('/me?tab=submissions&', page, total_pages) }}
+</div>
+{% endif %}
+{% else %}
+<div class="detail-empty">
+    还没有提交过词条申请。<br>
+    <a class="small" href="/submit">申请新增第一个词条</a>
+</div>
+{% endif %}
+
+{% else %}
+{# ===== 作品标注：看过 / 未看 / 想看（按标注筛选 + 表格内直接切换） ===== #}
+{% if marks_count %}
+<div class="tag-filter mb-3">
+    <a class="tag-chip{% if not status %} active{% endif %}" href="/me?tab=marks">
+        全部<span class="tag-count">{{ marks_count }}</span>
+    </a>
+    {% for key, label in status_labels.items() %}
+    <a class="tag-chip{% if status == key %} active{% endif %}"
+       href="/me?tab=marks&amp;status={{ key }}">
+        {{ label }}<span class="tag-count">{{ status_counts.get(key, 0) }}</span>
+    </a>
+    {% endfor %}
+</div>
+{% endif %}
+
+{% if marks %}
+<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
+    <p class="text-muted small mb-0">共 {{ marks_total }} 部{% if status %}{{ status_labels.get(status, '') }}{% endif %}作品 · 第 {{ page }}/{{ total_pages }} 页</p>
+</div>
+<div class="card table-card">
+    <div class="table-responsive">
+        <table class="table table-hover align-middle mb-0">
+            <thead>
+                <tr>
+                    <th>作品</th>
+                    <th>类型</th>
+                    <th>标注</th>
+                    <th>更新时间</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for item, mark, updated_at in marks %}
+                <tr>
+                    <td><a class="fw-semibold" href="/contents/{{ item.id }}">{{ item.title }}</a></td>
+                    <td><span class="badge detail-type-badge-sm">{{ type_labels.get(item.type, item.type) }}</span></td>
+                    <td>
+                        <form method="post" action="/contents/{{ item.id }}/status" class="m-0 d-flex flex-wrap gap-1">
+                            <input type="hidden" name="next" value="/me?tab=marks{% if status %}&amp;status={{ status }}{% endif %}">
+                            {% for key, label in status_labels.items() %}
+                            <button class="status-pill status-pill-sm{% if mark == key %} active{% endif %}"
+                                    type="submit" name="status" value="{{ key }}">{{ label }}</button>
+                            {% endfor %}
+                        </form>
+                    </td>
+                    <td class="text-muted small">{{ updated_at.strftime('%Y-%m-%d %H:%M') }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</div>
+{% if total_pages > 1 %}
+{% set marks_pager_base = '/me?tab=marks&' ~ ('status=' ~ status ~ '&' if status else '') %}
+<div class="mt-3">
+    {{ pager(marks_pager_base, page, total_pages) }}
+</div>
+{% endif %}
+{% else %}
+<div class="detail-empty">
+    {% if status %}
+    还没有标注为「{{ status_labels.get(status, '') }}」的作品。<br>
+    {% else %}
+    还没有标注任何作品。<br>
+    {% endif %}
+    <a class="small" href="/contents">去全部作品挑一部标注</a>
+</div>
+{% endif %}
+
 {% endif %}
 {% endblock %}

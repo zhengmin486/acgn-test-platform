@@ -3,10 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="theme-color" content="#6d28d9">
+    <meta name="theme-color" content="#66ccff">
     <title>{% block title %}ACGN 内容平台{% endblock %}</title>
     {# 站点图标：内联 SVG（紫色圆角方块 + 播放符），无需外部图片文件 #}
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%237c3aed'/%3E%3Cpath d='M26 20l20 12-20 12z' fill='%23fff'/%3E%3C/svg%3E">
+    {# favicon：与导航 logo 同一枚双色「屏幕 + 播放键」标识 #}
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='15' fill='%230a2d42'/%3E%3Crect x='11' y='14' width='42' height='28' rx='6' fill='none' stroke='%2366ccff' stroke-width='4.5'/%3E%3Cpath d='M25 48h14M32 42v6' stroke='%2366ccff' stroke-width='4.5' stroke-linecap='round'/%3E%3Cpath d='M27 21l12 7-12 7z' fill='%2339c5bb'/%3E%3C/svg%3E">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="/static/style.css" rel="stylesheet">
 </head>
@@ -27,6 +28,142 @@
 </footer>
 {% endblock %}
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+
+{# 界面改良 P1：全局轻反馈基建（渐进增强，无 JS 时退回浏览器原生行为）
+   1) Toast 容器：异步/耗时操作结果的即时感知（与 PRG 回显 alert 并存）
+   2) data-confirm：危险操作统一样式确认弹窗（form 上加属性即可启用）
+   3) 提交防重复：写操作点击后按钮锁定 + spinner，杜绝双击重复提交 #}
+<div class="toast-stack" id="toast-stack" aria-live="polite"></div>
+
+<div class="modal fade" id="app-confirm-modal" tabindex="-1" aria-labelledby="app-confirm-title" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title h6" id="app-confirm-title">确认操作</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="关闭"></button>
+            </div>
+            <div class="modal-body" id="app-confirm-body"></div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-sm btn-outline-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-sm btn-danger" id="app-confirm-ok">确认</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    (function () {
+        "use strict";
+        var App = window.App || (window.App = {});
+
+        /* ---- Toast：App.toast("消息", "ok|err|info") ---- */
+        App.toast = function (message, type) {
+            var stack = document.getElementById("toast-stack");
+            if (!stack) return;
+            type = type || "ok";
+            var item = document.createElement("div");
+            item.className = "toast-item " + type;
+            item.setAttribute("role", "status");
+            var icon = document.createElement("span");
+            icon.className = "toast-ic";
+            icon.textContent = type === "err" ? "✕" : "✓";
+            icon.setAttribute("aria-hidden", "true");
+            var text = document.createElement("span");
+            text.className = "toast-text";
+            text.textContent = message;
+            var close = document.createElement("button");
+            close.type = "button";
+            close.className = "toast-close";
+            close.setAttribute("aria-label", "关闭提示");
+            close.textContent = "✕";
+            item.appendChild(icon);
+            item.appendChild(text);
+            item.appendChild(close);
+            stack.appendChild(item);
+            var timer = setTimeout(remove, 4000);
+            function remove() {
+                clearTimeout(timer);
+                item.classList.add("leaving");
+                setTimeout(function () { item.remove(); }, 180);
+            }
+            close.addEventListener("click", remove);
+        };
+
+        /* ---- 危险操作确认 + 提交防重复（单一 submit 捕获监听） ---- */
+        var modalEl = document.getElementById("app-confirm-modal");
+        var modal = (modalEl && window.bootstrap) ? new bootstrap.Modal(modalEl) : null;
+        var pendingForm = null;
+        var submitting = false;
+
+        function lockButtons(form) {
+            var buttons = form.querySelectorAll("button");
+            for (var i = 0; i < buttons.length; i++) {
+                var btn = buttons[i];
+                if (btn.type === "button" || btn.disabled) continue;
+                if (!btn.querySelector(".btn-spinner")) {
+                    var spin = document.createElement("span");
+                    spin.className = "btn-spinner";
+                    spin.setAttribute("aria-hidden", "true");
+                    btn.insertBefore(spin, btn.firstChild);
+                }
+                btn.disabled = true;
+            }
+        }
+
+        document.addEventListener("submit", function (event) {
+            var form = event.target;
+            if (!(form instanceof HTMLFormElement)) return;
+            var confirmed = form.getAttribute("data-confirmed") === "1";
+            var message = form.getAttribute("data-confirm");
+            if (message && !confirmed) {
+                /* 首次提交：拦截，弹确认框；确认后带 data-confirmed 重新提交 */
+                event.preventDefault();
+                if (!modal) {
+                    if (window.confirm(message)) { form.removeAttribute("data-confirm"); form.requestSubmit ? form.requestSubmit() : form.submit(); }
+                    return;
+                }
+                pendingForm = form;
+                document.getElementById("app-confirm-title").textContent =
+                    form.getAttribute("data-confirm-title") || "确认操作";
+                document.getElementById("app-confirm-body").textContent = message;
+                var okBtn = document.getElementById("app-confirm-ok");
+                okBtn.textContent = form.getAttribute("data-confirm-ok") || "确认";
+                okBtn.disabled = false;
+                modal.show();
+                return;
+            }
+            if (confirmed) {
+                form.removeAttribute("data-confirmed");
+                lockButtons(form);
+                return;
+            }
+            if (!message) lockButtons(form);
+        }, true);
+
+        if (modal) {
+            var okBtn = document.getElementById("app-confirm-ok");
+            okBtn.addEventListener("click", function () {
+                if (!pendingForm || submitting) return;
+                submitting = true;
+                okBtn.disabled = true;
+                pendingForm.setAttribute("data-confirmed", "1");
+                modal.hide();
+                if (typeof pendingForm.requestSubmit === "function") {
+                    pendingForm.requestSubmit();
+                } else {
+                    pendingForm.submit();
+                }
+                submitting = false;
+                pendingForm = null;
+            });
+            modalEl.addEventListener("hidden.bs.modal", function () {
+                submitting = false;
+                okBtn.disabled = false;
+                pendingForm = null;
+            });
+        }
+    })();
+</script>
 {# 回到顶部按钮：滚动超过一屏后淡入 #}
 <button id="back-to-top" class="back-to-top" type="button" aria-label="回到顶部" title="回到顶部">&uarr;</button>
 <script>

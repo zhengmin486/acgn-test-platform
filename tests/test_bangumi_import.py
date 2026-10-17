@@ -15,15 +15,16 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import inspect
+from sqlalchemy import func, inspect, select
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
+from app import crud
 from app.crud import seed_if_empty
 from app.database import Base, build_engine, get_db
 from app.fake_data import FAKE_CONTENTS
 from app.main import app
-from app.models import Content
+from app.models import Content, ContentTag, Tag
 
 # scripts/ 不是包，这里按文件路径加载被测模块（与直接运行脚本等价）。
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -43,6 +44,17 @@ ANIME_PAYLOAD = {
     "name_cn": "圣斗士星矢",
     "summary": "少年们为了守护雅典娜而战的热血故事。",
     "rating": {"rank": 23, "total": 34602, "score": 8.7},
+    # 8 个标签：只应导入标注数最多的前 5 个
+    "tags": [
+        {"name": "热血", "count": 500},
+        {"name": "科幻", "count": 346},
+        {"name": "机甲", "count": 120},
+        {"name": "战斗", "count": 98},
+        {"name": "友情", "count": 76},
+        {"name": "冷门标签", "count": 12},
+        {"name": "更冷门", "count": 3},
+        {"name": "几乎没人标", "count": 1},
+    ],
 }
 
 GAME_PAYLOAD = {
@@ -229,6 +241,75 @@ class TestMapSubject:
             import_bangumi.map_subject(payload)
 
 
+# ---------- 标签提取：按标注数取前 N ----------
+
+
+class TestExtractTags:
+    def test_top_tags_by_count(self):
+        """按 count 从多到少取前 5 个，标注数少的被截掉。"""
+        tags = import_bangumi.extract_tags(ANIME_PAYLOAD)
+
+        assert tags == ["热血", "科幻", "机甲", "战斗", "友情"]
+        assert import_bangumi.MAX_TAGS_PER_SUBJECT == 5
+
+    def test_map_subject_carries_tags(self):
+        """map_subject 把截断后的标签带进 MappedSubject。"""
+        subject = import_bangumi.map_subject(ANIME_PAYLOAD)
+
+        assert subject.tags == ["热血", "科幻", "机甲", "战斗", "友情"]
+
+    def test_missing_or_invalid_tags_field_returns_empty(self):
+        """tags 缺失 / 空列表 / 非列表：返回空列表，不影响作品映射。"""
+        for payload_tags in (None, [], "热血", {"name": "科幻"}):
+            payload = make_payload(401, 2)
+            payload["tags"] = payload_tags
+            assert import_bangumi.extract_tags(payload) == []
+
+        assert import_bangumi.extract_tags({}) == []
+
+    def test_invalid_entries_are_skipped(self):
+        """非 dict 元素、空名、超长名一律丢弃；count 非法按 0 排在最后。"""
+        payload = make_payload(402, 2)
+        payload["tags"] = [
+            "not-a-dict",
+            {"name": "", "count": 99},
+            {"name": "长" * 81, "count": 98},
+            {"name": "无计数"},
+            {"name": "有计数", "count": "abc"},
+            {"name": "正常", "count": 1},
+        ]
+
+        # count 非法按 0：两个 0 分标签按名称 codepoint 排序（无 < 有），结果确定
+        assert import_bangumi.extract_tags(payload) == ["正常", "无计数", "有计数"]
+
+    def test_duplicate_names_deduped_keep_first(self):
+        """同名标签去重（保留先出现的那次），不占两个名额。"""
+        payload = make_payload(403, 2)
+        payload["tags"] = [
+            {"name": "科幻", "count": 10},
+            {"name": "机甲", "count": 9},
+            {"name": "科幻", "count": 8},
+        ]
+
+        assert import_bangumi.extract_tags(payload) == ["科幻", "机甲"]
+
+    def test_same_count_sorted_by_name_for_stability(self):
+        """标注数相同按名称排序，保证导入结果确定可复现。"""
+        payload = make_payload(404, 2)
+        payload["tags"] = [
+            {"name": "bravo", "count": 5},
+            {"name": "alpha", "count": 5},
+            {"name": "charlie", "count": 5},
+        ]
+
+        assert import_bangumi.extract_tags(payload) == ["alpha", "bravo", "charlie"]
+
+    def test_custom_limit(self):
+        """limit 参数可显式指定（与 crud.MAX_CONTENT_TAGS 兜底一致）。"""
+        assert import_bangumi.extract_tags(ANIME_PAYLOAD, limit=2) == ["热血", "科幻"]
+        assert import_bangumi.extract_tags(ANIME_PAYLOAD, limit=0) == []
+
+
 # ---------- 网络层：超时、重试与代理配置 ----------
 
 
@@ -391,6 +472,53 @@ class TestRunImport:
         assert imported[265].source_url == "https://bgm.tv/subject/265"
         assert imported[975].title == "Undertale"
         assert imported[975].type == "game"
+
+    def test_apply_mode_writes_tags_with_content(self, tmp_path):
+        """--apply：标签随作品一起入库（按标注数前 5），关联行可查。"""
+        _, factory = seeded_db(tmp_path)
+        fetch = make_stub_fetch({265: ANIME_PAYLOAD, 975: GAME_PAYLOAD})
+
+        summary = import_bangumi.run_import(
+            [265, 975], session_factory=factory, apply=True, fetch=fetch
+        )
+
+        assert summary.imported == 2
+        db = factory()
+        try:
+            row = db.scalar(select(Content).where(Content.bangumi_id == 265))
+            assert crud.list_content_tags(db, row.id) == [
+                "热血", "科幻", "机甲", "战斗", "友情",
+            ]
+            # 975 的 payload 没有 tags：作品正常入库，只是没有标签
+            row2 = db.scalar(select(Content).where(Content.bangumi_id == 975))
+            assert crud.list_content_tags(db, row2.id) == []
+            # 标签按名称全局去重：两个条目共 5 个标签行
+            assert db.scalar(select(func.count()).select_from(Tag)) == 5
+        finally:
+            db.close()
+
+    def test_duplicate_import_does_not_stack_tags(self, tmp_path):
+        """重复导入同一 bangumi_id：跳过不覆盖，标签关联行不堆叠。"""
+        _, factory = seeded_db(tmp_path)
+        fetch = make_stub_fetch({265: ANIME_PAYLOAD})
+        import_bangumi.run_import(
+            [265], session_factory=factory, apply=True, fetch=fetch
+        )
+        summary = import_bangumi.run_import(
+            [265], session_factory=factory, apply=True, fetch=fetch
+        )
+
+        assert summary.duplicates == 1
+        db = factory()
+        try:
+            row = db.scalar(select(Content).where(Content.bangumi_id == 265))
+            assert crud.list_content_tags(db, row.id) == [
+                "热血", "科幻", "机甲", "战斗", "友情",
+            ]
+            # 关联行仍是 5 行：跳过语义对标签同样生效
+            assert db.scalar(select(func.count()).select_from(ContentTag)) == 5
+        finally:
+            db.close()
 
     def test_duplicate_bangumi_id_is_skipped_without_overwrite(self, tmp_path):
         """bangumi_id 已存在：跳过且不覆盖本地内容，其余条目正常导入。"""

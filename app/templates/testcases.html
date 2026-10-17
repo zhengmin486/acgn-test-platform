@@ -1,16 +1,85 @@
 {% extends "base_admin.html" %}
 {% block title %}测试用例管理 - 测试管理平台{% endblock %}
 {% block content %}
+{% set total = all_cases | length %}
+{% set enabled_count = all_cases | selectattr("enabled") | list | length %}
+{% set disabled_count = total - enabled_count %}
+{% set methods = all_cases | map(attribute="method") | unique | list %}
+{% set filtering = filter and (filter.q or filter.method or filter.enabled) %}
+
 <div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-3">
     <h1 class="h3 mb-0 section-heading">测试用例管理</h1>
-    <form method="post" action="/testcases/execute-all">
+    {# 执行全部：不可中断的写操作 → 统一样式确认弹窗（按钮既有文案不变，确认框文案为新增 UI） #}
+    <form method="post" action="/testcases/execute-all"
+          data-confirm="将立即执行所有启用中的用例并生成一个回归批次，结果可在「执行历史」查看。操作不可中断。"
+          data-confirm-title="执行全部启用用例" data-confirm-ok="确认执行">
         <button class="btn btn-success btn-sm" type="submit">执行全部启用用例</button>
     </form>
 </div>
 <p class="text-muted small">单条/批量执行仅面向本站（进程内），请求路径只允许本站本地路径；批次结果见"批次"页。</p>
 {% if error %}<div class="alert alert-danger py-2 mb-3">{{ error }}</div>{% endif %}
-<div class="card app-card mb-4">
-    <div class="card-header">新建用例</div>
+
+{# ===== 统计条：总数 / 启用中 / 已停用（来自当前列表全量，与筛选条件无关） ===== #}
+<div class="row g-3 mb-3">
+    <div class="col-md-4">
+        <div class="card app-card stat-card text-center h-100">
+            <div class="card-body py-3">
+                <div class="stat-num">{{ total }}</div>
+                <div class="small text-muted">用例总数</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card app-card stat-card text-center h-100">
+            <div class="card-body py-3">
+                <div class="stat-num" style="color: var(--pass-fg);">{{ enabled_count }}</div>
+                <div class="small text-muted">启用中</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card app-card stat-card text-center h-100">
+            <div class="card-body py-3">
+                <div class="stat-num">{{ disabled_count }}</div>
+                <div class="small text-muted">已停用</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+{# ===== 筛选条：GET 提交、URL 可分享刷新，条件回显 ===== #}
+<form class="filter-bar row g-2 align-items-end" method="get" action="/testcases">
+    <div class="col-12 col-md-auto">
+        <label class="form-label small mb-0" for="case-q">关键词</label>
+        <input type="text" class="form-control form-control-sm" id="case-q" name="q"
+               value="{{ filter.q if filter else '' }}" placeholder="搜索名称 / 路径">
+    </div>
+    <div class="col-6 col-md-auto">
+        <label class="form-label small mb-0" for="case-method">方法</label>
+        <select class="form-select form-select-sm" id="case-method" name="method">
+            <option value="">全部</option>
+            {% for m in methods %}
+            <option value="{{ m }}" {% if filter and filter.method == m %}selected{% endif %}>{{ m }}</option>
+            {% endfor %}
+        </select>
+    </div>
+    <div class="col-6 col-md-auto">
+        <label class="form-label small mb-0" for="case-enabled">状态</label>
+        <select class="form-select form-select-sm" id="case-enabled" name="enabled">
+            <option value="">全部</option>
+            <option value="1" {% if filter and filter.enabled == "1" %}selected{% endif %}>启用</option>
+            <option value="0" {% if filter and filter.enabled == "0" %}selected{% endif %}>停用</option>
+        </select>
+    </div>
+    <div class="col-auto d-flex gap-2">
+        <button class="btn btn-primary btn-sm" type="submit">筛选</button>
+        {% if filtering %}<a class="btn btn-outline-secondary btn-sm" href="/testcases">重置</a>{% endif %}
+    </div>
+</form>
+
+{# ===== 新建用例：折叠面板（渐进披露，首屏先看数据；校验失败时自动展开） ===== #}
+<details class="card app-card case-create mb-4" {% if error or form %}open{% endif %}>
+    <summary><span class="case-create-plus" aria-hidden="true">+</span>新建用例</summary>
     <div class="card-body">
         <form method="post" action="/testcases" class="row g-2 align-items-end">
             <div class="col-md-3">
@@ -41,7 +110,8 @@
             </div>
         </form>
     </div>
-</div>
+</details>
+
 {% if cases %}
 <div class="table-responsive table-card">
 <table class="table table-hover align-middle">
@@ -59,14 +129,20 @@
         <td>{% if c.enabled %}<span class="badge bg-success">启用</span>{% else %}<span class="badge bg-secondary">停用</span>{% endif %}</td>
         <td class="text-muted small">{{ c.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
         <td>
-            <form method="post" action="/testcases/{{ c.id }}/execute" class="d-inline">
-                <button class="btn btn-sm btn-success" type="submit">执行</button>
-            </form>
-            <a class="btn btn-sm btn-outline-primary" href="/testcases/{{ c.id }}/edit">编辑</a>
-            <a class="btn btn-sm btn-outline-secondary" href="/runs?case_id={{ c.id }}">历史</a>
-            <form method="post" action="/testcases/{{ c.id }}/delete" class="d-inline">
-                <button class="btn btn-sm btn-outline-danger" type="submit">删除</button>
-            </form>
+            {# 操作列：主操作实心、次要描边、危险图标化（title/aria-label 兜底文案，触控 ≥32px） #}
+            <div class="table-ops">
+                <form method="post" action="/testcases/{{ c.id }}/execute" class="d-inline">
+                    <button class="btn btn-sm btn-success" type="submit">执行</button>
+                </form>
+                <a class="btn btn-sm btn-outline-primary" href="/testcases/{{ c.id }}/edit">编辑</a>
+                <a class="btn btn-sm btn-outline-secondary" href="/runs?case_id={{ c.id }}">历史</a>
+                <form method="post" action="/testcases/{{ c.id }}/delete" class="d-inline"
+                      data-confirm="删除后不可恢复，确认删除该用例？" data-confirm-title="删除用例">
+                    <button class="icon-btn" type="submit" title="删除" aria-label="删除">
+                        <svg class="svg-ic" viewBox="0 0 24 24" aria-hidden="true"><polyline points="3 6 21 6"/><path d="M8 6V4.5h8V6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
+                    </button>
+                </form>
+            </div>
         </td>
     </tr>
     {% endfor %}
@@ -74,6 +150,12 @@
 </table>
 </div>
 {% else %}
-<div class="detail-empty">暂无用例。可在上方表单中新建。</div>
+<div class="detail-empty">
+    {% if filtering %}
+    没有符合筛选条件的用例。试试更换关键词，或<a href="/testcases">重置筛选</a>查看全部。
+    {% else %}
+    暂无用例。可在上方表单中新建。
+    {% endif %}
+</div>
 {% endif %}
 {% endblock %}

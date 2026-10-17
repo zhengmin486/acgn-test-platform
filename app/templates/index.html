@@ -1,7 +1,14 @@
 {% extends "base_content.html" %}
 {% block title %}首页 - ACGN 内容平台{% endblock %}
 {% block content %}
-{% set type_icons = {"anime": "🎬", "comic": "📚", "game": "🎮", "novel": "📖"} %}
+{# 分类图标：统一内联 SVG（.svg-ic 描边助手），替代 emoji，保证跨平台渲染一致 #}
+{% set type_icons = {
+    "anime": "<svg class='svg-ic' viewBox='0 0 24 24' aria-hidden='true'><rect x='3' y='5' width='18' height='14' rx='2.5'/><line x1='8' y1='5' x2='8' y2='19'/><line x1='16' y1='5' x2='16' y2='19'/><line x1='3' y1='12' x2='21' y2='12'/></svg>",
+    "comic": "<svg class='svg-ic' viewBox='0 0 24 24' aria-hidden='true'><path d='M4 4.5h5.5A2.5 2.5 0 0 1 12 7v13a2.5 2.5 0 0 0-2.5-2.5H4z'/><path d='M20 4.5h-5.5A2.5 2.5 0 0 0 12 7v13a2.5 2.5 0 0 1 2.5-2.5H20z'/></svg>",
+    "game": "<svg class='svg-ic' viewBox='0 0 24 24' aria-hidden='true'><rect x='2' y='7' width='20' height='11' rx='5.5'/><line x1='7' y1='10.3' x2='7' y2='14.7'/><line x1='4.7' y1='12.5' x2='9.3' y2='12.5'/><circle cx='16.4' cy='10.9' r='1.15'/><circle cx='18.7' cy='14' r='1.15'/></svg>",
+    "novel": "<svg class='svg-ic' viewBox='0 0 24 24' aria-hidden='true'><path d='M12 6.5C10.5 5 8.5 4.5 4 4.5v13c4.5 0 6.5.5 8 2 1.5-1.5 3.5-2 8-2v-13c-4.5 0-6.5.5-8 2z'/><line x1='12' y1='6.5' x2='12' y2='19.5'/></svg>"
+} %}
+{% set fallback_icon = "<svg class='svg-ic' viewBox='0 0 24 24' aria-hidden='true'><path d='M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z'/></svg>" %}
 
 {# ===== 顶部：平台标识 + 搜索入口（始终显示；搜索提交到「全部作品」页） ===== #}
 <section class="home-hero text-white rounded-3 p-4 p-md-5 mb-4">
@@ -38,7 +45,7 @@
         {% for code, label in type_labels.items() %}
         <div class="col-6 col-md-3">
             <a class="home-type-tile" href="/contents?type={{ code }}">
-                <span class="home-type-icon" aria-hidden="true">{{ type_icons.get(code, "🗂") }}</span>
+                <span class="home-type-icon" aria-hidden="true">{{ (type_icons.get(code) or fallback_icon) | safe }}</span>
                 <span class="fw-semibold">{{ label }}</span>
                 <span class="small text-muted">{{ type_counts.get(code, 0) }} 部作品</span>
             </a>
@@ -58,17 +65,20 @@
         <div class="row g-3">
             {% for item in top_contents %}
             {% set stars = (item.rating / 2) | int %}
-            <div class="col-12 col-sm-6">
-                <a class="detail-related-item" href="/contents/{{ item.id }}">
-                    <div class="d-flex justify-content-between align-items-center gap-2">
-                        <span class="fw-semibold text-truncate">{{ item.title }}</span>
-                        <span class="badge detail-type-badge-sm">{{ type_labels.get(item.type, item.type) }}</span>
-                    </div>
-                    <div class="d-flex align-items-center gap-2 mt-1">
-                        <span class="detail-stars" aria-hidden="true">{% for i in range(1, 6) %}<span class="{{ 'star-on' if i <= stars else 'star-off' }}">★</span>{% endfor %}</span>
-                        <span class="small text-muted">{{ '%.1f' % item.rating }}</span>
-                    </div>
-                    <p class="small text-secondary mb-0 mt-1">{{ item.summary[:40] }}{% if item.summary|length > 40 %}…{% endif %}</p>
+            <div class="col-12 col-sm-6 col-lg-4">
+                <a class="work-card" href="/contents/{{ item.id }}">
+                    <span class="work-cover" aria-hidden="true">{{ item.title[:1] }}</span>
+                    <span class="work-card-body">
+                        <span class="d-flex justify-content-between align-items-center gap-2">
+                            <span class="fw-semibold text-truncate">{{ item.title }}</span>
+                            <span class="badge detail-type-badge-sm">{{ type_labels.get(item.type, item.type) }}</span>
+                        </span>
+                        <span class="d-flex align-items-center gap-2 mt-1">
+                            <span class="detail-stars" aria-hidden="true">{% for i in range(1, 6) %}<span class="{{ 'star-on' if i <= stars else 'star-off' }}">★</span>{% endfor %}</span>
+                            <span class="small text-muted">{{ '%.1f' % item.rating }}</span>
+                        </span>
+                        <span class="small text-secondary mt-1 work-card-summary">{{ item.summary[:40] }}{% if item.summary|length > 40 %}…{% endif %}</span>
+                    </span>
                 </a>
             </div>
             {% endfor %}

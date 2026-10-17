@@ -47,24 +47,29 @@ def contents_page(
     db: DbSession,
     q: str = Query(default=""),
     content_type: str | None = Query(default=None, alias="type", max_length=20),
+    tag: str | None = Query(default=None, max_length=80),
     page: int = Query(default=1, ge=1),
 ):
     """全部作品页：关键词/类型筛选 + 卡片网格 + 分页。
 
     与 /contents/{content_id}（详情页）是精确路径与路径参数的关系，互不冲突；
     非法类型页面侧宽容忽略（严格 400 校验由 API 负责），与旧首页行为一致。
+    标签筛选来自 Bangumi 导入的作品标签（见 crud.list_tags_with_counts），
+    与关键词/类型可叠加；筛选列表本身不带当前标签高亮由模板按 tag 判定。
     """
     keyword = q.strip()
     if content_type is not None:
         content_type = content_type.strip().lower() or None
         if content_type is not None and content_type not in CONTENT_TYPE_LABELS:
             content_type = None
-    search_mode = bool(keyword) or content_type is not None
+    tag_name = (tag or "").strip() or None
+    search_mode = bool(keyword) or content_type is not None or tag_name is not None
 
     total, contents = crud.search_contents_page(
         db,
         keyword=keyword,
         content_type=content_type,
+        tag=tag_name,
         page=page,
         page_size=CONTENT_PAGE_SIZE,
     )
@@ -83,6 +88,8 @@ def contents_page(
             "total": total,
             "page": page,
             "total_pages": total_pages,
+            "tag": tag_name,
+            "tag_options": crud.list_tags_with_counts(db),
         },
     )
 
@@ -101,11 +108,12 @@ def content_detail(request: Request, content_id: int, db: DbSession):
     if item is None:
         return render_missing(request, "内容", content_id)
     current_user = getattr(request.state, "current_user", None)
+    favorited = False
+    content_status = None
     if current_user is not None:
         crud.record_content_view(db, current_user.id, content_id)
         favorited = crud.is_favorite(db, current_user.id, content_id)
-    else:
-        favorited = False
+        content_status = crud.get_content_status(db, current_user.id, content_id)
     return templates.TemplateResponse(
         request=request,
         name="detail.html",
@@ -115,6 +123,9 @@ def content_detail(request: Request, content_id: int, db: DbSession):
             "related_contents": crud.list_related_contents(db, item),
             "related_articles": crud.list_related_articles(db, item),
             "is_favorited": favorited,
+            "content_status": content_status,
+            "status_labels": crud.CONTENT_STATUS_LABELS,
+            "content_tags": crud.list_content_tags(db, content_id),
         },
     )
 @router.get("/articles", response_class=HTMLResponse)
