@@ -38,6 +38,27 @@ class Settings(BaseSettings):
     # 站点对外基址（如 https://acgn.example.com）；留空时取当前请求的 host。
     public_base_url: str = ""
 
+    # ---------- 封面图 ----------
+    # 封面本地存储目录：Bangumi 导入时下载到此，Content.image_url 存站内
+    # 相对地址（/covers/...）。默认在项目内；想放到其它盘符（如 D:/acgn-covers）
+    # 改成绝对路径即可，main.py 会原样挂载到 /covers。
+    cover_storage_dir: str = "app/static/covers"
+    # 导入时是否下载封面；置 False 则只记录远程 URL（不推荐，热链易失效）。
+    cover_download_enabled: bool = True
+
+    # ---------- 封面图片处理（app/media.py） ----------
+    # 列表缩略图宽度（px）：只缩不放，输出 WebP；列表页流量主要靠它省。
+    cover_thumb_width: int = 400
+    # 详情全图双约束：宽度 px 与字节数；超出边缩边降画质直到达标，
+    # 保底也接受最小画质——封面可见性优先于体积达标。
+    cover_full_max_width: int = 1200
+    cover_full_max_bytes: int = 400 * 1024
+    # 管理员上传封面的大小上限（字节）；只认魔术字节，不信客户端扩展名。
+    cover_upload_max_bytes: int = 5 * 1024 * 1024
+    # 图片对外基址（如 https://img.example.com）：留空表示图片与应用同源。
+    # 将来切 COS / CDN 只改这一项，模板里的 /media/... 自动带上前缀。
+    media_base_url: str = ""
+
     # ---------- 邮件发送（SMTP，全部留空则不真发） ----------
     # smtp_host 与 smtp_from_address 都为空 = 不发送真实邮件：
     # 验证链接写入日志，并可在待验证页面 / 管理员页面手动生成，保证本地无邮件服务也能走完流程。

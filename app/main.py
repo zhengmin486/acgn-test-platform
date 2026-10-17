@@ -16,6 +16,7 @@ from app import (
     auth,
     business_pages,
     cases,
+    cover_admin,
     crud,
     space_pages,
     submission_pages,
@@ -51,6 +52,9 @@ app.include_router(business_pages.router)
 app.include_router(space_pages.router)
 # 词条申请（/submit、/contents/{id}/edit）：登录用户提交新增 / 修改提案，等待审核。
 app.include_router(submission_pages.router)
+# 封面图片上传（/manage/contents/{id}/cover，仅 staff）：管理员给作品补图 / 换图，
+# 与导入落地的封面同一条 app/media.py 管线（校验 → 落盘 → 双尺寸派生）。
+app.include_router(cover_admin.router)
 # 测试管理平台页面：仅管理员可访问（未登录跳登录页、越权 403）。
 app.include_router(testing_pages.router, dependencies=[Depends(require_admin_page)])
 # 数据管理页面（测试管理平台 → 数据管理）：同样仅管理员可访问。

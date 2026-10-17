@@ -17,6 +17,7 @@
 - [10. 测试与代码检查](#10-测试与代码检查)
 - [11. 数据库配置](#11-数据库配置)
 - [12. 已知问题](#12-已知问题)
+- [13. 运维：备份、定时与封面](#13-运维备份定时与封面)
 
 ## 1. 快速开始
 
@@ -405,12 +406,13 @@ python -m pytest --html=reports/api-test-report.html --self-contained-html
 ruff check app tests conftest.py
 ```
 
-当前 544 项用例，除 `test_api.py` 里 5 项外全部通过（见[第 12 节](#12-已知问题)）。
+当前 584 项用例，除 `test_api.py` 里 5 项外全部通过（见[第 12 节](#12-已知问题)）。
 
 测试的组织方式：
 
 - `tests/auth_helpers.py` 提供 `create_accounts(factory)` 和 `login_as_admin(client)`，管理相关的测试要先建账号并登录。`tests/` 由 pytest prepend 模式加进 `sys.path`，可以直接 import。
 - 覆盖内容 API、用例 CRUD、执行与记录、批次与回归、认证与越权、注册、邮箱验证（令牌 / 登录拦截 / 降级 / 管理员放行）、找回密码、个人空间（简介 / 收藏分类筛选与计数 / 浏览记录 / 作品标注 / 跨账号隔离）、词条申请（提交 / 校验 / 审核通过与驳回 / 幂等）、作品标签（CRUD / SQL 下推筛选 / 页面归类筛选 / 分页保留标签 / 导入取前 5）、数据管理、同步任务、三类抓取脚本。
+- 封面图片管线：魔数识别、文件名净化（防路径穿越）、缩略图 / 全图按需生成与磁盘缓存、画质阶梯压缩、原子写、`/media` 端点降级链（生成失败→原图→404）、上传校验与旧文件清理、模板助手与 `MEDIA_BASE_URL`（`tests/test_media.py`）。
 - 邮件相关测试不触网，SMTP 用桩替换（`tests/test_email_verification.py` 的 `FakeSMTP`）。
 - 跑之前确认用的是隔离的测试库，别把测试数据写进开发库。
 
@@ -426,6 +428,18 @@ sqlite:///./local_dev.db
 mysql+pymysql://用户名:密码@127.0.0.1:3306/acgn_test_platform?charset=utf8mb4
 ```
 
+除数据库外的全部开关（都有默认值，本地开发不用配）：
+
+| 环境变量 | 默认 | 说明 |
+|---|---|---|
+| `COVER_STORAGE_DIR` | `app/static/covers` | 封面本地目录，统一挂到 `/covers`；可为绝对路径（见 13.4） |
+| `COVER_DOWNLOAD_ENABLED` | `true` | 导入时是否下载封面；置 `false` 只记录远端地址（不推荐，热链易失效） |
+| `COVER_THUMB_WIDTH` | `400` | 列表缩略图宽度（px），按需生成 WebP 并缓存（见 13.4） |
+| `COVER_FULL_MAX_WIDTH` | `1200` | 详情页全图最大宽度（px），只缩不放 |
+| `COVER_FULL_MAX_BYTES` | `409600` | 详情页全图体积预算（字节），按画质阶梯压缩到达标 |
+| `COVER_UPLOAD_MAX_BYTES` | `5242880` | 管理员上传封面的体积上限（字节） |
+| `MEDIA_BASE_URL` | 空 | 图片对外基址前缀；留空走站内 `/media/...`，切 CDN / COS 只改这一项 |
+
 切 MySQL 前确认服务已起、库已建、连接参数对。建表在应用导入期做（`crud.init_db`，幂等）；`alembic` 已装但迁移脚本还没写，生产部署配置也待补。
 
 > 别把带真实密码的 `.env` 提交上去。
@@ -435,3 +449,16 @@ mysql+pymysql://用户名:密码@127.0.0.1:3306/acgn_test_platform?charset=utf8m
 1. **`test_api.py` 里 5 项用例依赖本地种子数据的固定 id**：`test_get_content_detail`、`test_detail_page`、`test_search_hit`、`test_search_case_insensitive`、`test_search_matches_summary_only_keyword`。
    它们直连 `local_dev.db` 并假设 id 是 1、5、6，本地数据被后台删掉或改过就会失败。种子重新播进干净库后这 5 项同样通过，是用例的数据依赖，不是代码缺陷。
 2. **数据库迁移还没落地**：建表靠应用导入期执行，没接 Alembic；切到 MySQL 后的生产部署配置也待完善。
+
+## 13. 运维：备份、定时与封面
+
+### 13.4 封面本地化
+
+封面图落在 `COVER_STORAGE_DIR`（默认 `app/static/covers`，可改绝对路径放其它盘符），`Content.image_url` 存站内相对地址；页面不直接引用原图，而是经 `/media/thumb/` 与 `/media/full/` 派生图端点取缩略图与压缩全图（`app/media.py`）。整条管线针对「作品上万、流量包只有 300 GB/月」的规模做了压缩与缓存：
+
+- **按需派生 + 磁盘缓存**：缩略图与全图都不预生成，首次请求时 Pillow 现场生成并原子落盘（`COVER_STORAGE_DIR` 下的 `thumbs/`、`full/` 子目录），之后直接命中缓存；响应带 `Cache-Control: public, max-age=2592000`，重复访问不再耗 CPU 与流量；
+- **统一 WebP + 画质阶梯**：同画质体积约为 JPEG 的 1/3。全图缩到 `COVER_FULL_MAX_WIDTH` 后按 82→38 逐档降质，直到满足 `COVER_FULL_MAX_BYTES`，保底接受最小画质——可见性优先于体积；
+- **双层降级**：服务端生成失败降级返回原图，原图缺失才 404；前端图片带 `onerror` 隐藏并露出常驻的渐变占位层。任何一环挂了页面都不破版；
+- **管理员上传**：详情页（仅 staff 可见）的上传入口，5 MB 上限、文件头魔数校验（只信 JPEG/PNG/WebP/GIF 魔数，不信客户端文件名与 Content-Type）、服务端生成文件名、双尺寸生成、替换时清理旧封面文件；失败按 `cover=error&why=<code>` 回显原因，不抛 500；
+- **安全**：文件名净化只允许单纯基名（拒绝目录成分 / 隐藏文件 / 超长名），`/media` 路由同样只认基名；`media` 派生目录与 `covers` 一样建议部署侧禁执行；
+- **换存储只改一项**：模板助手默认吐站内 `/media/...` 端点；配好 `MEDIA_BASE_URL` 后统一指向 CDN / COS，模板与业务代码零改动。
