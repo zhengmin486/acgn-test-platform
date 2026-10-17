@@ -368,6 +368,102 @@ class ContentViewHistory(Base):
     viewed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
 
 
+class ContentStatus(Base):
+    """个人空间「作品标注」：登录用户对作品的显式标记（看过 / 未看 / 想看）。
+
+    - (user_id, content_id) 联合唯一：同一用户对同一作品只保留一条标注，
+      重复标注为更新，不堆叠行；
+    - status 取值为 seen / unseen / want（见 crud.CONTENT_STATUS_LABELS）；
+    - 与收藏互相独立：可以只标注不收藏，也可以只收藏不标注；
+    - content_id 为弱关联，作品删除后标注行保留但不展示。
+    """
+
+    __tablename__ = "content_status"
+    __table_args__ = (
+        UniqueConstraint("user_id", "content_id", name="uq_content_status_user_content"),
+        Index("ix_content_status_user", "user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    content_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=datetime.now, onupdate=datetime.now
+    )
+
+
+class ContentSubmission(Base):
+    """词条申请：登录用户对内容的「新增 / 修改」提案，需管理员审核。
+
+    - kind：create（新增词条）/ update（修改已有词条，content_id 指向目标）；
+    - 提交时把提案字段（标题 / 类型 / 简介 / 评分）整体快照存入本表，
+      审核通过后才写到 contents，审核前不改动任何业务数据；
+    - status：pending（待审核）/ approved（已通过）/ rejected（已驳回）；
+    - reviewer_id / reviewed_at / review_note 记录审核人、时间与驳回说明；
+    - applied_content_id 记录通过后实际写入 / 更新的作品主键，便于追溯；
+    - 同一申请只处理一次（仅 pending 可审核），避免重复写入。
+    """
+
+    __tablename__ = "content_submissions"
+    __table_args__ = (
+        Index("ix_content_submissions_user", "user_id"),
+        Index("ix_content_submissions_status", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    kind: Mapped[str] = mapped_column(String(10), nullable=False)
+    content_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    content_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    rating: Mapped[float] = mapped_column(Float, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
+    reviewer_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    review_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    applied_content_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class Tag(Base):
+    """作品标签（来源：Bangumi 条目 tags，按标注数取前若干个入库）。
+
+    - name 唯一：多作品共用同一标签只保留一行，筛选与计数按标签聚合；
+    - 与 Content 为多对多（ContentTag）：作品被后台删除后关联行仍保留
+      （弱关联风格），列表页内连接查不到即不展示；
+    - 标签只随 Bangumi 导入写入，站内不提供手工增改入口。
+    """
+
+    __tablename__ = "tags"
+    __table_args__ = (
+        Index("uq_tags_name", "name", unique=True),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(80), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
+
+
+class ContentTag(Base):
+    """作品-标签关联表：(content_id, tag_id) 联合唯一，重复导入幂等。
+
+    替换式写入（crud.replace_content_tags）：同一作品重新导入时先删旧关联
+    再建新关联，不会堆叠行；标签数量截断规则与导入侧一致。
+    """
+
+    __tablename__ = "content_tags"
+    __table_args__ = (
+        UniqueConstraint("content_id", "tag_id", name="uq_content_tags_content_tag"),
+        Index("ix_content_tags_tag", "tag_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    content_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    tag_id: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
 class EmailVerificationToken(Base):
     """邮箱验证令牌：库中只保存令牌的 SHA-256 哈希，明文仅出现在邮件/页面链接里。
 

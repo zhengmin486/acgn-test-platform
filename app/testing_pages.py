@@ -39,13 +39,45 @@ def _form_values(name: str, method: str, path: str,
             "expected_status": expected_status, "enabled": enabled}
 
 
+def _filter_cases(cases: list, q: str, method: str, enabled: str) -> list:
+    """用例列表筛选：关键词（名称/路径）+ 方法 + 启用状态。
+
+    纯内存过滤（列表规模小、无分页），默认空参时返回全量，行为与原来一致；
+    URL 带参即可分享/刷新，支撑「识别优于回忆」。
+    """
+    keyword = (q or "").strip()
+    method_filter = (method or "").strip().upper()
+    result = list(cases)
+    if keyword:
+        result = [c for c in result
+                  if keyword.lower() in (c.name or "").lower()
+                  or keyword.lower() in (c.path or "").lower()]
+    if method_filter:
+        result = [c for c in result if (c.method or "").upper() == method_filter]
+    if enabled == "1":
+        result = [c for c in result if c.enabled]
+    elif enabled == "0":
+        result = [c for c in result if not c.enabled]
+    return result
+
+
+def _case_filter_view(q: str, method: str, enabled: str) -> dict:
+    """筛选项回显（模板 select/input 的 selected/value 用）。"""
+    return {"q": q or "", "method": (method or "").strip().upper(), "enabled": enabled or ""}
+
+
 @router.get("/testcases", response_class=HTMLResponse)
-def testcases_page(request: Request, db: DbSession):
-    """用例管理首页：用例列表 + 新建表单。"""
+def testcases_page(request: Request, db: DbSession,
+                   q: str = Query(default=""), method: str = Query(default=""),
+                   enabled: str = Query(default="")):
+    """用例管理首页：用例列表 + 新建表单；支持关键词/方法/状态筛选（GET，可分享）。"""
+    all_cases = crud.list_cases(db)
+    cases = _filter_cases(all_cases, q, method, enabled)
     return templates.TemplateResponse(
         request=request,
         name="testcases.html",
-        context={"cases": crud.list_cases(db), "error": "", "form": {}},
+        context={"cases": cases, "all_cases": all_cases, "error": "", "form": {},
+                 "filter": _case_filter_view(q, method, enabled)},
     )
 
 
@@ -62,14 +94,17 @@ def create_case_page(request: Request, db: DbSession,
         return templates.TemplateResponse(
             request=request, name="testcases.html",
             context={"cases": crud.list_cases(db),
-                     "error": _validation_message(exc), "form": form},
+                     "all_cases": crud.list_cases(db), "error": _validation_message(exc),
+                     "form": form, "filter": _case_filter_view("", "", "")},
             status_code=400,
         )
     except ValueError:
         return templates.TemplateResponse(
             request=request, name="testcases.html",
             context={"cases": crud.list_cases(db),
-                     "error": "预期状态码必须是整数（100-599）", "form": form},
+                     "all_cases": crud.list_cases(db),
+                     "error": "预期状态码必须是整数（100-599）", "form": form,
+                     "filter": _case_filter_view("", "", "")},
             status_code=400,
         )
     crud.create_case(db, data)
@@ -138,14 +173,21 @@ def execute_case_page(request: Request, case_id: int, db: DbSession):
 
 
 @router.get("/runs", response_class=HTMLResponse)
-def runs_page(request: Request, db: DbSession, case_id: int | None = Query(default=None)):
-    """执行历史页：全部记录或按用例过滤（用例删除后仍可查看历史）。"""
-    runs = crud.list_runs(db, case_id)
+def runs_page(request: Request, db: DbSession, case_id: int | None = Query(default=None),
+              result: str = Query(default="")):
+    """执行历史页：全部记录、按用例过滤或按结果（通过/失败）过滤。"""
+    runs_all = crud.list_runs(db, case_id)
+    runs = runs_all
+    if result == "passed":
+        runs = [r for r in runs_all if r.passed]
+    elif result == "failed":
+        runs = [r for r in runs_all if not r.passed]
     title = f"用例 #{case_id} 的执行历史" if case_id is not None else "执行历史"
     return templates.TemplateResponse(
         request=request,
         name="runs.html",
-        context={"runs": runs, "title": title, "case_id": case_id},
+        context={"runs": runs, "runs_all": runs_all, "result_filter": result or "",
+                 "title": title, "case_id": case_id},
     )
 
 

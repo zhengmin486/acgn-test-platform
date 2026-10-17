@@ -22,6 +22,10 @@
            href="/admin/data/sync">数据同步</a>
     </li>
     <li class="nav-item">
+        <a class="nav-link{% if data_path.startswith('/admin/submissions') %} active{% endif %}"
+           href="/admin/submissions">词条审核</a>
+    </li>
+    <li class="nav-item">
         <a class="nav-link{% if data_path.startswith('/admin/accounts') %} active{% endif %}"
            href="/admin/accounts">账号验证</a>
     </li>

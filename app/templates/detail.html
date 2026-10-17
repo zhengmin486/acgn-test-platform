@@ -10,6 +10,13 @@
 <div class="alert alert-info py-2 mb-3">已取消收藏。</div>
 {% endif %}
 
+{# 标注操作回显：status_ok / status_err 是独立参数，不与其它筛选冲突 #}
+{% if request.query_params.get('status_ok') and content_status %}
+<div class="alert alert-info py-2 mb-3">已标注为「{{ status_labels.get(content_status, content_status) }}」。</div>
+{% elif request.query_params.get('status_err') %}
+<div class="alert alert-warning py-2 mb-3">标注无效，请重新选择。</div>
+{% endif %}
+
 <div class="card detail-hero">
     <div class="card-body p-4">
         <p class="small mb-3"><a href="/">&larr; 返回内容列表</a></p>
@@ -38,21 +45,51 @@
 
         <div class="mt-3">
             <span class="detail-chip">{{ type_label }}</span>
-            <span class="text-muted small ms-1">暂无其他标签数据</span>
+            {# 该文案只在确实没有标签时成立；有标签时由下方标签区展示 #}
+            {% if not content_tags %}<span class="text-muted small ms-1">暂无其他标签数据</span>{% endif %}
         </div>
 
-        {# 收藏入口（个人空间）：登录用户可收藏 / 取消收藏，游客引导登录后回来本页 #}
+        {# 作品标签（随 Bangumi 导入）：点击跳全部作品页按该标签筛选 #}
+        {% if content_tags %}
+        <div class="mt-3 d-flex flex-wrap align-items-center gap-2">
+            <span class="text-muted small">标签：</span>
+            {% for name in content_tags %}
+            <a class="tag-chip" href="/contents?tag={{ name|urlencode }}">{{ name }}</a>
+            {% endfor %}
+        </div>
+        {% endif %}
+
+        {# 收藏入口（个人空间）：登录用户可收藏 / 取消收藏，游客引导登录后回来本页。
+           状态语义：未收藏=品牌紫实心主按钮（行动召唤），已收藏=次级描边（弱化）。 #}
         <div class="mt-3 d-flex flex-wrap align-items-center gap-3">
             {% if current_user %}
             <form method="post" action="/contents/{{ content.id }}/favorite" class="m-0">
                 <input type="hidden" name="next" value="/contents/{{ content.id }}">
-                <button class="btn btn-sm {{ 'btn-outline-danger' if is_favorited else 'btn-outline-primary' }}"
-                        type="submit">{{ '取消收藏' if is_favorited else '收藏作品' }}</button>
+                <button class="btn btn-sm {{ 'btn-outline-secondary' if is_favorited else 'btn-primary' }}"
+                        type="submit">{% if not is_favorited %}<svg class="svg-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20.5s-7.6-4.8-9.3-9.1A5.2 5.2 0 0 1 12 6.5a5.2 5.2 0 0 1 9.3 4.9c-1.7 4.3-9.3 9.1-9.3 9.1z"/></svg>{% endif %}{{ '取消收藏' if is_favorited else '收藏作品' }}</button>
             </form>
             <a class="small" href="/me?tab=favorites">我的收藏 &rarr;</a>
             {% else %}
             <a class="btn btn-sm btn-outline-primary"
                href="/login?next=/contents/{{ content.id }}">登录后可收藏作品</a>
+            {% endif %}
+        </div>
+
+        {# 作品标注：看过 / 未看 / 想看（登录用户；与收藏互相独立） #}
+        <div class="mt-3 d-flex flex-wrap align-items-center gap-2">
+            <span class="text-muted small fw-semibold">标注：</span>
+            {% if current_user %}
+            <form method="post" action="/contents/{{ content.id }}/status" class="m-0 d-flex flex-wrap gap-2">
+                <input type="hidden" name="next" value="/contents/{{ content.id }}">
+                {% for key, label in status_labels.items() %}
+                <button class="status-pill{% if content_status == key %} active{% endif %}"
+                        type="submit" name="status" value="{{ key }}">{{ label }}</button>
+                {% endfor %}
+            </form>
+            <a class="small" href="/me?tab=marks">我的标注 &rarr;</a>
+            <a class="small" href="/contents/{{ content.id }}/edit">申请修改词条</a>
+            {% else %}
+            <span class="text-muted small">登录后可标注「看过 / 未看 / 想看」</span>
             {% endif %}
         </div>
 

@@ -36,6 +36,12 @@
         </div>
     </div>
 </div>
+{# 通过率进度条：回归结论 3 秒读完（无通过率数据时不渲染） #}
+{% if pass_rate is not none %}
+<div class="batch-progress" role="img" aria-label="批次通过率 {{ pass_rate }}%">
+    <div class="batch-progress-fill" style="width: {{ pass_rate }}%"></div>
+</div>
+{% endif %}
 <p class="text-muted small">
     开始：{{ batch.started_at.strftime('%Y-%m-%d %H:%M:%S') }}
     {% if batch.finished_at %}· 结束：{{ batch.finished_at.strftime('%Y-%m-%d %H:%M:%S') }}{% endif %}
@@ -81,7 +87,7 @@
     </thead>
     <tbody>
     {% for item in regression["items"] %}
-    <tr>
+    <tr{% if item.change == 'regression' %} class="run-row-fail"{% elif item.change == 'fixed' %} class="run-row-ok"{% elif item.change == 'missing' %} class="run-row-warn"{% endif %}>
         <td>{{ item.case_id }}</td>
         <td>{{ item.case_name }}</td>
         <td>{% if item.change == 'regression' %}<span class="badge bg-danger">通过变失败</span>
@@ -109,7 +115,7 @@
     </thead>
     <tbody>
     {% for r in runs %}
-    <tr>
+    <tr{% if not r.passed %} class="run-row-fail"{% endif %}>
         <td>#{{ r.id }}</td>
         <td>{{ r.case_name }}</td>
         <td><span class="badge bg-info text-dark">{{ r.method }}</span></td>

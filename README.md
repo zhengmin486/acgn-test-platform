@@ -73,10 +73,12 @@ python scripts/create_user.py --username alice --reset-password   # 重置口令
 
 三类数据，全部公开：
 
-- **作品**（`contents`）：门户页 `/` 只做发现（分类入口 / 高分推荐 / 最新资讯）；全量浏览和搜索统一在 `/contents`，类型筛选 + 关键词搜索 + 分页；详情在 `/contents/{id}`。
+- **作品**（`contents`）：门户页 `/` 只做发现（分类入口 / 高分推荐 / 最新资讯）；全量浏览和搜索统一在 `/contents`，类型筛选 + 关键词搜索 + 分页；详情在 `/contents/{id}`。作品标签随 Bangumi 导入（每个条目按标注数取前 5 个），`/contents` 页顶部可按标签归类筛选，详情页标签可点。
 - **资讯**（`articles`）：列表 `/articles`、详情 `/articles/{id}`，只展示已发布的。
 - **新番档期**（`anime_schedules`）：档期页 `/schedule` 按 `season` 切换，同步历史在 `/schedule/runs`。
-- **个人空间**（`/me`，需登录）：账号信息、个人简介、作品收藏与浏览记录。详情页可收藏 / 取消收藏作品；登录用户浏览作品自动留记录，重复浏览只更新时间和条数，每人最多保留最近 100 条。
+- **个人空间**（`/me`，需登录）：账号信息、个人简介、作品收藏、浏览记录与作品标注。收藏按作品类型拆成「追番（动画）/ 漫画 / 游戏 / 轻小说」四类，可分类单独查看，也保留「全部」总览；作品可标注「看过 / 未看 / 想看」，在标注页按状态筛选并直接切换；详情页可收藏 / 取消收藏作品；登录用户浏览作品自动留记录，重复浏览只更新时间和条数，每人最多保留最近 100 条。
+
+- **词条申请**（需登录）：在 `/contents` 可申请新增词条、在作品详情页申请修改；提交后进入个人空间「词条申请」Tab 查看审核状态；管理员在 `/admin/submissions` 通过或驳回，**通过后**才写入内容库。
 
 数据主要来自三个抓取脚本（见 [5.2](#52-数据同步)），管理员也可以在后台手动触发。
 
@@ -162,7 +164,9 @@ YouTube（`?category=movie`）和播客（`?category=radio`）栏目只有播放
 |---|---|---|---|
 | 内容平台页面（`/`、`/articles`、`/contents/{id}`、`/schedule`、`/schedule/runs`） | 可访问 | 可访问 | 可访问 |
 | 内容 API（`/api/health`、`/api/contents*`、`/api/schedule*`） | 可访问 | 可访问 | 可访问 |
-| 个人空间（`/me`、收藏与浏览记录） | 跳登录 | 可访问 | 可访问 |
+| 个人空间（`/me`、收藏与浏览记录、作品标注） | 跳登录 | 可访问 | 可访问 |
+| 词条申请（`/submit`、`/contents/{id}/edit`） | 跳登录 | 可访问 | 可访问 |
+| 词条审核（`/admin/submissions`） | 跳登录 | 403 页 | 可访问 |
 | 测试平台页面（`/testcases*`、`/runs*`、`/batches*`、`/admin/data*`） | 跳登录 | 403 页 | 可访问 |
 | 测试平台 API（`/api/testcases*`、`/api/runs*`、`/api/batches*`） | 401 | 403 | 放行 |
 
@@ -249,7 +253,7 @@ acgn-test-platform/
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/health` | 健康检查 |
-| GET | `/api/contents` | 内容列表，支持 `type` 筛选 |
+| GET | `/api/contents` | 内容列表，支持 `type`、`tag` 筛选（可叠加） |
 | GET | `/api/contents/search?q=关键词` | 按标题或简介搜索 |
 | GET | `/api/contents/{content_id}` | 内容详情 |
 | GET | `/api/schedule` | 新番档期列表，支持 `season` |
@@ -257,7 +261,7 @@ acgn-test-platform/
 | GET | `/api/schedule/runs` | 档期同步历史 |
 | GET | `/api/schedule/{schedule_id}` | 档期条目详情 |
 | GET | `/` | 门户页（分类 / 推荐 / 资讯，不含全量列表） |
-| GET | `/contents` | 全部作品页，支持 `q`、`type`、`page` |
+| GET | `/contents` | 全部作品页，支持 `q`、`type`、`tag`、`page`；顶部按标签归类筛选 |
 | GET | `/contents/{content_id}` | 内容详情页 |
 | GET | `/articles` | 资讯列表页 |
 | GET | `/articles/{article_id}` | 资讯详情页 |
@@ -290,15 +294,30 @@ acgn-test-platform/
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/me` | 个人空间页，支持 `tab=favorites\|history`、`page` |
+| GET | `/me` | 个人空间页，支持 `tab=favorites\|history\|marks\|submissions`、`type=anime\|comic\|game\|novel`（收藏分类）、`status=seen\|unseen\|want`（标注筛选）、`page` |
 | POST | `/me/profile` | 保存简介（`bio`，最多 500 字，留空即清除） |
 | POST | `/contents/{content_id}/favorite` | 收藏 / 取消收藏（切换），`next` 回跳来源页 |
-| POST | `/me/favorites/{content_id}/remove` | 取消单条收藏 |
-| POST | `/me/favorites/clear` | 清空收藏 |
+| POST | `/contents/{content_id}/status` | 标注看过 / 未看 / 想看（`status`），`next` 回跳来源页 |
+| POST | `/me/favorites/{content_id}/remove` | 取消单条收藏（`cat` 保留当前分类） |
+| POST | `/me/favorites/clear` | 清空收藏（`cat` 只清空该分类，缺省清空全部） |
 | POST | `/me/history/{content_id}/remove` | 删除单条浏览记录 |
 | POST | `/me/history/clear` | 清空浏览记录 |
 
-### 8.4 测试管理 API（仅管理员）
+### 8.4 词条申请与审核
+
+登录用户可申请新增 / 修改词条，提交后进入待审核，管理员通过后才写入内容库；审核前不改动 `contents`。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/submit` | 新增词条申请表单（需登录） |
+| POST | `/submit` | 提交新增申请，进入待审核 |
+| GET | `/contents/{content_id}/edit` | 修改词条申请表单（预填当前内容，需登录） |
+| POST | `/contents/{content_id}/edit` | 提交修改申请，进入待审核 |
+| GET | `/admin/submissions` | 审核列表，按 `status=pending\|approved\|rejected` 筛选（仅管理员） |
+| POST | `/admin/submissions/{id}/approve` | 通过申请：写入 / 更新作品（仅管理员） |
+| POST | `/admin/submissions/{id}/reject` | 驳回申请，可附 `note`（仅管理员） |
+
+### 8.5 测试管理 API（仅管理员）
 
 未登录 401，普通用户 403。
 
@@ -314,7 +333,7 @@ acgn-test-platform/
 | GET | `/api/batches/{batch_id}` | 批次统计详情 |
 | GET | `/api/batches/{batch_id}/regression` | 与上一有效批次对比 |
 
-### 8.5 测试管理平台页面（仅管理员）
+### 8.6 测试管理平台页面（仅管理员）
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -328,7 +347,7 @@ acgn-test-platform/
 | GET | `/batches` | 回归批次列表页 |
 | GET | `/batches/{batch_id}` | 批次详情与回归分析页 |
 
-### 8.6 数据管理页面（仅管理员）
+### 8.7 数据管理页面（仅管理员）
 
 权限同测试平台：未登录跳 `/login?next=...`，普通用户 403 页。
 
@@ -363,6 +382,10 @@ acgn-test-platform/
 | `schedule_sync_runs` | `ScheduleSyncRun` | 档期专用同步记录 | — |
 | `content_favorites` | `ContentFavorite` | 个人空间作品收藏 | `(user_id, content_id)` 联合唯一 |
 | `content_view_history` | `ContentViewHistory` | 个人空间浏览记录 | `(user_id, content_id)` 联合唯一 |
+| `content_status` | `ContentStatus` | 个人空间作品标注（看过 / 未看 / 想看） | `(user_id, content_id)` 联合唯一 |
+| `content_submissions` | `ContentSubmission` | 词条申请（新增 / 修改提案，含审核状态） | — |
+| `tags` | `Tag` | 作品标签（来源 Bangumi，按标注数取前 5 入库） | `name` 唯一 |
+| `content_tags` | `ContentTag` | 作品-标签关联（多对多） | `(content_id, tag_id)` 联合唯一 |
 | `users` | `User` | 平台账号（`user` / `admin`，含简介 `bio`） | `username` 唯一 |
 
 几个设计上的选择：
@@ -370,7 +393,8 @@ acgn-test-platform/
 - `test_runs.case_id` 和 `sync_task_runs.actor_id` 都是弱关联，不设外键级联。用例或账号删掉后，历史记录靠名称 / 路径快照照样能读懂。
 - `test_runs.batch_id` 为 `NULL` 表示单条执行，永远不计入批次统计。
 - `anime_schedules.source_key` 取规范化后的主标题（去空白、转小写），因为源站档期页没有稳定的作品 ID。
-- 收藏与浏览记录的 `content_id` 同为弱关联：作品被后台删除后记录行仍保留，列表页内连接查不到即不展示。收藏重复点击幂等；浏览记录同一作品只更新 `viewed_at` 不堆叠行，每人最多保留最近 100 条，写入时裁掉最旧的。
+- 收藏与浏览记录的 `content_id` 同为弱关联：作品被后台删除后记录行仍保留，列表页内连接查不到即不展示。收藏重复点击幂等；浏览记录同一作品只更新 `viewed_at` 不堆叠行，每人最多保留最近 100 条，写入时裁掉最旧的。作品标注（`content_status`）与收藏互相独立，同一账号对同一作品只保留一条标注，重复标注为更新。
+- 标签来自 Bangumi 条目的 `tags` 字段（结构为 `[{name, count}, ...]`）：导入时按 `count` 降序、同数按名称稳定排序，每部作品最多取标注数最高的 5 个，过长（>80 字）或空名丢弃、重复名去重，脏数据（非 dict、缺 count）按 0 计排在最后。标签与作品是多对多（`tags` + `content_tags`），重复导入走替换式写入（`crud.replace_content_tags`），不堆叠关联行；`/contents` 页按标签归类筛选时走 SQL 连接下推，可与类型/关键词叠加。
 
 ## 10. 测试与代码检查
 
@@ -381,12 +405,12 @@ python -m pytest --html=reports/api-test-report.html --self-contained-html
 ruff check app tests conftest.py
 ```
 
-当前 468 项用例，除 `test_api.py` 里 5 项外全部通过（见[第 12 节](#12-已知问题)）。
+当前 544 项用例，除 `test_api.py` 里 5 项外全部通过（见[第 12 节](#12-已知问题)）。
 
 测试的组织方式：
 
 - `tests/auth_helpers.py` 提供 `create_accounts(factory)` 和 `login_as_admin(client)`，管理相关的测试要先建账号并登录。`tests/` 由 pytest prepend 模式加进 `sys.path`，可以直接 import。
-- 覆盖内容 API、用例 CRUD、执行与记录、批次与回归、认证与越权、注册、邮箱验证（令牌 / 登录拦截 / 降级 / 管理员放行）、找回密码、个人空间（简介 / 收藏 / 浏览记录 / 跨账号隔离）、数据管理、同步任务、三类抓取脚本。
+- 覆盖内容 API、用例 CRUD、执行与记录、批次与回归、认证与越权、注册、邮箱验证（令牌 / 登录拦截 / 降级 / 管理员放行）、找回密码、个人空间（简介 / 收藏分类筛选与计数 / 浏览记录 / 作品标注 / 跨账号隔离）、词条申请（提交 / 校验 / 审核通过与驳回 / 幂等）、作品标签（CRUD / SQL 下推筛选 / 页面归类筛选 / 分页保留标签 / 导入取前 5）、数据管理、同步任务、三类抓取脚本。
 - 邮件相关测试不触网，SMTP 用桩替换（`tests/test_email_verification.py` 的 `FakeSMTP`）。
 - 跑之前确认用的是隔离的测试库，别把测试数据写进开发库。
 

@@ -8,6 +8,10 @@
 - 类型映射只支持 type=2（anime）、type=4（game）；书籍/音乐等类型明确跳过，
   不会错误归类为漫画或小说。
 - rating 只取 API 返回的有效评分（rating.score > 0），取不到就跳过，不伪造。
+- **标签随作品一起导入**：取 API tags 中标注数（count）最多的前
+  ``MAX_TAGS_PER_SUBJECT`` 个，经 ``crud.replace_content_tags`` 替换式写入
+  （不复制标签逻辑，与站内筛选共用同一套表）；标签是可选增强，
+  解析不到不影响作品本身入库。
 
 用法示例：
     # 预览（默认，不写库）
@@ -45,6 +49,7 @@ from sqlalchemy import select  # noqa: E402
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError  # noqa: E402
 from sqlalchemy.orm import sessionmaker  # noqa: E402
 
+from app import crud  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.database import build_engine  # noqa: E402
 from app.models import Content  # noqa: E402
@@ -56,6 +61,10 @@ SOURCE_URL_TEMPLATE = "https://bgm.tv/subject/{subject_id}"
 DEFAULT_USER_AGENT = "acgn-test-platform/0.1 (local import script; github.com/acgn-test-platform)"
 DEFAULT_TIMEOUT = 10.0  # 单次请求超时（秒）
 DEFAULT_RETRIES = 2  # 失败后的重试次数（总请求次数 = 1 + retries）
+
+# 每个条目最多导入的标签数：源站标签常多达几十个，只保留标注数最多的前几个，
+# 避免标签刷屏稀释筛选意义；与 crud.MAX_CONTENT_TAGS 保持一致（两侧各自兜底）。
+MAX_TAGS_PER_SUBJECT = crud.MAX_CONTENT_TAGS
 
 # Bangumi 条目类型 -> 本站 Content.type；其余类型（1 书籍 / 3 音乐 / 5 三次元）明确跳过。
 TYPE_MAPPING: dict[int, str] = {2: "anime", 4: "game"}
@@ -80,7 +89,11 @@ class SubjectMappingError(ValueError):
 
 @dataclass
 class MappedSubject:
-    """映射完成后、等待入库的一条记录（字段与 Content 一一对应）。"""
+    """映射完成后、等待入库的一条记录（字段与 Content 一一对应）。
+
+    tags 为随作品一起导入的标签名列表（已按标注数截断）；列表为空表示
+    该条目没有可用标签，不影响作品本身入库。
+    """
 
     bangumi_id: int
     title: str
@@ -88,6 +101,7 @@ class MappedSubject:
     summary: str
     rating: float
     source_url: str
+    tags: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -234,6 +248,44 @@ def fetch_subject(
 # ---------- 数据映射（纯函数，便于单独测试） ----------
 
 
+def extract_tags(payload: dict, limit: int = MAX_TAGS_PER_SUBJECT) -> list[str]:
+    """从 Bangumi 条目 JSON 提取标签：按标注数（count）从多到少取前 limit 个。
+
+    规则：
+    - API 的 tags 形如 ``[{"name": "科幻", "count": 346}, ...]``；count 缺失或
+      非整数按 0 处理（排在后面），不因为个别标签缺计数就整体失败；
+    - 同名标签去重（保序）、丢弃空名与超长名（crud.TAG_NAME_MAX_LENGTH）；
+    - 标注数相同的按名称排序，保证结果确定可复现；
+    - tags 缺失 / 不是列表 / 全部非法时返回空列表——标签是可选增强，
+      不因此跳过整个条目。
+    """
+    raw_tags = payload.get("tags")
+    if not isinstance(raw_tags, list):
+        return []
+
+    candidates: list[tuple[int, str]] = []
+    for item in raw_tags:
+        if not isinstance(item, dict):
+            continue
+        name = (item.get("name") or "").strip()
+        if not name or len(name) > crud.TAG_NAME_MAX_LENGTH:
+            continue
+        count = item.get("count")
+        if not isinstance(count, int) or isinstance(count, bool):
+            count = 0
+        candidates.append((count, name))
+
+    candidates.sort(key=lambda pair: (-pair[0], pair[1]))
+    names: list[str] = []
+    for _, name in candidates:
+        if name in names:
+            continue
+        if len(names) >= limit:
+            break
+        names.append(name)
+    return names
+
+
 def map_subject(payload: dict) -> MappedSubject:
     """把 Bangumi API 的条目 JSON 映射为可入库字段。
 
@@ -241,7 +293,8 @@ def map_subject(payload: dict) -> MappedSubject:
     - 标题优先 name_cn，为空时回退 name；两者都为空则跳过；
     - summary 映射到摘要；为空则跳过（summary 是必填字段）；
     - rating 只取 rating.score 且必须 > 0，取不到就跳过（rating 必填，不伪造）；
-    - type=2 -> anime，type=4 -> game；其余类型跳过（书籍/音乐不归类为漫画/小说）。
+    - type=2 -> anime，type=4 -> game；其余类型跳过（书籍/音乐不归类为漫画/小说）；
+    - tags 按标注数取前 MAX_TAGS_PER_SUBJECT 个（见 extract_tags）。
     无法映射时抛 SubjectMappingError，异常信息即跳过原因。
     """
     bangumi_id = payload.get("id")
@@ -278,6 +331,7 @@ def map_subject(payload: dict) -> MappedSubject:
         summary=summary,
         rating=float(score),
         source_url=SOURCE_URL_TEMPLATE.format(subject_id=bangumi_id),
+        tags=extract_tags(payload),
     )
 
 
@@ -312,10 +366,12 @@ def _make_fetcher(
 def _map_and_store(db, payload: dict, *, apply: bool) -> SubjectOutcome:
     """对已成功获取的条目做映射、查重、入库，返回处理结果。
 
-    - bangumi_id 已存在 -> duplicate，直接跳过不覆盖；
+    - bangumi_id 已存在 -> duplicate，直接跳过不覆盖（含标签）；
     - 预览模式 -> preview，不写库；
     - 正式模式写入失败（含唯一索引冲突、数据库错误）会回滚并归入对应结果，
-      不中断其余条目的导入。
+      不中断其余条目的导入；
+    - 正式入库成功后，标签经 ``crud.replace_content_tags`` 替换式写入
+      （与站内筛选同一套表，不另写标签逻辑）。
     """
     try:
         subject = map_subject(payload)
@@ -357,11 +413,14 @@ def _map_and_store(db, payload: dict, *, apply: bool) -> SubjectOutcome:
         )
         db.add(content)
         db.commit()
+        # 标签与作品一起落库：替换式写入，重复导入不会堆叠关联行
+        crud.replace_content_tags(db, content.id, subject.tags)
         return SubjectOutcome(
             bangumi_id=subject.bangumi_id,
             status="imported",
             title=subject.title,
-            reason=f"已写入 contents.id={content.id}",
+            reason=f"已写入 contents.id={content.id}"
+            + (f"，标签 {len(subject.tags)} 个" if subject.tags else ""),
         )
     except IntegrityError:
         db.rollback()

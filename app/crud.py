@@ -18,6 +18,9 @@ from app.models import (
     Article,
     Content,
     ContentFavorite,
+    ContentStatus,
+    ContentSubmission,
+    ContentTag,
     ContentViewHistory,
     EmailVerificationToken,
     ExecutionBatch,
@@ -25,6 +28,7 @@ from app.models import (
     PasswordResetToken,
     ScheduleSyncRun,
     SyncTaskRun,
+    Tag,
     TestCase,
     User,
 )
@@ -35,12 +39,24 @@ from app.security import hash_password, hash_token
 def list_contents(
     db: Session,
     content_type: str | None = None,
+    tag: str | None = None,
 ) -> list[Content]:
-    """查询内容列表，可按类型筛选，按 id 排序。"""
+    """查询内容列表，可按类型与标签筛选，按 id 排序。
+
+    ``tag`` 为标签名称（精确匹配、区分大小写）；传入时走 Tags/ContentTags
+    多对多连接，与类型筛选可叠加。
+    """
     stmt = select(Content)
 
     if content_type is not None:
         stmt = stmt.where(Content.type == content_type)
+    if tag:
+        stmt = (
+            stmt.join(ContentTag, ContentTag.content_id == Content.id)
+            .join(Tag, Tag.id == ContentTag.tag_id)
+            .where(Tag.name == tag)
+            .distinct()
+        )
 
     stmt = stmt.order_by(Content.id)
     return list(db.scalars(stmt))
@@ -66,6 +82,13 @@ def list_top_contents(db: Session, limit: int = 6) -> list[Content]:
 def get_content(db: Session, content_id: int) -> Content | None:
     """按主键查询，不存在返回 None（由路由层转 404）。"""
     return db.get(Content, content_id)
+
+
+def get_contents_by_ids(db: Session, content_ids: list[int]) -> list[Content]:
+    """按主键批量取作品，供词条审核页展示「修改目标」；空列表返回空。"""
+    if not content_ids:
+        return []
+    return list(db.scalars(select(Content).where(Content.id.in_(content_ids))))
 
 
 def list_related_contents(
@@ -117,6 +140,79 @@ def list_related_articles(
     return list(db.scalars(stmt))
 
 
+# ---------- 作品标签（随 Bangumi 导入写入，站内只读） ----------
+
+# 单个作品最多保留的标签数：与 Bangumi 导入的截断规则一致，防止标签刷屏。
+MAX_CONTENT_TAGS = 5
+
+# 标签名长度上限（Tag.name 为 String(80)）：超长标签直接丢弃，不截断——
+# 截断会产生语义错误的标签，丢弃只损失一个可选筛选维度。
+TAG_NAME_MAX_LENGTH = 80
+
+
+def get_or_create_tag(db: Session, name: str) -> Tag:
+    """按名称取标签，不存在则创建；调用方负责把名称裁剪到长度上限内。"""
+    tag = db.scalar(select(Tag).where(Tag.name == name))
+    if tag is None:
+        tag = Tag(name=name)
+        db.add(tag)
+        db.flush()  # 先拿到 id，便于同批次的关联行引用
+    return tag
+
+
+def replace_content_tags(db: Session, content_id: int, tag_names: list[str]) -> list[str]:
+    """用给定标签列表整体替换某作品的标签，返回最终生效的标签名列表。
+
+    - 名称去空白、去重（保序）、丢弃空名与超长名（TAG_NAME_MAX_LENGTH）；
+    - 最多保留前 MAX_CONTENT_TAGS 个（导入侧已按标注数截断，这里兜底）；
+    - 先删旧关联再建新关联：重复导入同一作品不会堆叠关联行，
+      标签被源站移除后本地同步移除（标签是派生命名，不是本地资产）。
+    """
+    names: list[str] = []
+    for raw in tag_names:
+        name = (raw or "").strip()
+        if not name or len(name) > TAG_NAME_MAX_LENGTH or name in names:
+            continue
+        names.append(name)
+    names = names[:MAX_CONTENT_TAGS]
+
+    db.execute(sa_delete(ContentTag).where(ContentTag.content_id == content_id))
+    for name in names:
+        tag = get_or_create_tag(db, name)
+        db.add(ContentTag(content_id=content_id, tag_id=tag.id))
+    db.commit()
+    return names
+
+
+def list_content_tags(db: Session, content_id: int) -> list[str]:
+    """某作品的标签名列表（按 tag_id 稳定排序，即入库顺序）。"""
+    return list(
+        db.scalars(
+            select(Tag.name)
+            .join(ContentTag, ContentTag.tag_id == Tag.id)
+            .where(ContentTag.content_id == content_id)
+            .order_by(Tag.id)
+        )
+    )
+
+
+def list_tags_with_counts(db: Session, limit: int | None = 30) -> list[tuple[str, int]]:
+    """全部标签及关联作品数，按作品数从多到少（筛选栏用）；空库返回空列表。
+
+    count 统计的是 content_tags 关联行数；作品被删除后关联行仍在，
+    计数可能略高于可见作品数——标签筛选走内连接，结果不受影响。
+    """
+    stmt = (
+        select(Tag.name, func.count(ContentTag.id))
+        .join(ContentTag, ContentTag.tag_id == Tag.id)
+        .group_by(Tag.id, Tag.name)
+        .order_by(func.count(ContentTag.id).desc(), Tag.name)
+    )
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    return [(name, count) for name, count in db.execute(stmt).all()]
+
+
 def list_articles(
     db: Session,
     category: str | None = None,
@@ -156,11 +252,12 @@ def get_article(
 
     return db.scalar(stmt)
 
-def _content_search_stmt(keyword: str, content_type: str | None):
-    """内容搜索的共享查询：标题/简介不区分大小写包含匹配，可叠加类型筛选。
+def _content_search_stmt(keyword: str, content_type: str | None, tag: str | None = None):
+    """内容搜索的共享查询：标题/简介不区分大小写包含匹配，可叠加类型与标签筛选。
 
     匹配语义保持原样（lower 后包含匹配）；分页与不分页的调用方共用本构造，
-    避免两套搜索实现漂移。
+    避免两套搜索实现漂移。标签筛选走 content_tags/tags 连接下推到 SQL，
+    不在应用层过滤；同一作品命中标签时只出现一次（联合唯一约束保证）。
     """
     stmt = select(Content)
     if keyword:
@@ -173,15 +270,21 @@ def _content_search_stmt(keyword: str, content_type: str | None):
         )
     if content_type is not None:
         stmt = stmt.where(Content.type == content_type)
+    if tag:
+        stmt = (
+            stmt.join(ContentTag, ContentTag.content_id == Content.id)
+            .join(Tag, Tag.id == ContentTag.tag_id)
+            .where(Tag.name == tag)
+        )
     return stmt.order_by(Content.id)
 
 
-def search_contents(db: Session, keyword: str) -> list[Content]:
+def search_contents(db: Session, keyword: str, tag: str | None = None) -> list[Content]:
     """标题/简介不区分大小写的包含匹配，与分页版本语义一致。
 
     不分页、按 id 排序返回全部匹配；分页需求用 search_contents_page。
     """
-    return list(db.scalars(_content_search_stmt(keyword, None)))
+    return list(db.scalars(_content_search_stmt(keyword, None, tag)))
 
 
 def search_contents_page(
@@ -189,14 +292,16 @@ def search_contents_page(
     *,
     keyword: str = "",
     content_type: str | None = None,
+    tag: str | None = None,
     page: int = 1,
     page_size: int = 20,
 ) -> tuple[int, list[Content]]:
-    """分页搜索内容：关键词（标题/简介）与类型筛选可叠加，返回 (总数, 当前页)。
+    """分页搜索内容：关键词（标题/简介）、类型与标签筛选可叠加，返回 (总数, 当前页)。
 
-    关键词与类型均可缺省：只给类型即按类型浏览，只给关键词即全类型搜索。
+    三类条件均可缺省：只给类型即按类型浏览，只给关键词即全类型搜索，
+    只给标签即按标签归类浏览。
     """
-    stmt = _content_search_stmt(keyword, content_type)
+    stmt = _content_search_stmt(keyword, content_type, tag)
     total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     items = list(
         db.scalars(stmt.offset((page - 1) * page_size).limit(page_size))
@@ -394,6 +499,41 @@ MAX_BIO_LENGTH = 500
 # 防止单账号记录无限增长；收藏不设上限（收藏是用户主动行为，量级可控）。
 VIEW_HISTORY_LIMIT = 100
 
+# 作品标注：登录用户对作品的显式标记，与收藏互相独立。
+CONTENT_STATUS_LABELS = {
+    "seen": "看过",
+    "unseen": "未看",
+    "want": "想看",
+}
+
+# 词条申请：登录用户提交新增 / 修改提案，管理员审核通过后才写入 contents。
+CONTENT_TYPES = ("anime", "comic", "game", "novel")
+
+SUBMISSION_KIND_CREATE = "create"
+SUBMISSION_KIND_UPDATE = "update"
+SUBMISSION_KINDS = (SUBMISSION_KIND_CREATE, SUBMISSION_KIND_UPDATE)
+SUBMISSION_KIND_LABELS = {
+    SUBMISSION_KIND_CREATE: "新增词条",
+    SUBMISSION_KIND_UPDATE: "修改词条",
+}
+
+SUBMISSION_STATUS_PENDING = "pending"
+SUBMISSION_STATUS_APPROVED = "approved"
+SUBMISSION_STATUS_REJECTED = "rejected"
+SUBMISSION_STATUSES = (
+    SUBMISSION_STATUS_PENDING,
+    SUBMISSION_STATUS_APPROVED,
+    SUBMISSION_STATUS_REJECTED,
+)
+SUBMISSION_STATUS_LABELS = {
+    SUBMISSION_STATUS_PENDING: "待审核",
+    SUBMISSION_STATUS_APPROVED: "已通过",
+    SUBMISSION_STATUS_REJECTED: "已驳回",
+}
+
+SUBMISSION_MAX_TITLE = 200
+SUBMISSION_MAX_SUMMARY = 2000
+
 
 def set_user_bio(db: Session, user: User, bio: str | None) -> User:
     """更新个人简介：去首尾空白，空串按未填写（None）处理；超长抛 ValueError。"""
@@ -406,13 +546,28 @@ def set_user_bio(db: Session, user: User, bio: str | None) -> User:
     return user
 
 
-def count_favorites(db: Session, user_id: int) -> int:
-    """收藏作品数（个人空间统计卡）。"""
+def count_favorites(
+    db: Session, user_id: int, content_type: str | None = None
+) -> int:
+    """收藏作品数（个人空间统计卡）；指定 content_type 时只数该分类。"""
+    if content_type is None:
+        return (
+            db.scalar(
+                select(func.count())
+                .select_from(ContentFavorite)
+                .where(ContentFavorite.user_id == user_id)
+            )
+            or 0
+        )
     return (
         db.scalar(
             select(func.count())
             .select_from(ContentFavorite)
-            .where(ContentFavorite.user_id == user_id)
+            .join(Content, Content.id == ContentFavorite.content_id)
+            .where(
+                ContentFavorite.user_id == user_id,
+                Content.type == content_type,
+            )
         )
         or 0
     )
@@ -452,11 +607,18 @@ def remove_favorite(db: Session, user_id: int, content_id: int) -> bool:
     return bool(result.rowcount)
 
 
-def clear_favorites(db: Session, user_id: int) -> int:
-    """清空收藏，返回删除行数。"""
-    result = db.execute(
-        sa_delete(ContentFavorite).where(ContentFavorite.user_id == user_id)
-    )
+def clear_favorites(
+    db: Session, user_id: int, content_type: str | None = None
+) -> int:
+    """清空收藏，返回删除行数；指定 content_type 时只清空该分类。"""
+    stmt = sa_delete(ContentFavorite).where(ContentFavorite.user_id == user_id)
+    if content_type is not None:
+        stmt = stmt.where(
+            ContentFavorite.content_id.in_(
+                select(Content.id).where(Content.type == content_type)
+            )
+        )
+    result = db.execute(stmt)
     db.commit()
     return result.rowcount or 0
 
@@ -466,13 +628,19 @@ def list_favorites(
     user_id: int,
     page: int = 1,
     page_size: int = 20,
+    content_type: str | None = None,
 ) -> tuple[int, list[Content]]:
-    """收藏作品分页（按收藏时间倒序）：内连接 contents，作品已删则不展示。"""
+    """收藏作品分页（按收藏时间倒序）：内连接 contents，作品已删则不展示。
+
+    content_type 不为空时按内容类型筛选，对应个人空间「追番 / 追漫 / 追书 / 追游」分类。
+    """
     base = (
         select(Content)
         .join(ContentFavorite, ContentFavorite.content_id == Content.id)
         .where(ContentFavorite.user_id == user_id)
     )
+    if content_type is not None:
+        base = base.where(Content.type == content_type)
     total = (
         db.scalar(select(func.count()).select_from(base.order_by(None).subquery())) or 0
     )
@@ -487,6 +655,300 @@ def list_favorites(
         )
     )
     return total, items
+
+
+def favorite_type_counts(db: Session, user_id: int) -> dict[str, int]:
+    """按内容类型统计收藏数，供个人空间分类筛选条展示各分类条数。
+
+    只统计仍能在 contents 中找到的作品（与列表内连接语义一致）。
+    """
+    rows = db.execute(
+        select(Content.type, func.count())
+        .select_from(ContentFavorite)
+        .join(Content, Content.id == ContentFavorite.content_id)
+        .where(ContentFavorite.user_id == user_id)
+        .group_by(Content.type)
+    ).all()
+    return {content_type: count for content_type, count in rows}
+
+
+def get_content_status(db: Session, user_id: int, content_id: int) -> str | None:
+    """取用户对某作品的标注；未标注返回 None。"""
+    return db.scalar(
+        select(ContentStatus.status).where(
+            ContentStatus.user_id == user_id,
+            ContentStatus.content_id == content_id,
+        )
+    )
+
+
+def get_content_statuses(
+    db: Session, user_id: int, content_ids: list[int]
+) -> dict[int, str]:
+    """批量取多部作品的标注，供收藏列表展示徽标。"""
+    if not content_ids:
+        return {}
+    rows = db.execute(
+        select(ContentStatus.content_id, ContentStatus.status).where(
+            ContentStatus.user_id == user_id,
+            ContentStatus.content_id.in_(content_ids),
+        )
+    ).all()
+    return {content_id: status for content_id, status in rows}
+
+
+def set_content_status(
+    db: Session, user_id: int, content_id: int, status: str
+) -> str:
+    """设置 / 更新作品标注（同一作品只保留一条），返回写入的标注值。
+
+    status 非法时抛 ValueError，由路由层决定如何回显。
+    """
+    if status not in CONTENT_STATUS_LABELS:
+        raise ValueError(f"不支持的标注：{status}")
+    row = db.scalar(
+        select(ContentStatus).where(
+            ContentStatus.user_id == user_id,
+            ContentStatus.content_id == content_id,
+        )
+    )
+    if row is None:
+        db.add(ContentStatus(user_id=user_id, content_id=content_id, status=status))
+    else:
+        row.status = status
+        row.updated_at = datetime.now()
+    db.commit()
+    return status
+
+
+def list_content_status(
+    db: Session,
+    user_id: int,
+    page: int = 1,
+    page_size: int = 20,
+    status: str | None = None,
+) -> tuple[int, list[tuple[Content, str, datetime]]]:
+    """标注作品分页（按更新时间倒序）：内连接 contents，作品已删则不展示。
+
+    返回 (总数, [(内容, 标注, 更新时间)])；status 非空时按标注值筛选。
+    """
+    base = (
+        select(Content, ContentStatus.status, ContentStatus.updated_at)
+        .join(ContentStatus, ContentStatus.content_id == Content.id)
+        .where(ContentStatus.user_id == user_id)
+    )
+    if status is not None:
+        base = base.where(ContentStatus.status == status)
+    total = (
+        db.scalar(select(func.count()).select_from(base.order_by(None).subquery())) or 0
+    )
+    rows = db.execute(
+        base.order_by(ContentStatus.updated_at.desc(), Content.id.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    ).all()
+    return total, [(row[0], row[1], row[2]) for row in rows]
+
+
+def count_content_status(
+    db: Session, user_id: int, status: str | None = None
+) -> int:
+    """标注作品数；指定 status 时只数该标注。"""
+    stmt = (
+        select(func.count())
+        .select_from(ContentStatus)
+        .join(Content, Content.id == ContentStatus.content_id)
+        .where(ContentStatus.user_id == user_id)
+    )
+    if status is not None:
+        stmt = stmt.where(ContentStatus.status == status)
+    return db.scalar(stmt) or 0
+
+
+def content_status_counts(db: Session, user_id: int) -> dict[str, int]:
+    """按标注值统计条数（看过 / 未看 / 想看），供个人空间统计卡。"""
+    rows = db.execute(
+        select(ContentStatus.status, func.count())
+        .select_from(ContentStatus)
+        .join(Content, Content.id == ContentStatus.content_id)
+        .where(ContentStatus.user_id == user_id)
+        .group_by(ContentStatus.status)
+    ).all()
+    return {status: count for status, count in rows}
+
+
+# ---------- 词条申请 ----------
+
+
+def _normalize_content_fields(
+    title: str, content_type: str, summary: str, rating
+) -> tuple[dict | None, str | None]:
+    """校验并规范化词条字段；返回 (规范化字段, 错误信息)。"""
+    title = (title or "").strip()
+    content_type = (content_type or "").strip().lower()
+    summary = (summary or "").strip()
+    if not title:
+        return None, "标题不能为空"
+    if len(title) > SUBMISSION_MAX_TITLE:
+        return None, f"标题不能超过 {SUBMISSION_MAX_TITLE} 个字符"
+    if content_type not in CONTENT_TYPES:
+        return None, "类型不合法"
+    if not summary:
+        return None, "简介不能为空"
+    if len(summary) > SUBMISSION_MAX_SUMMARY:
+        return None, f"简介不能超过 {SUBMISSION_MAX_SUMMARY} 个字符"
+    try:
+        rating_value = float(rating)
+    except (TypeError, ValueError):
+        return None, "评分必须是数字"
+    if not 0 <= rating_value <= 10:
+        return None, "评分需在 0 到 10 之间"
+    return {
+        "title": title,
+        "content_type": content_type,
+        "summary": summary,
+        "rating": rating_value,
+    }, None
+
+
+def submit_content(
+    db: Session,
+    user_id: int,
+    kind: str,
+    title: str,
+    content_type: str,
+    summary: str,
+    rating,
+    content_id: int | None = None,
+) -> ContentSubmission:
+    """创建一条待审核的词条申请（新增 / 修改），返回申请对象。
+
+    kind / 字段不合法或目标作品不存在时抛 ValueError，由路由层回显。
+    """
+    if kind not in SUBMISSION_KINDS:
+        raise ValueError("申请类型不合法")
+    fields, error = _normalize_content_fields(title, content_type, summary, rating)
+    if error:
+        raise ValueError(error)
+    target_id = None
+    if kind == SUBMISSION_KIND_UPDATE:
+        if content_id is None:
+            raise ValueError("缺少要修改的作品")
+        if get_content(db, content_id) is None:
+            raise ValueError("要修改的作品不存在")
+        target_id = content_id
+    row = ContentSubmission(
+        user_id=user_id,
+        kind=kind,
+        content_id=target_id,
+        status=SUBMISSION_STATUS_PENDING,
+        **fields,
+    )
+    db.add(row)
+    db.commit()
+    db.refresh(row)
+    return row
+
+
+def get_content_submission(
+    db: Session, submission_id: int
+) -> ContentSubmission | None:
+    """按主键取词条申请，不存在返回 None。"""
+    return db.get(ContentSubmission, submission_id)
+
+
+def list_content_submissions(
+    db: Session,
+    *,
+    user_id: int | None = None,
+    status: str | None = None,
+    page: int = 1,
+    page_size: int = 20,
+) -> tuple[int, list[ContentSubmission]]:
+    """词条申请分页（按提交时间倒序）；可按提交人与状态筛选。"""
+    base = select(ContentSubmission)
+    if user_id is not None:
+        base = base.where(ContentSubmission.user_id == user_id)
+    if status is not None:
+        base = base.where(ContentSubmission.status == status)
+    total = db.scalar(select(func.count()).select_from(base.subquery())) or 0
+    items = list(
+        db.scalars(
+            base.order_by(
+                ContentSubmission.created_at.desc(),
+                ContentSubmission.id.desc(),
+            )
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+    )
+    return total, items
+
+
+def count_content_submissions(
+    db: Session,
+    *,
+    user_id: int | None = None,
+    status: str | None = None,
+) -> int:
+    """词条申请条数；可按提交人与状态筛选。"""
+    stmt = select(func.count()).select_from(ContentSubmission)
+    if user_id is not None:
+        stmt = stmt.where(ContentSubmission.user_id == user_id)
+    if status is not None:
+        stmt = stmt.where(ContentSubmission.status == status)
+    return db.scalar(stmt) or 0
+
+
+def decide_content_submission(
+    db: Session,
+    submission_id: int,
+    *,
+    approve: bool,
+    reviewer_id: int,
+    note: str = "",
+) -> tuple[ContentSubmission | None, str | None]:
+    """审核词条申请：approve=True 写入 / 更新 contents，False 驳回。
+
+    返回 (申请, 错误信息)；只有 pending 可处理，重复审核返回错误，
+    保证同一申请不会被写入两次。
+    """
+    row = get_content_submission(db, submission_id)
+    if row is None:
+        return None, "申请不存在"
+    if row.status != SUBMISSION_STATUS_PENDING:
+        return None, "该申请已处理"
+    if approve:
+        if row.kind == SUBMISSION_KIND_CREATE:
+            content = Content(
+                title=row.title,
+                type=row.content_type,
+                summary=row.summary,
+                rating=row.rating,
+            )
+            db.add(content)
+            db.flush()
+            row.applied_content_id = content.id
+        else:
+            content = (
+                get_content(db, row.content_id) if row.content_id is not None else None
+            )
+            if content is None:
+                return None, "目标作品已不存在，无法通过"
+            content.title = row.title
+            content.type = row.content_type
+            content.summary = row.summary
+            content.rating = row.rating
+            row.applied_content_id = content.id
+        row.status = SUBMISSION_STATUS_APPROVED
+    else:
+        row.status = SUBMISSION_STATUS_REJECTED
+    row.reviewer_id = reviewer_id
+    row.reviewed_at = datetime.now()
+    row.review_note = (note or "").strip() or None
+    db.commit()
+    db.refresh(row)
+    return row, None
 
 
 def count_view_history(db: Session, user_id: int) -> int:

@@ -1,0 +1,61 @@
+{% extends "base_content.html" %}
+{% block title %}{{ '修改词条' if mode == 'update' else '新增词条' }} - ACGN 内容平台{% endblock %}
+{% block content %}
+<div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-3">
+    <div>
+        <h1 class="h3 mb-1 section-heading">{{ '申请修改词条' if mode == 'update' else '申请新增词条' }}</h1>
+        <p class="text-muted small mb-0">提交后进入审核队列，管理员通过后才会写入内容库。</p>
+    </div>
+    <a class="btn btn-outline-secondary btn-sm" href="/me?tab=submissions">&larr; 我的词条申请</a>
+</div>
+
+{% if error %}
+<div class="alert alert-danger py-2">{{ error }}</div>
+{% endif %}
+
+{% if mode == 'update' and content %}
+<div class="alert alert-info py-2">
+    正在修改：<a href="/contents/{{ content.id }}">{{ content.title }}</a>（当前评分 {{ '%.1f' % content.rating }}）
+</div>
+{% endif %}
+
+<div class="card app-card">
+    <div class="card-body">
+        <form method="post"
+              action="{% if mode == 'update' %}/contents/{{ content_id }}/edit{% else %}/submit{% endif %}">
+            <div class="mb-3">
+                <label class="form-label" for="sub-title">标题</label>
+                <input class="form-control" id="sub-title" name="title" maxlength="200" required
+                       value="{{ values.get('title', '') }}" placeholder="作品标题">
+            </div>
+            <div class="row g-3">
+                <div class="col-sm-6">
+                    <label class="form-label" for="sub-type">类型</label>
+                    <select class="form-select" id="sub-type" name="type">
+                        {% for code, label in type_labels.items() %}
+                        <option value="{{ code }}"{% if values.get('type') == code %} selected{% endif %}>{{ label }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="col-sm-6">
+                    <label class="form-label" for="sub-rating">评分（0-10）</label>
+                    <input class="form-control" id="sub-rating" name="rating" type="number"
+                           step="0.1" min="0" max="10" value="{{ values.get('rating', '8.0') }}">
+                </div>
+            </div>
+            <div class="mb-3 mt-3">
+                <label class="form-label" for="sub-summary">简介</label>
+                <textarea class="form-control" id="sub-summary" name="summary" rows="5"
+                          maxlength="2000" required
+                          placeholder="作品简介">{{ values.get('summary', '') }}</textarea>
+            </div>
+            <div class="d-flex flex-wrap align-items-center gap-2">
+                <button class="btn btn-primary" type="submit">提交审核</button>
+                <a class="btn btn-outline-secondary"
+                   href="{% if mode == 'update' %}/contents/{{ content_id }}{% else %}/contents{% endif %}">取消</a>
+                <span class="form-text mb-0">提交后不可修改，等待管理员审核。</span>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}
