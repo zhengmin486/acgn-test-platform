@@ -8,11 +8,11 @@ from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 from sqlalchemy.exc import SQLAlchemyError
 
-from app import bangumi_meta, crud, media
+from app import article_body, bangumi_meta, crud, media
 from app.config import settings
 from app.page_common import CONTENT_TYPE_LABELS, DbSession, render_missing, templates
 
@@ -25,12 +25,15 @@ router = APIRouter(tags=["pages"])
 # 分页大小沿用本模块常量。
 CONTENT_PAGE_SIZE = 20
 
+# 筛选栏标签 chips 数量上限：30 个热门题材足够覆盖发现需求，再多一行放不下。
+CONTENT_TAG_OPTION_LIMIT = 30
+
 
 @router.get("/", response_class=HTMLResponse)
 def index(request: Request, db: DbSession):
     """首页（门户）：分类浏览 / 推荐作品 / 最新资讯。
 
-    本页只做「发现」：分类入口、高分推荐与最新资讯；
+    本页只做「发现」：分类入口、按站内口味推荐的精选与最新资讯；
     全量浏览与关键词/类型搜索统一落在「全部作品」页（/contents），
     首页不再承载全量列表（无分页的全量表不适合门户页）。
     """
@@ -49,15 +52,22 @@ def index(request: Request, db: DbSession):
         today_spotlight,
         key=lambda s: (s.broadcast_time is None, s.broadcast_time or ""),
     )[:6]
+    type_counts = crud.count_contents_by_type(db)
     return templates.TemplateResponse(
         request=request,
         name="index.html",
         context={
             "type_labels": CONTENT_TYPE_LABELS,
-            "type_counts": crud.count_contents_by_type(db),
-            "top_contents": crud.list_top_contents(db, limit=6),
+            "type_counts": type_counts,
+            "top_contents": crud.list_home_recommendations(db, limit=8),
             "latest_articles": crud.list_articles(db, limit=5),
             "spotlight": spotlight,
+            # hero 数据行：收录作品数 / 本日新番 / 资讯篇数（全部真实统计，空库显示 0）
+            "stats": {
+                "works": sum(type_counts.values()),
+                "today": len(spotlight),
+                "articles": crud.count_articles(db),
+            },
         },
     )
 
@@ -69,15 +79,17 @@ def contents_page(
     q: str = Query(default=""),
     content_type: str | None = Query(default=None, alias="type", max_length=20),
     tag: str | None = Query(default=None, max_length=80),
+    tags: str | None = Query(default=None, max_length=200),
     creator: str | None = Query(default=None, max_length=120),
     page: int = Query(default=1, ge=1),
 ):
-    """全部作品页：关键词/类型筛选 + 卡片网格 + 分页。
+    """全部作品页：关键词/类型/多标签筛选 + 卡片网格 + 分页。
 
     与 /contents/{content_id}（详情页）是精确路径与路径参数的关系，互不冲突；
     非法类型页面侧宽容忽略（严格 400 校验由 API 负责），与旧首页行为一致。
     标签筛选来自 Bangumi 导入的作品标签（见 crud.list_tags_with_counts），
-    与关键词/类型可叠加；筛选列表本身不带当前标签高亮由模板按 tag 判定。
+    与关键词/类型可叠加；多标签（``?tags=a,b``）为 AND 语义，旧单标签
+    ``?tag=`` 仍兼容（见 crud.parse_tag_query）。
     作者/公司筛选（creator）来自信息卡识别（crud.list_entity_contents 同款
     连接），与其它条件可叠加，是索引页「查看全部作品」的落地参数。
     """
@@ -86,22 +98,44 @@ def contents_page(
         content_type = content_type.strip().lower() or None
         if content_type is not None and content_type not in CONTENT_TYPE_LABELS:
             content_type = None
-    tag_name = (tag or "").strip() or None
+    selected_tags = crud.parse_tag_query(tags, tag)
     creator_name = (creator or "").strip() or None
     search_mode = (
-        bool(keyword) or content_type is not None or tag_name is not None or creator_name is not None
+        bool(keyword)
+        or content_type is not None
+        or bool(selected_tags)
+        or creator_name is not None
     )
 
     total, contents = crud.search_contents_page(
         db,
         keyword=keyword,
         content_type=content_type,
-        tag=tag_name,
+        tags=selected_tags,
         creator=creator_name,
         page=page,
         page_size=CONTENT_PAGE_SIZE,
     )
     total_pages = max(1, (total + CONTENT_PAGE_SIZE - 1) // CONTENT_PAGE_SIZE)
+
+    # 标签 chips：多选切换（点已在选的标签=取消），保留其它筛选条件，
+    # 链接形状稳定可分享；chips 按当前类型收敛。
+    tag_options = [
+        {
+            "name": name,
+            "count": count,
+            "selected": name in selected_tags,
+            "url": _contents_url(
+                q=q,
+                content_type=content_type,
+                creator=creator_name,
+                tags=_toggle_tag(selected_tags, name),
+            ),
+        }
+        for name, count in crud.list_tags_with_counts(
+            db, content_type=content_type, limit=CONTENT_TAG_OPTION_LIMIT
+        )
+    ]
 
     return templates.TemplateResponse(
         request=request,
@@ -116,11 +150,41 @@ def contents_page(
             "total": total,
             "page": page,
             "total_pages": total_pages,
-            "tag": tag_name,
+            "tags": selected_tags,
+            "tag": selected_tags[0] if selected_tags else None,
             "creator": creator_name,
-            "tag_options": crud.list_tags_with_counts(db),
+            "tag_options": tag_options,
+            # 卡片上的题材 chip：一次 group by 预取，避免逐作品查库（N+1）
+            "tag_map": crud.list_content_tags_map(db, [item.id for item in contents]),
+            "clear_tags_url": _contents_url(
+                q=q, content_type=content_type, creator=creator_name, tags=[]
+            ),
         },
     )
+
+
+def _toggle_tag(selected: list[str], name: str) -> list[str]:
+    """多选切换：已在选中列表里则移除，否则追加到末尾。"""
+    if name in selected:
+        return [item for item in selected if item != name]
+    return [*selected, name]
+
+
+def _contents_url(
+    *,
+    q: str,
+    content_type: str | None,
+    creator: str | None,
+    tags: list[str],
+) -> str:
+    """拼 /contents 的筛选地址：四个参数恒在（空值也保留），形状稳定可分享。"""
+    params = {
+        "q": q,
+        "type": content_type or "",
+        "tags": ",".join(tags),
+        "creator": creator or "",
+    }
+    return "/contents?" + urlencode(params)
 
 @router.get("/contents/{content_id}", response_class=HTMLResponse)
 def content_detail(request: Request, content_id: int, db: DbSession):
@@ -361,6 +425,8 @@ def article_detail_page(
         name="article_detail.html",
         context={
             "article": article,
+            # 正文行级结构：文本段 / [图] / [媒体]，模板按块渲染（body 仍是纯文本）
+            "body_blocks": article_body.parse_blocks(article.body),
             "article_tags": crud.list_article_tags(db, article_id),
             "linked_contents": crud.list_article_contents(db, article_id),
         },

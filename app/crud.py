@@ -110,7 +110,7 @@ def count_articles(db: Session, published_only: bool = True) -> int:
 
 
 def list_top_contents(db: Session, limit: int = 6) -> list[Content]:
-    """首页推荐作品：按评分从高到低取前 limit 条真实数据，同分按 id 稳定排序。"""
+    """评分榜：按评分从高到低取前 limit 条（首页推荐在「零命中」时回落用它）。"""
     stmt = (
         select(Content)
         .order_by(Content.rating.desc(), Content.id.asc())
@@ -550,6 +550,37 @@ def recommend_contents(
             }
         )
     return results
+
+
+# 首页「推荐作品」的编辑口味：站长的本命 / 避雷（站内标签口径，匹配时经 tagging 展开）。
+# 换口味只改这两行——本命命中越多排名越前，避雷命中一票否决。
+# 避雷只写「真正与本命相斥」的题材：硬核科幻/奇幻 不写——科幻/奇幻是很多本命作品的
+# 副标签（凉宫春日就是 科幻+搞笑+校园），一刀切会把入坑作也否掉；而纯硬核作品没有
+# 日常/百合/搞笑 标签，本来就命中不了本命，用不着否决。
+HOME_TASTE_POSITIVE = ("日常", "轻喜剧", "后宫", "党争", "百合", "扭曲情感")
+HOME_TASTE_AVOIDED = ("宏大叙事", "致郁系", "体育竞技", "大男主爽番")
+
+
+def list_home_recommendations(db: Session, limit: int = 8) -> list[Content]:
+    """首页推荐作品：按站长的编辑口味挑（与成分检测的推荐同一套匹配口径）。
+
+    - 本命题材命中越多越靠前，同命中数按评分；避雷题材一票否决（9.9 分也不推）；
+    - 门户面对游客，没有「已收藏」概念，不传排除集；
+    - 目录还小 / 一个命中都没有时回落到评分榜（list_top_contents），保证新站不空；
+      只要有命中就只推命中，不拿高分作品稀释口味。
+    """
+    picks = recommend_contents(
+        db,
+        positive_tags=list(HOME_TASTE_POSITIVE),
+        avoided_tags=list(HOME_TASTE_AVOIDED),
+        limit=limit,
+    )
+    if not picks:
+        return list_top_contents(db, limit=limit)
+    rows = get_contents_by_ids(db, [item["content_id"] for item in picks])
+    by_id = {row.id: row for row in rows}
+    # 按推荐顺序取行：recommend_contents 算分排序，get_contents_by_ids 按主键返回
+    return [by_id[item["content_id"]] for item in picks if item["content_id"] in by_id][:limit]
 
 
 def list_engaged_content_ids(db: Session) -> set[int]:
@@ -1738,6 +1769,24 @@ def ensure_article_image_column(engine: Engine) -> list[str]:
     return ["image_url"]
 
 
+def ensure_article_ip_name_column(engine: Engine) -> list[str]:
+    """为已存在的 articles 表补齐「作品名／」前缀列（ip_name），幂等，返回新增列名。
+
+    识别回填（scripts/link_articles.py）要用它当 extra_names 强信号；
+    历史行留 NULL——导入时没有前缀的资讯本就无此信号。
+    """
+    inspector = inspect(engine)
+    if "articles" not in inspector.get_table_names():
+        return []
+
+    existing = {column["name"] for column in inspector.get_columns("articles")}
+    if "ip_name" in existing:
+        return []
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE articles ADD COLUMN ip_name VARCHAR(200)"))
+    return ["ip_name"]
+
+
 # 申请的客观信息列：与 contents 同名列一一对应，让申请能覆盖详情页的结构化信息，
 # 而不是只能改标题 / 简介 / 评分四项。
 _CONTENT_SUBMISSION_EXTRA_COLUMNS: tuple[tuple[str, str], ...] = (
@@ -1794,6 +1843,7 @@ def init_db(engine: Engine) -> int:
     ensure_persona_report_columns(engine)
     ensure_test_case_source_column(engine)
     ensure_article_image_column(engine)
+    ensure_article_ip_name_column(engine)
     ensure_content_submission_extra_columns(engine)
     db = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
     try:

@@ -236,6 +236,74 @@ def test_index_ignores_filter_params(seeded_client):
     assert "星海航线" in resp.text  # 推荐位
 
 
+def _client_with_works(tmp_path, works, filename):
+    """用给定 (标题, 评分, 标签) 造一个小库并返回客户端。"""
+    from app import crud
+    from app.models import Content
+
+    engine = create_engine(
+        f"sqlite:///{tmp_path / filename}",
+        connect_args={"check_same_thread": False},
+    )
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    with factory() as db:
+        for title, rating, tags in works:
+            row = Content(title=title, type="anime", summary=f"{title}简介", rating=rating)
+            db.add(row)
+            db.commit()
+            crud.replace_content_tags(db, row.id, tags)
+
+    def override_get_db():
+        s = factory()
+        try:
+            yield s
+        finally:
+            s.close()
+
+    app.dependency_overrides[get_db] = override_get_db
+    client = TestClient(app)
+    return client, factory
+
+
+def test_index_recommends_by_home_taste(tmp_path):
+    """首页推荐作品按站内口味挑：本命命中优先、避雷一票否决、无命中不凑数。"""
+    client, factory = _client_with_works(
+        tmp_path,
+        [
+            ("双命中贴贴番", 8.0, ["日常", "百合"]),
+            ("单命中轻喜剧", 8.9, ["日常"]),
+            ("致郁高分雷", 9.9, ["日常", "致郁"]),   # 高分带避雷：一票否决
+            ("科幻无关番", 9.5, ["科幻"]),            # 无本命命中：不进推荐位
+        ],
+        "taste.db",
+    )
+    try:
+        html = client.get("/").text
+        assert "双命中贴贴番" in html and "单命中轻喜剧" in html
+        assert "致郁高分雷" not in html
+        assert "科幻无关番" not in html
+        # 命中数优先于评分：8.0 的双命中排在 8.9 的单命中之前
+        assert html.index("双命中贴贴番") < html.index("单命中轻喜剧")
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+
+def test_index_falls_back_to_rating_without_taste_match(tmp_path):
+    """一个本命命中都没有时回落评分榜，门户不空。"""
+    client, factory = _client_with_works(
+        tmp_path,
+        [("硬核机战甲", 9.2, ["机战", "战斗"]), ("科幻史诗乙", 8.8, ["科幻"])],
+        "fallback.db",
+    )
+    try:
+        html = client.get("/").text
+        assert "硬核机战甲" in html and "科幻史诗乙" in html
+        assert "暂无内容数据" not in html
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+
 def test_empty_database_portal_and_works_search(empty_client):
     """空库：首页门户展示推荐空态；作品页搜索提示无匹配，两者都保持 200。"""
     plain = empty_client.get("/")
