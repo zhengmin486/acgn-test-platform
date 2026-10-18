@@ -1,8 +1,8 @@
-"""阿宅画像：Bangumi 归一化、规则画像、LLM 提示词与页面路由。
+"""御宅成分检测：Bangumi 归一化、规则画像、LLM 提示词与页面路由。
 
 覆盖：
 - Bangumi 条目类型 / 收藏状态映射（私有、音乐 / 三次元被过滤）；
-- 画像：类型分布、标签、避雷（抛弃 / 低分）、六维分数、人格标签；
+- 成分报告：类型分布、标签、避雷（抛弃 / 低分）、六维分数、人格标签；
 - 提示词包含事实与语气，且明确禁止编造；
 - 页面：游客跳登录、同步（打桩不触网）、生成、贴回文案、LLM 生成、清除；
 - 雷达图坐标数量。
@@ -302,7 +302,7 @@ class TestPersonaPage:
     def test_page_opens_for_user(self, persona_env):
         page = persona_env.client.get("/me/persona")
         assert page.status_code == 200
-        assert "我的阿宅画像" in page.text
+        assert "我的御宅成分" in page.text
         assert "同步公开收藏" in page.text
 
     def test_sync_saves_collections(self, persona_env, monkeypatch):
@@ -341,7 +341,7 @@ class TestPersonaPage:
         assert "本命类型" in page.text
         assert "避雷类型" in page.text
         assert "致郁" in page.text
-        assert "六维画像" in page.text
+        assert "六维成分" in page.text
         assert "复制提示词" in page.text
 
     def test_manual_narrative_saved(self, persona_env):
@@ -880,7 +880,7 @@ class TestGuestPreview:
         client = TestClient(app, follow_redirects=False)
         page = client.get("/persona")
         assert page.status_code == 200
-        assert "测测我的阿宅画像" in page.text
+        assert "测测我的御宅成分" in page.text
         assert "开始试算" in page.text
         assert "不用授权" in page.text
 
@@ -900,7 +900,7 @@ class TestGuestPreview:
 
         resp = client.post("/persona/preview", data={"username": "sai"})
         assert resp.status_code == 200
-        assert "阿宅画像试算" in resp.text
+        assert "御宅成分试算" in resp.text
         assert "本命类型" in resp.text
         assert "免登录试算结果" in resp.text
         assert "登录后继续" in resp.text
@@ -940,7 +940,7 @@ class TestGuestPreview:
         )
         client = TestClient(app, follow_redirects=False)
         text = client.post("/persona/preview", data={"username": "sai"}).text
-        assert "生成画像" not in text
+        assert "生成成分报告" not in text
         assert "LLM 文案" not in text
 
 
@@ -1054,3 +1054,201 @@ class TestCustomTone:
         assert "幽默一点，但别刻薄" in page.text
         assert "每段前面加一个小标题。" in page.text
         assert "自定义语气" in page.text
+
+
+class TestRecommendations:
+    """按口味推荐：本命命中打分、避雷一票否决、剔除已收藏。"""
+
+    @staticmethod
+    def _add_work(env, title, bangumi_id, rating, tags):
+        db = env.session_factory()
+        try:
+            content = Content(
+                title=title, type="anime", summary="简介", rating=rating,
+                bangumi_id=bangumi_id,
+            )
+            db.add(content)
+            db.commit()
+            crud.replace_content_tags(db, content.id, tags)
+            return content.id
+        finally:
+            db.close()
+
+    def test_recommend_scoring_and_filters(self, persona_env):
+        self._add_work(persona_env, "双命中作品", 201, 8.5, ["日常", "党争", "百合"])
+        self._add_work(persona_env, "单命中作品", 202, 8.0, ["日常"])
+        self._add_work(persona_env, "已收藏作品", 203, 9.5, ["日常", "党争"])
+        self._add_work(persona_env, "避雷作品", 204, 9.9, ["日常", "致郁"])
+        self._add_work(persona_env, "不沾边作品", 205, 9.0, ["科幻", "机战"])
+
+        db = persona_env.session_factory()
+        try:
+            results = crud.recommend_contents(
+                db,
+                positive_tags=["日常", "党争", "百合"],
+                avoided_tags=["致郁"],
+                exclude_bangumi_ids={203},
+                limit=6,
+            )
+            titles = [item["title"] for item in results]
+            assert titles[0] == "双命中作品"          # 命中数优先
+            assert "单命中作品" in titles
+            assert "已收藏作品" not in titles          # 已在收藏里，不重复推
+            assert "避雷作品" not in titles            # 带避雷标签一票否决
+            assert "不沾边作品" not in titles          # 无命中不推
+            assert results[0]["reason"].startswith("命中本命题材")
+        finally:
+            db.close()
+
+    def test_recommend_expands_variant_vocabulary(self, persona_env):
+        """口味词写法比站内标签野：别名/关键词/长尾都要展开后对撞。
+
+        用户原话：「轻喜剧」「扭曲情感」是本命，「致郁系」「体育竞技」是避雷——
+        精确等值匹配下这些词全部落空，避雷一票否决会静默失效。
+        """
+        self._add_work(persona_env, "日常系百合贴贴", 211, 8.6, ["日常系", "百合"])
+        self._add_work(persona_env, "致郁系大作", 212, 9.9, ["致郁系", "剧情"])
+        self._add_work(persona_env, "运动竞技番", 213, 9.0, ["运动", "竞技"])
+
+        db = persona_env.session_factory()
+        try:
+            results = crud.recommend_contents(
+                db,
+                positive_tags=["日常", "轻喜剧", "扭曲情感"],
+                avoided_tags=["致郁系", "体育竞技"],
+                limit=6,
+            )
+            titles = [item["title"] for item in results]
+            assert "日常系百合贴贴" in titles        # 站内长尾「日常系」对上口味词「日常」
+            assert "致郁系大作" not in titles        # 「致郁系」展开命中站内「致郁系」→ 否决
+            assert "运动竞技番" not in titles        # 「体育竞技」→ 运动/竞技 → 否决
+        finally:
+            db.close()
+
+    def test_recommend_matches_raw_profile_names(self, persona_env):
+        """画像保留 Bangumi 原始写法（is_genre_tag 不改写），站内规范名要能对上。"""
+        self._add_work(persona_env, "规范名作品", 221, 8.0, ["日常", "搞笑"])
+        self._add_work(persona_env, "不沾边作品", 222, 9.0, ["机战", "丧尸"])
+
+        db = persona_env.session_factory()
+        try:
+            results = crud.recommend_contents(
+                db,
+                positive_tags=["日常系", "搞笑番"],  # 画像里的原始 Bangumi 写法
+                avoided_tags=[],
+                limit=6,
+            )
+            titles = [item["title"] for item in results]
+            assert "规范名作品" in titles
+            assert "不沾边作品" not in titles
+            assert results[0]["matched"] == ["日常", "搞笑"]  # 命中展示归一到规范名
+        finally:
+            db.close()
+
+    def test_generate_includes_recommendations(self, persona_env):
+        self._add_work(persona_env, "贴贴日常番", 301, 8.2, ["日常", "恋爱"])
+        _seed_collections(persona_env.session_factory)
+        _generate(persona_env)
+
+        page = persona_env.client.get("/me/persona")
+        assert "按你的口味推荐" in page.text
+        assert "贴贴日常番" in page.text
+        assert "命中本命题材" in page.text
+
+        db = persona_env.session_factory()
+        try:
+            report = crud.get_persona_report(db, _uid(persona_env.session_factory))
+            recs = report.payload["recommendations"]
+            assert [item["title"] for item in recs][:1] == ["贴贴日常番"]
+            # 提示词也带上候选，LLM 的推荐围绕这些展开
+            assert "站内推荐候选" in report.payload["prompt"]
+            assert "贴贴日常番" in report.payload["prompt"]
+        finally:
+            db.close()
+
+    def test_guest_preview_also_recommends(self, persona_env, monkeypatch):
+        self._add_work(persona_env, "党争学园", 401, 8.8, ["党争", "恋爱"])
+        monkeypatch.setattr(
+            persona_pages.persona,
+            "fetch_user_collections",
+            lambda *args, **kwargs: (COLLECTIONS, len(COLLECTIONS)),
+        )
+        client = TestClient(app, follow_redirects=False)
+        page = client.post("/persona/preview", data={"username": "sai"})
+        assert "按你的口味推荐" in page.text
+        assert "党争学园" in page.text
+
+
+class TestSiteDataFirst:
+    """本站收藏 / 标注是主数据源：没有 Bangumi 收藏也应该能生成成分报告。
+
+    Bangumi 只是「补充样本」的可选入口，不再是生成的前置条件。
+    """
+
+    @staticmethod
+    def _add_contents(session_factory, count: int) -> list[int]:
+        db = session_factory()
+        try:
+            ids = []
+            for i in range(count):
+                content = Content(
+                    title=f"站内作品{i}",
+                    type="anime",
+                    summary="用于成分检测的测试简介",
+                    rating=7.5,
+                    year=2024,
+                )
+                db.add(content)
+                db.commit()
+                db.refresh(content)
+                ids.append(content.id)
+            return ids
+        finally:
+            db.close()
+
+    def test_generate_without_bangumi_snapshot(self, persona_env):
+        """没同步任何 Bangumi 收藏时，仅凭站内收藏就能生成。"""
+        uid = _uid(persona_env.session_factory)
+        content_ids = self._add_contents(persona_env.session_factory, 3)
+        db = persona_env.session_factory()
+        try:
+            for cid in content_ids:
+                crud.add_favorite(db, uid, cid)
+            db.commit()
+        finally:
+            db.close()
+
+        resp = persona_env.client.post(
+            "/me/persona/generate", data={"tone": "sharp"}, follow_redirects=False
+        )
+        assert resp.status_code == 303
+        assert "generated=1" in resp.headers["location"]
+
+    def test_page_reports_site_counts_and_enables_button(self, persona_env):
+        """页面要说明数据来自本站，并且有数据时生成按钮可用。"""
+        uid = _uid(persona_env.session_factory)
+        content_ids = self._add_contents(persona_env.session_factory, 2)
+        db = persona_env.session_factory()
+        try:
+            for cid in content_ids:
+                crud.add_favorite(db, uid, cid)
+            db.commit()
+        finally:
+            db.close()
+
+        text = persona_env.client.get("/me/persona").text
+        assert "检测依据" in text
+        assert "本站收藏" in text
+        assert "disabled>生成 / 重新生成" not in text
+
+    def test_nothing_to_analyze_is_rejected(self, persona_env):
+        """两边都没数据时给出引导，而不是静默失败或生成空报告。"""
+        resp = persona_env.client.post(
+            "/me/persona/generate", data={"tone": "sharp"}, follow_redirects=False
+        )
+        assert resp.status_code == 303
+        assert "error=" in resp.headers["location"]
+
+        text = persona_env.client.get("/me/persona").text
+        assert "还没有可分析的数据" in text
+        assert "disabled>生成 / 重新生成" in text

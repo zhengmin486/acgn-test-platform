@@ -17,7 +17,13 @@ from sqlalchemy.orm import sessionmaker
 from app import crud
 from app.database import Base
 from app.models import BangumiCollection, Content, Tag
-from app.tagging import classify_tag, split_tags, year_from_date, year_from_summary
+from app.tagging import (
+    classify_tag,
+    expand_genre_names,
+    split_tags,
+    year_from_date,
+    year_from_summary,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _spec = importlib.util.spec_from_file_location(
@@ -39,16 +45,53 @@ class TestClassify:
         assert classify_tag("京阿尼") == ("studio", "京都动画")
         assert classify_tag("A1 Pictures") == ("studio", "A-1 Pictures")
         assert classify_tag("BONES") == ("studio", "BONES")
+        # 同义词归一到规范名（WIT STUDIO 的常见大小写写法）
+        assert classify_tag("Wit Studio") == ("studio", "WIT STUDIO")
 
     def test_studio_by_suffix(self):
-        assert classify_tag("Wit Studio") == ("studio", "Wit Studio")
+        assert classify_tag("Geno Studio") == ("studio", "Geno Studio")
         assert classify_tag("CloverWorks") == ("studio", "CloverWorks")
 
     def test_genre(self):
         assert classify_tag("日常") == ("genre", "日常")
         assert classify_tag("机战") == ("genre", "机战")
 
-    def test_noise(self):
+    def test_genre_aliases_normalized(self):
+        """同义词归一到规范名：SF->科幻、癒し->治愈、日常系->日常。"""
+        assert classify_tag("SF") == ("genre", "科幻")
+        assert classify_tag("ＳＦ") == ("genre", "科幻")  # 全角
+        assert classify_tag("sf") == ("genre", "科幻")
+        assert classify_tag("癒し") == ("genre", "治愈")
+        assert classify_tag("日常系") == ("genre", "日常")
+        assert classify_tag("BL") == ("genre", "耽美")
+        assert classify_tag("幼馴染") == ("genre", "青梅竹马")
+
+    def test_game_genres_are_genre_platforms_are_noise(self):
+        """游戏类型词算题材；平台词（本站无平台维度）算噪音。"""
+        assert classify_tag("RPG") == ("genre", "RPG")
+        assert classify_tag("Roguelike") == ("genre", "Roguelike")
+        assert classify_tag("roguelike") == ("genre", "Roguelike")  # 小写归一到规范名
+        assert classify_tag("Galgame") == ("genre", "Galgame")
+        assert classify_tag("开放世界") == ("genre", "开放世界")
+        for platform in ("PC", "PS5", "Switch", "手机", "Android", "Steam", "VR"):
+            assert classify_tag(platform)[0] == "noise", platform
+
+    def test_season_tag_is_noise(self):
+        """季度标签（2011年10月）不是年份也不是题材：发行年由 date 承载。"""
+        assert classify_tag("2011年10月")[0] == "noise"
+        assert classify_tag("2021年1月")[0] == "noise"
+        assert classify_tag("2011") == ("year", "2011")
+
+    def test_noise_before_studio_suffix(self):
+        """「国产动画」是噪音不是公司：精确噪音匹配先于公司后缀规则。"""
+        assert classify_tag("国产动画")[0] == "noise"
+        assert classify_tag("剧场版")[0] == "noise"
+
+    def test_new_genre_words(self):
+        for name in ("智斗", "权谋", "末日", "丧尸", "转生", "复仇", "武侠", "神怪", "剧情"):
+            assert classify_tag(name)[0] == "genre", name
+
+    def test_unknown_defaults_to_noise(self):
         assert classify_tag("花泽香菜")[0] == "noise"
         assert classify_tag("TV")[0] == "noise"
         assert classify_tag("漫画原作")[0] == "noise"
@@ -61,6 +104,26 @@ class TestClassify:
         assert genres == ["日常", "机战"]
         assert studios == ["京都动画"]
         assert year == 2011  # 多个年份取最早
+
+    def test_expand_genre_names_variants(self):
+        """口味词展开：原名 / 规范名 / 别名字串 / 关键词子串四级，只留站内存在的。"""
+        site = {"日常", "搞笑", "百合", "致郁", "运动", "竞技", "党争"}
+        assert expand_genre_names(["日常"], site) == ["日常"]
+        # 画像原始写法（日常系→日常）与别名（搞笑番→搞笑）
+        assert expand_genre_names(["日常系", "搞笑番"], site) == ["日常", "搞笑"]
+        # 用户自然语言：别名字串（轻喜剧含喜剧→搞笑、体育竞技含体育→运动）
+        assert expand_genre_names(["轻喜剧", "体育竞技"], site) == ["搞笑", "运动", "竞技"]
+        # 关键词子串：致郁系→致郁、硬核科幻→科幻（站内没有科幻则丢弃）
+        assert expand_genre_names(["致郁系", "硬核科幻"], site) == ["致郁"]
+        # 站内不存的标签不进展开面；空词忽略
+        assert expand_genre_names(["后宫", ""], site) == []
+        # 带括号的口味词（体育竞技（除了赛马娘））照样展开
+        assert expand_genre_names(["体育竞技（除了赛马娘）"], site) == ["运动", "竞技"]
+
+    def test_expand_genre_names_empty_inputs(self):
+        assert expand_genre_names([], {"日常"}) == []
+        assert expand_genre_names(["日常"], set()) == []
+        assert expand_genre_names([None, "  "], {"日常"}) == []
 
     def test_year_helpers(self):
         assert year_from_date("2006-04-02") == 2006

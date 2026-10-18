@@ -19,12 +19,12 @@ from sqlalchemy import (
     update,
 )
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session, aliased, sessionmaker
 
 from app.config import settings
 from app.database import Base
 from app.fake_data import FAKE_CONTENTS
-from app.tagging import split_tags
+from app.tagging import canonical_genre, expand_genre_names, split_tags
 from app.models import (
     AnimeSchedule,
     Article,
@@ -65,23 +65,29 @@ def list_contents(
     db: Session,
     content_type: str | None = None,
     tag: str | None = None,
+    tags: list[str] | None = None,
 ) -> list[Content]:
     """查询内容列表，可按类型与标签筛选，按 id 排序。
 
-    ``tag`` 为标签名称（精确匹配、区分大小写）；传入时走 Tags/ContentTags
-    多对多连接，与类型筛选可叠加。
+    ``tag`` 为单个标签名（精确匹配、区分大小写）；``tags`` 为多个标签名，
+    走 AND 语义（同时命中全部标签）。两者可叠加（内部合并去重），
+    与类型筛选可叠加。
     """
     stmt = select(Content)
 
     if content_type is not None:
         stmt = stmt.where(Content.type == content_type)
-    if tag:
-        stmt = (
-            stmt.join(ContentTag, ContentTag.content_id == Content.id)
-            .join(Tag, Tag.id == ContentTag.tag_id)
-            .where(Tag.name == tag)
-            .distinct()
-        )
+    wanted = normalize_tag_names(list(tags or []) + ([tag] if tag else []))
+    if wanted:
+        for name in wanted:
+            link = aliased(ContentTag)
+            tag_row = aliased(Tag)
+            stmt = (
+                stmt.join(link, link.content_id == Content.id)
+                .join(tag_row, tag_row.id == link.tag_id)
+                .where(tag_row.name == name)
+            )
+        stmt = stmt.distinct()
 
     stmt = stmt.order_by(Content.id)
     return list(db.scalars(stmt))
@@ -93,6 +99,14 @@ def count_contents_by_type(db: Session) -> dict[str, int]:
         select(Content.type, func.count()).group_by(Content.type)
     ).all()
     return {content_type: count for content_type, count in rows}
+
+
+def count_articles(db: Session, published_only: bool = True) -> int:
+    """资讯总数（首页 hero 数据行）；默认只数已发布。"""
+    stmt = select(func.count()).select_from(Article)
+    if published_only:
+        stmt = stmt.where(Article.is_published.is_(True))
+    return int(db.execute(stmt).scalar_one())
 
 
 def list_top_contents(db: Session, limit: int = 6) -> list[Content]:
@@ -110,7 +124,7 @@ def get_content(db: Session, content_id: int) -> Content | None:
 
 
 def get_contents_by_ids(db: Session, content_ids: list[int]) -> list[Content]:
-    """按主键批量取作品，供词条审核页展示「修改目标」；空列表返回空。"""
+    """按主键批量取作品，供作品审核页展示「修改目标」；空列表返回空。"""
     if not content_ids:
         return []
     return list(db.scalars(select(Content).where(Content.id.in_(content_ids))))
@@ -177,6 +191,29 @@ TAG_NAME_MAX_LENGTH = 80
 # 单篇资讯最多保留的识别标签数：与作品标签上限一致，防止标签刷屏。
 MAX_ARTICLE_TAGS = 5
 
+# 多标签筛选上限：URL 里最多同时按几个标签取交集。再多结果必然为空，
+# 反而失去「缩小范围」的意义，也拖慢查询（每个标签一次连接）。
+MAX_TAG_FILTERS = 5
+
+
+def parse_tag_query(
+    tags: str | None, tag: str | None = None, *, limit: int = MAX_TAG_FILTERS
+) -> list[str]:
+    """把 ``?tags=a,b``（逗号分隔，兼容中文逗号/顿号）与旧 ``?tag=`` 合并成列表。
+
+    去重且保持原顺序（先写的权重更高），最多 ``limit`` 个。
+    单标签 ``?tag=`` 保留兼容：详情页等旧链接仍可跳转，语义不变。
+    """
+    names = [
+        name.strip()
+        for name in (tags or "").replace("，", ",").replace("、", ",").split(",")
+        if name.strip()
+    ]
+    single = (tag or "").strip()
+    if single and single not in names:
+        names.append(single)
+    return names[:limit]
+
 
 def normalize_tag_names(tag_names: list[str]) -> list[str]:
     """标签名卫生规则（作品标签与资讯识别标签共用，避免两套实现漂移）：
@@ -231,6 +268,27 @@ def list_content_tags(db: Session, content_id: int) -> list[str]:
             .order_by(Tag.id)
         )
     )
+
+
+def list_content_tags_map(db: Session, content_ids) -> dict[int, list[str]]:
+    """批量取多部作品的标签：{content_id: [标签名]}（一次查询，避免列表页 N+1）。
+
+    传入的 id 全部出现在结果里（无标签的作品对应空列表），顺序稳定；
+    传入空列表直接返回空 dict，不查库。
+    """
+    cleaned = sorted({int(item) for item in content_ids or []})
+    if not cleaned:
+        return {}
+    result: dict[int, list[str]] = {content_id: [] for content_id in cleaned}
+    rows = db.execute(
+        select(ContentTag.content_id, Tag.name)
+        .join(Tag, Tag.id == ContentTag.tag_id)
+        .where(ContentTag.content_id.in_(cleaned))
+        .order_by(Tag.id)
+    )
+    for content_id, name in rows:
+        result[int(content_id)].append(name)
+    return result
 
 
 def replace_content_studios(
@@ -416,6 +474,84 @@ def list_content_facts(db: Session, content_id: int) -> list[tuple[str, str]]:
     return [(str(key), str(value)) for key, value in rows]
 
 
+def recommend_contents(
+    db: Session,
+    *,
+    positive_tags: list[str],
+    avoided_tags: list[str],
+    exclude_bangumi_ids: set[int] | None = None,
+    limit: int = 6,
+) -> list[dict]:
+    """按口味从站内作品库挑推荐：本命题材命中打分，避雷题材一票否决。
+
+    - 匹配两侧都过题材归一：口味词（画像里的 Bangumi 原始标签 / 用户自然语言）
+      经 ``tagging.expand_genre_names`` 展开成站内真实标签名，作品标签也归一到
+      规范名——「日常系」「致郁系」「体育竞技」不再精确对撞落空（避雷静默失效）；
+    - 只推有题材标签的作品（无标签无法证明命中）；
+    - 命中数为主排序，评分做同分加权；已收藏（bangumi_id 命中快照）的剔除；
+    - 避雷标签出现在作品标签里就直接跳过——宁可少推，不推雷。
+    """
+    exclude = {int(value) for value in (exclude_bangumi_ids or [])}
+
+    rows = db.execute(
+        select(Content, Tag.name)
+        .join(ContentTag, ContentTag.content_id == Content.id)
+        .join(Tag, Tag.id == ContentTag.tag_id)
+        .order_by(Content.id, Tag.id)
+    ).all()
+    content_by_id: dict[int, Content] = {}
+    tags_by_content: dict[int, set[str]] = {}
+    site_tags: set[str] = set()
+    for content, tag_name in rows:
+        content_by_id[content.id] = content
+        name = str(tag_name)
+        # 站内标签也归一到规范名：未洗过的长尾写法（「日常系」）能对上口味词
+        canonical = canonical_genre(name) or name
+        site_tags.update((name, canonical))
+        tags_by_content.setdefault(content.id, set()).add(canonical)
+
+    positive = expand_genre_names(positive_tags or [], site_tags)
+    avoided = set(expand_genre_names(avoided_tags or [], site_tags))
+
+    scored: list[dict] = []
+    for content_id, tags in tags_by_content.items():
+        content = content_by_id[content_id]
+        if content.bangumi_id is not None and int(content.bangumi_id) in exclude:
+            continue
+        if tags & avoided:
+            continue
+        matched = [name for name in positive if name in tags]
+        if not matched:
+            continue
+        scored.append(
+            {
+                "content_id": content.id,
+                "title": content.title,
+                "type": content.type,
+                "year": content.year,
+                "rating": float(content.rating or 0),
+                "matched": matched[:3],
+                "score": len(matched) * 10 + float(content.rating or 0),
+            }
+        )
+
+    scored.sort(key=lambda item: (-item["score"], -item["rating"], item["content_id"]))
+    results = []
+    for item in scored[: max(0, limit)]:
+        results.append(
+            {
+                "content_id": item["content_id"],
+                "title": item["title"],
+                "type": item["type"],
+                "year": item["year"],
+                "rating": item["rating"],
+                "matched": item["matched"],
+                "reason": f"命中本命题材：{'、'.join(item['matched'])}",
+            }
+        )
+    return results
+
+
 def list_engaged_content_ids(db: Session) -> set[int]:
     """有互动的作品 id：被收藏 / 标注 / 浏览过（多用户并集，补全与封面共用）。
 
@@ -469,16 +605,27 @@ def list_contents_by_studio(db: Session, name: str) -> list[Content]:
     )
 
 
-def list_tags_with_counts(db: Session, limit: int | None = 30) -> list[tuple[str, int]]:
-    """全部标签及关联作品数，按作品数从多到少（筛选栏用）；空库返回空列表。
+def list_tags_with_counts(
+    db: Session,
+    limit: int | None = 30,
+    content_type: str | None = None,
+) -> list[tuple[str, int]]:
+    """标签及关联作品数，按作品数从多到少（筛选栏用）；空库返回空列表。
 
     count 统计的是 content_tags 关联行数；作品被删除后关联行仍在，
     计数可能略高于可见作品数——标签筛选走内连接，结果不受影响。
+    content_type 传入时只统计该类型作品上的标签：动画的「机战」「BL」、
+    游戏的「PC」「RPG」不跨类型混入筛选栏（四类内容各用各的标签集）。
     """
     stmt = (
         select(Tag.name, func.count(ContentTag.id))
         .join(ContentTag, ContentTag.tag_id == Tag.id)
-        .group_by(Tag.id, Tag.name)
+        .join(Content, Content.id == ContentTag.content_id)
+    )
+    if content_type:
+        stmt = stmt.where(Content.type == content_type)
+    stmt = (
+        stmt.group_by(Tag.id, Tag.name)
         .order_by(func.count(ContentTag.id).desc(), Tag.name)
     )
     if limit is not None:
@@ -493,6 +640,161 @@ def list_all_tag_names(db: Session) -> list[str]:
     它们仍是有效的题材词，历史资讯可能提到。
     """
     return list(db.scalars(select(Tag.name).order_by(Tag.id)))
+
+
+def list_tags_page(
+    db: Session,
+    *,
+    keyword: str = "",
+    page: int = 1,
+    page_size: int = 50,
+) -> tuple[int, list[tuple[Tag, int]]]:
+    """管理端标签分页：[(Tag, 关联作品数)]，按作品数降序、同数按名称。
+
+    与面向读者的 ``list_tags_with_counts`` 的区别：左连接把孤儿标签
+    （计数 0）也列出来——管理页要能看见并清理它们；支持关键词过滤。
+    """
+    stmt = (
+        select(Tag, func.count(ContentTag.id))
+        .join(ContentTag, ContentTag.tag_id == Tag.id, isouter=True)
+        .group_by(Tag.id, Tag.name)
+    )
+    if keyword:
+        stmt = stmt.where(Tag.name.like(f"%{keyword}%"))
+    total_stmt = select(func.count()).select_from(Tag)
+    if keyword:
+        total_stmt = total_stmt.where(Tag.name.like(f"%{keyword}%"))
+    total = int(db.scalar(total_stmt) or 0)
+    rows = db.execute(
+        stmt.order_by(func.count(ContentTag.id).desc(), Tag.name)
+        .offset((max(page, 1) - 1) * page_size)
+        .limit(page_size)
+    ).all()
+    return total, [(tag, count) for tag, count in rows]
+
+
+def tag_health(db: Session) -> dict:
+    """标签体系健康度（管理端看板用，一次查询出齐）。
+
+    返回：
+    - tag_total / used / orphan：标签行总数、被引用的、无人引用的（孤儿）；
+    - content_total / without_tags：作品总数、一部题材标签都没有的作品数；
+    - by_type：{类型: (作品数, 有题材标签的作品数)}——分区题材覆盖度；
+    - tags_per_content：有标签作品的平均 / 最大标签数。
+    """
+    tag_total = int(db.scalar(select(func.count()).select_from(Tag)) or 0)
+    used = int(
+        db.scalar(select(func.count(func.distinct(ContentTag.tag_id)))) or 0
+    )
+    content_total = int(db.scalar(select(func.count()).select_from(Content)) or 0)
+    without_tags = int(
+        db.scalar(
+            select(func.count())
+            .select_from(Content)
+            .where(Content.id.not_in(select(ContentTag.content_id)))
+        )
+        or 0
+    )
+    tagged_by_type = {
+        content_type: count
+        for content_type, count in db.execute(
+            select(Content.type, func.count(func.distinct(Content.id)))
+            .join(ContentTag, ContentTag.content_id == Content.id)
+            .group_by(Content.type)
+        )
+    }
+    total_by_type = count_contents_by_type(db)
+    # 平均 / 最大标签数：先按作品分组计数，再对计数取聚合（不能对 count 直接 avg）
+    per_content = (
+        select(func.count(ContentTag.tag_id).label("tag_count"))
+        .group_by(ContentTag.content_id)
+        .subquery()
+    )
+    avg_tags, max_tags = db.execute(
+        select(func.avg(per_content.c.tag_count), func.max(per_content.c.tag_count))
+    ).one()
+    return {
+        "tag_total": tag_total,
+        "used": used,
+        "orphan": max(tag_total - used, 0),
+        "content_total": content_total,
+        "without_tags": without_tags,
+        "by_type": {
+            content_type: (total, tagged_by_type.get(content_type, 0))
+            for content_type, total in total_by_type.items()
+        },
+        "avg_tags": round(float(avg_tags), 1) if avg_tags else 0.0,
+        "max_tags": int(max_tags or 0),
+    }
+
+
+def rename_tag(db: Session, name: str, new_name: str) -> tuple[bool, str]:
+    """改规范名；目标名已存在时拒绝（那种情况应该用合并）。"""
+    tag = db.scalar(select(Tag).where(Tag.name == name))
+    if tag is None:
+        return False, f"标签「{name}」不存在"
+    cleaned = (new_name or "").strip()
+    if not cleaned or len(cleaned) > TAG_NAME_MAX_LENGTH:
+        return False, "新名称不能为空或超过长度上限"
+    if cleaned == name:
+        return False, "名称没有变化"
+    if db.scalar(select(Tag.id).where(Tag.name == cleaned)) is not None:
+        return False, f"「{cleaned}」已存在；要合并两个标签请用合并功能"
+    tag.name = cleaned
+    db.commit()
+    return True, f"已将「{name}」改名为「{cleaned}」"
+
+
+def merge_tags(db: Session, source_name: str, target_name: str) -> tuple[bool, str]:
+    """把源标签的全部关联并入目标标签，然后删除源标签行。
+
+    - 目标不存在时退化为改名（源标签直接改名成目标名）；
+    - 作品已同时带有两个标签时，删掉源关联（联合唯一约束下不能有两行）；
+    - 返回 (是否成功, 页面回显消息)。
+    """
+    source = db.scalar(select(Tag).where(Tag.name == source_name))
+    if source is None:
+        return False, f"源标签「{source_name}」不存在"
+    if source_name == target_name:
+        return False, "源标签与目标标签相同"
+    target = db.scalar(select(Tag).where(Tag.name == target_name))
+    if target is None:
+        source.name = target_name
+        db.commit()
+        return True, f"「{target_name}」不存在，已将「{source_name}」改名为它"
+
+    rows = list(db.scalars(select(ContentTag).where(ContentTag.tag_id == source.id)))
+    moved = 0
+    for row in rows:
+        clash = db.scalar(
+            select(ContentTag.id).where(
+                ContentTag.content_id == row.content_id,
+                ContentTag.tag_id == target.id,
+            )
+        )
+        if clash is not None:
+            db.delete(row)  # 已有目标标签：这条重复关联直接去掉
+        else:
+            row.tag_id = target.id
+            moved += 1
+    db.delete(source)
+    db.commit()
+    return True, f"已把 {moved} 条关联并入「{target_name}」，并删除「{source_name}」"
+
+
+def delete_orphan_tags(db: Session) -> int:
+    """删除没有任何作品引用的标签行，返回删除行数（管理端一键清理）。"""
+    orphan_ids = [
+        int(tag_id)
+        for tag_id in db.scalars(
+            select(Tag.id).where(Tag.id.not_in(select(ContentTag.tag_id).distinct()))
+        )
+    ]
+    if not orphan_ids:
+        return 0
+    db.execute(sa_delete(Tag).where(Tag.id.in_(orphan_ids)))
+    db.commit()
+    return len(orphan_ids)
 
 
 def list_content_titles(db: Session) -> list[tuple[int, str]]:
@@ -979,14 +1281,16 @@ def _content_search_stmt(
     content_type: str | None,
     tag: str | None = None,
     creator: str | None = None,
+    tags: list[str] | None = None,
 ):
     """内容搜索的共享查询：标题/简介不区分大小写包含匹配，可叠加类型、标签与作者筛选。
 
     匹配语义保持原样（lower 后包含匹配）；分页与不分页的调用方共用本构造，
     避免两套搜索实现漂移。筛选走连接下推到 SQL，不在应用层过滤：
 
-    - 标签筛选走 content_tags/tags 连接（同一作品命中标签只出现一次，
-      联合唯一约束保证）；
+    - 标签筛选走 content_tags/tags 连接；多标签（``tags``）为 **AND** 语义——
+      每个标签各做一次别名连接，同时命中全部标签的作品才出现（联合唯一
+      约束保证同一作品命中同一标签只算一次）；
     - 作者/公司筛选走 content_entity_links/entities 连接按名称等值匹配
       （索引页「查看全部作品」与列表页 ?creator= 共用）。
 
@@ -1005,11 +1309,14 @@ def _content_search_stmt(
         )
     if content_type is not None:
         stmt = stmt.where(Content.type == content_type)
-    if tag:
+    wanted = normalize_tag_names(list(tags or []) + ([tag] if tag else []))
+    for name in wanted:
+        link = aliased(ContentTag)
+        tag_row = aliased(Tag)
         stmt = (
-            stmt.join(ContentTag, ContentTag.content_id == Content.id)
-            .join(Tag, Tag.id == ContentTag.tag_id)
-            .where(Tag.name == tag)
+            stmt.join(link, link.content_id == Content.id)
+            .join(tag_row, tag_row.id == link.tag_id)
+            .where(tag_row.name == name)
         )
     if creator:
         stmt = (
@@ -1017,7 +1324,7 @@ def _content_search_stmt(
             .join(Entity, Entity.id == ContentEntityLink.entity_id)
             .where(Entity.name == creator)
         )
-    if tag or creator:
+    if wanted or creator:
         stmt = stmt.distinct()
     return stmt.order_by(Content.id)
 
@@ -1027,12 +1334,14 @@ def search_contents(
     keyword: str,
     tag: str | None = None,
     creator: str | None = None,
+    tags: list[str] | None = None,
 ) -> list[Content]:
     """标题/简介不区分大小写的包含匹配，与分页版本语义一致。
 
     不分页、按 id 排序返回全部匹配；分页需求用 search_contents_page。
+    tags 为多标签 AND 筛选（与 tag 可叠加）。
     """
-    return list(db.scalars(_content_search_stmt(keyword, None, tag, creator)))
+    return list(db.scalars(_content_search_stmt(keyword, None, tag, creator, tags)))
 
 
 def search_contents_page(
@@ -1042,15 +1351,16 @@ def search_contents_page(
     content_type: str | None = None,
     tag: str | None = None,
     creator: str | None = None,
+    tags: list[str] | None = None,
     page: int = 1,
     page_size: int = 20,
 ) -> tuple[int, list[Content]]:
     """分页搜索内容：关键词（标题/简介）、类型、标签与作者筛选可叠加，返回 (总数, 当前页)。
 
     四类条件均可缺省：只给类型即按类型浏览，只给关键词即全类型搜索，
-    只给标签即按标签归类浏览，只给作者即按作者/公司浏览。
+    只给标签即按标签归类浏览（多标签 AND），只给作者即按作者/公司浏览。
     """
-    stmt = _content_search_stmt(keyword, content_type, tag, creator)
+    stmt = _content_search_stmt(keyword, content_type, tag, creator, tags)
     total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     items = list(
         db.scalars(stmt.offset((page - 1) * page_size).limit(page_size))
@@ -1290,6 +1600,24 @@ _CONTENT_FAVORITE_COLUMNS: tuple[tuple[str, str], ...] = (
 )
 
 
+def ensure_content_book_kind_column(engine: Engine) -> list[str]:
+    """为已存在的 contents 表补齐 book_kind 列，幂等，返回新增列名。
+
+    历史库的行留 NULL（未判定），由 scripts/import_bangumi 新导入时写入，
+    存量书籍用 scripts/mark_book_kinds.py 回填。
+    """
+    inspector = inspect(engine)
+    if "contents" not in inspector.get_table_names():
+        return []
+
+    existing = {column["name"] for column in inspector.get_columns("contents")}
+    if "book_kind" in existing:
+        return []
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE contents ADD COLUMN book_kind VARCHAR(20)"))
+    return ["book_kind"]
+
+
 def ensure_favorite_status_columns(engine: Engine) -> list[str]:
     """为收藏行补齐 favorited / status / status_updated_at，并把旧标注表搬进来。
 
@@ -1392,6 +1720,58 @@ def ensure_persona_report_columns(engine: Engine) -> list[str]:
     return added
 
 
+def ensure_article_image_column(engine: Engine) -> list[str]:
+    """为已存在的 articles 表补齐头图列（image_url），幂等，返回新增列名。
+
+    资讯图片功能上线前创建的库没有这一列，读取 image_url 会直接报错；
+    历史行的 NULL 由 scripts/backfill_article_images.py 回填。
+    """
+    inspector = inspect(engine)
+    if "articles" not in inspector.get_table_names():
+        return []
+
+    existing = {column["name"] for column in inspector.get_columns("articles")}
+    if "image_url" in existing:
+        return []
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE articles ADD COLUMN image_url VARCHAR(500)"))
+    return ["image_url"]
+
+
+# 申请的客观信息列：与 contents 同名列一一对应，让申请能覆盖详情页的结构化信息，
+# 而不是只能改标题 / 简介 / 评分四项。
+_CONTENT_SUBMISSION_EXTRA_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("year", "INTEGER"),
+    ("media", "VARCHAR(20)"),
+    ("episodes", "INTEGER"),
+    ("source_material", "VARCHAR(20)"),
+)
+
+
+def ensure_content_submission_extra_columns(engine: Engine) -> list[str]:
+    """为已存在的 content_submissions 表补齐客观信息列，幂等，返回新增列名。
+
+    历史申请行留 NULL，语义是「当时没填 / 不改动原值」，审核时按此处理。
+    """
+    inspector = inspect(engine)
+    if "content_submissions" not in inspector.get_table_names():
+        return []
+
+    existing = {
+        column["name"] for column in inspector.get_columns("content_submissions")
+    }
+    added: list[str] = []
+    for name, ddl in _CONTENT_SUBMISSION_EXTRA_COLUMNS:
+        if name in existing:
+            continue
+        with engine.begin() as connection:
+            connection.execute(
+                text(f"ALTER TABLE content_submissions ADD COLUMN {name} {ddl}")
+            )
+        added.append(name)
+    return added
+
+
 def init_db(engine: Engine) -> int:
     """建表（如无）并播种，返回播种行数。
 
@@ -1408,10 +1788,13 @@ def init_db(engine: Engine) -> int:
     ensure_content_year_column(engine)
     ensure_content_remote_image_column(engine)
     ensure_content_series_column(engine)
+    ensure_content_book_kind_column(engine)
     ensure_favorite_status_columns(engine)
     ensure_content_meta_columns(engine)
     ensure_persona_report_columns(engine)
     ensure_test_case_source_column(engine)
+    ensure_article_image_column(engine)
+    ensure_content_submission_extra_columns(engine)
     db = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
     try:
         seeded = seed_if_empty(db)
@@ -1582,15 +1965,16 @@ CONTENT_STATUS_LABELS = {
 # 列表筛选用：status=NULL 表示「在名单里但还没标注」，与三个标注值并列成筛选项。
 STATUS_FILTER_UNMARKED = "unmarked"
 
-# 词条申请：登录用户提交新增 / 修改提案，管理员审核通过后才写入 contents。
+# ACGN 内容类型全集。注意「文学」不是这里的一员——它只是小说条目上的一个
+# 标注（contents.book_kind），见 app/page_common.BOOK_KIND_LABELS。
 CONTENT_TYPES = ("anime", "comic", "game", "novel")
 
 SUBMISSION_KIND_CREATE = "create"
 SUBMISSION_KIND_UPDATE = "update"
 SUBMISSION_KINDS = (SUBMISSION_KIND_CREATE, SUBMISSION_KIND_UPDATE)
 SUBMISSION_KIND_LABELS = {
-    SUBMISSION_KIND_CREATE: "新增词条",
-    SUBMISSION_KIND_UPDATE: "修改词条",
+    SUBMISSION_KIND_CREATE: "新增作品",
+    SUBMISSION_KIND_UPDATE: "修改作品",
 }
 
 SUBMISSION_STATUS_PENDING = "pending"
@@ -1609,6 +1993,19 @@ SUBMISSION_STATUS_LABELS = {
 
 SUBMISSION_MAX_TITLE = 200
 SUBMISSION_MAX_SUMMARY = 2000
+
+# 申请可填的客观信息取值：与 app/bangumi_meta.py 的入库口径保持一致，
+# 避免用户手填出详情页展示不出来的第三种写法。
+SUBMISSION_MEDIA_CHOICES = ("TV", "剧场版", "OVA", "Web", "游戏", "小说", "漫画")
+SUBMISSION_SOURCE_MATERIAL_CHOICES = (
+    "漫画原作",
+    "小说原作",
+    "游戏原作",
+    "原创",
+)
+SUBMISSION_YEAR_MIN = 1900
+SUBMISSION_YEAR_MAX = 2100
+SUBMISSION_EPISODES_MAX = 10000
 
 
 def set_user_bio(db: Session, user: User, bio: str | None) -> User:
@@ -1878,7 +2275,7 @@ def list_content_status(
     page_size: int = 20,
     status: str | None = None,
 ) -> tuple[int, list[tuple[Content, str, datetime]]]:
-    """有标注的作品分页（按标注时间倒序），供阿宅画像等场景使用。
+    """有标注的作品分页（按标注时间倒序），供御宅成分检测等场景使用。
 
     返回 (总数, [(内容, 标注, 标注时间)])；不论是否仍在收藏名单里。
     """
@@ -1941,13 +2338,28 @@ def content_status_counts(db: Session, user_id: int) -> dict[str, int]:
     return {status: count for status, count in rows}
 
 
-# ---------- 词条申请 ----------
+# ---------- 作品申请 ----------
 
 
 def _normalize_content_fields(
-    title: str, content_type: str, summary: str, rating
+    title: str,
+    content_type: str,
+    summary: str,
+    *,
+    year=None,
+    media=None,
+    episodes=None,
+    source_material=None,
 ) -> tuple[dict | None, str | None]:
-    """校验并规范化词条字段；返回 (规范化字段, 错误信息)。"""
+    """校验并规范化申请字段；返回 (规范化字段, 错误信息)。
+
+    评分不走这个流程：contents.rating 是外部数据源（Bangumi 等）聚合出来的
+    统计数据，只能由导入 / 补全链路写入，申请表单不接收用户自填评分，
+    否则等于允许用户随手编一个分数并通过审核落进内容库。
+
+    客观信息（年份 / 媒介 / 话数 / 原作载体）全部可选：留空返回 None，
+    语义是「这条不改动原值」，因此只改简介的申请不会顺手把年份清空。
+    """
     title = (title or "").strip()
     content_type = (content_type or "").strip().lower()
     summary = (summary or "").strip()
@@ -1961,18 +2373,54 @@ def _normalize_content_fields(
         return None, "简介不能为空"
     if len(summary) > SUBMISSION_MAX_SUMMARY:
         return None, f"简介不能超过 {SUBMISSION_MAX_SUMMARY} 个字符"
-    try:
-        rating_value = float(rating)
-    except (TypeError, ValueError):
-        return None, "评分必须是数字"
-    if not 0 <= rating_value <= 10:
-        return None, "评分需在 0 到 10 之间"
+
+    year_text = str(year or "").strip()
+    year_value = None
+    if year_text:
+        if not year_text.isdigit():
+            return None, "年份必须是数字"
+        year_value = int(year_text)
+        if not SUBMISSION_YEAR_MIN <= year_value <= SUBMISSION_YEAR_MAX:
+            return None, f"年份需在 {SUBMISSION_YEAR_MIN} 到 {SUBMISSION_YEAR_MAX} 之间"
+
+    episodes_text = str(episodes or "").strip()
+    episodes_value = None
+    if episodes_text:
+        if not episodes_text.isdigit():
+            return None, "话数必须是数字"
+        episodes_value = int(episodes_text)
+        if not 1 <= episodes_value <= SUBMISSION_EPISODES_MAX:
+            return None, f"话数需在 1 到 {SUBMISSION_EPISODES_MAX} 之间"
+
+    media_value = (str(media or "").strip() or None)
+    if media_value and media_value not in SUBMISSION_MEDIA_CHOICES:
+        return None, f"媒介只能是：{' / '.join(SUBMISSION_MEDIA_CHOICES)}"
+
+    source_value = (str(source_material or "").strip() or None)
+    if source_value and source_value not in SUBMISSION_SOURCE_MATERIAL_CHOICES:
+        return None, f"原作载体只能是：{' / '.join(SUBMISSION_SOURCE_MATERIAL_CHOICES)}"
+
     return {
         "title": title,
         "content_type": content_type,
         "summary": summary,
-        "rating": rating_value,
+        "year": year_value,
+        "media": media_value,
+        "episodes": episodes_value,
+        "source_material": source_value,
     }, None
+
+
+def find_content_by_title(db: Session, title: str) -> Content | None:
+    """按标题精确查找作品（忽略大小写与首尾空白），供新增申请查重。
+
+    用于拦住「库里明明有，用户又提一条新增」的重复条目——重复数据一旦
+    通过审核就会分裂出两个详情页，事后合并比事前拦住麻烦得多。
+    """
+    keyword = (title or "").strip()
+    if not keyword:
+        return None
+    return db.scalar(select(Content).where(func.lower(Content.title) == keyword.lower()))
 
 
 def submit_content(
@@ -1982,30 +2430,58 @@ def submit_content(
     title: str,
     content_type: str,
     summary: str,
-    rating,
     content_id: int | None = None,
+    *,
+    year=None,
+    media=None,
+    episodes=None,
+    source_material=None,
 ) -> ContentSubmission:
-    """创建一条待审核的词条申请（新增 / 修改），返回申请对象。
+    """创建一条待审核的申请（新增 / 修改），返回申请对象。
 
-    kind / 字段不合法或目标作品不存在时抛 ValueError，由路由层回显。
+    kind / 字段不合法、目标作品不存在、或新增撞上同名作品时抛 ValueError，
+    由路由层回显。
+
+    评分不在申请范围内：row.rating 只存「提交时目标作品的当前评分」快照，
+    供审核页展示原值；新增申请存 0.0（暂无评分）。审核通过时不会用它
+    覆盖 contents.rating——评分由外部数据源链路维护。
     """
     if kind not in SUBMISSION_KINDS:
         raise ValueError("申请类型不合法")
-    fields, error = _normalize_content_fields(title, content_type, summary, rating)
+    fields, error = _normalize_content_fields(
+        title,
+        content_type,
+        summary,
+        year=year,
+        media=media,
+        episodes=episodes,
+        source_material=source_material,
+    )
     if error:
         raise ValueError(error)
     target_id = None
+    rating_snapshot = 0.0
     if kind == SUBMISSION_KIND_UPDATE:
         if content_id is None:
             raise ValueError("缺少要修改的作品")
-        if get_content(db, content_id) is None:
+        target = get_content(db, content_id)
+        if target is None:
             raise ValueError("要修改的作品不存在")
         target_id = content_id
+        rating_snapshot = float(target.rating or 0)
+    else:
+        duplicate = find_content_by_title(db, fields["title"])
+        if duplicate is not None:
+            raise ValueError(
+                f"作品库已有同名作品「{duplicate.title}」，"
+                f"请直接到该作品页申请修改（/contents/{duplicate.id}/edit）"
+            )
     row = ContentSubmission(
         user_id=user_id,
         kind=kind,
         content_id=target_id,
         status=SUBMISSION_STATUS_PENDING,
+        rating=rating_snapshot,
         **fields,
     )
     db.add(row)
@@ -2014,10 +2490,94 @@ def submit_content(
     return row
 
 
+def get_usernames_by_ids(db: Session, user_ids: list[int]) -> dict[int, str]:
+    """批量取账号名，供审核页显示「谁提的」而不是「用户 #3」。"""
+    ids = [int(uid) for uid in user_ids if uid]
+    if not ids:
+        return {}
+    rows = db.execute(
+        select(User.id, User.username).where(User.id.in_(ids))
+    ).all()
+    return {row[0]: row[1] for row in rows}
+
+
+# 修改申请的新旧对比字段：(申请列名, 作品列名, 展示名)。
+# 评分不参与对比：它由外部数据源维护，申请流程不产生变化。
+SUBMISSION_DIFF_FIELDS: tuple[tuple[str, str, str], ...] = (
+    ("title", "title", "标题"),
+    ("content_type", "type", "类型"),
+    ("summary", "summary", "简介"),
+    ("year", "year", "年份"),
+    ("media", "media", "媒介"),
+    ("episodes", "episodes", "话数"),
+    ("source_material", "source_material", "原作载体"),
+)
+
+# 这四个留空表示「不改动原值」，与必填的四项区别对待。
+SUBMISSION_OPTIONAL_FIELDS = ("year", "media", "episodes", "source_material")
+
+# 对比里长文本的截断长度：审核页是列表，简介全文铺开会把整行撑爆。
+SUBMISSION_DIFF_TEXT_LIMIT = 80
+
+
+def _diff_text(value, limit: int = SUBMISSION_DIFF_TEXT_LIMIT) -> str:
+    text = "" if value is None else str(value)
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def submission_diff(
+    row: ContentSubmission,
+    content: Content | None,
+    *,
+    type_labels: dict | None = None,
+) -> list[dict]:
+    """修改申请的新旧对比：返回 [{label, old, new, changed, kept}]。
+
+    审核者不该被要求自己打开作品页逐字比对——这里把差异直接算出来：
+    - changed：新旧不一致；
+    - kept：客观信息留空，实际效果是保持原值（不是「改成空」）。
+    """
+    if content is None:
+        return []
+    labels = type_labels or {}
+    result: list[dict] = []
+    for submission_column, content_column, label in SUBMISSION_DIFF_FIELDS:
+        new_value = getattr(row, submission_column)
+        old_value = getattr(content, content_column)
+        kept = (
+            new_value is None
+            and submission_column in SUBMISSION_OPTIONAL_FIELDS
+        )
+        if submission_column == "content_type":
+            old_text = labels.get(old_value, old_value) if old_value else ""
+            new_text = labels.get(new_value, new_value) if new_value else ""
+        elif submission_column == "rating":
+            old_text = f"{old_value:.1f}" if old_value is not None else ""
+            new_text = f"{new_value:.1f}" if new_value is not None else ""
+        elif submission_column == "summary":
+            old_text = _diff_text(old_value)
+            new_text = _diff_text(new_value)
+        else:
+            old_text = "" if old_value is None else str(old_value)
+            new_text = "" if new_value is None else str(new_value)
+        if kept:
+            new_text = old_text
+        result.append(
+            {
+                "label": label,
+                "old": old_text,
+                "new": new_text,
+                "changed": old_text != new_text,
+                "kept": kept,
+            }
+        )
+    return result
+
+
 def get_content_submission(
     db: Session, submission_id: int
 ) -> ContentSubmission | None:
-    """按主键取词条申请，不存在返回 None。"""
+    """按主键取作品申请，不存在返回 None。"""
     return db.get(ContentSubmission, submission_id)
 
 
@@ -2029,7 +2589,7 @@ def list_content_submissions(
     page: int = 1,
     page_size: int = 20,
 ) -> tuple[int, list[ContentSubmission]]:
-    """词条申请分页（按提交时间倒序）；可按提交人与状态筛选。"""
+    """作品申请分页（按提交时间倒序）；可按提交人与状态筛选。"""
     base = select(ContentSubmission)
     if user_id is not None:
         base = base.where(ContentSubmission.user_id == user_id)
@@ -2055,7 +2615,7 @@ def count_content_submissions(
     user_id: int | None = None,
     status: str | None = None,
 ) -> int:
-    """词条申请条数；可按提交人与状态筛选。"""
+    """作品申请条数；可按提交人与状态筛选。"""
     stmt = select(func.count()).select_from(ContentSubmission)
     if user_id is not None:
         stmt = stmt.where(ContentSubmission.user_id == user_id)
@@ -2072,7 +2632,7 @@ def decide_content_submission(
     reviewer_id: int,
     note: str = "",
 ) -> tuple[ContentSubmission | None, str | None]:
-    """审核词条申请：approve=True 写入 / 更新 contents，False 驳回。
+    """审核作品申请：approve=True 写入 / 更新 contents，False 驳回。
 
     返回 (申请, 错误信息)；只有 pending 可处理，重复审核返回错误，
     保证同一申请不会被写入两次。
@@ -2084,11 +2644,17 @@ def decide_content_submission(
         return None, "该申请已处理"
     if approve:
         if row.kind == SUBMISSION_KIND_CREATE:
+            # 新增作品没有可引用评分：先落 0.0（页面显示「暂无评分」），
+            # 真实评分等 Bangumi 补全 / 导入链路写入。
             content = Content(
                 title=row.title,
                 type=row.content_type,
                 summary=row.summary,
-                rating=row.rating,
+                rating=0.0,
+                year=row.year,
+                media=row.media,
+                episodes=row.episodes,
+                source_material=row.source_material,
             )
             db.add(content)
             db.flush()
@@ -2102,7 +2668,13 @@ def decide_content_submission(
             content.title = row.title
             content.type = row.content_type
             content.summary = row.summary
-            content.rating = row.rating
+            # 评分不在此写入：contents.rating 只由外部数据源（Bangumi 等）维护，
+            # 用户提交的修改申请无权改动它。row.rating 只是提交时的原值快照。
+            # 客观信息留空 = 不改动原值：只改简介的申请不该顺手清空年份。
+            for column in ("year", "media", "episodes", "source_material"):
+                value = getattr(row, column)
+                if value is not None:
+                    setattr(content, column, value)
             row.applied_content_id = content.id
         row.status = SUBMISSION_STATUS_APPROVED
     else:
@@ -2115,7 +2687,7 @@ def decide_content_submission(
     return row, None
 
 
-# ---------- 阿宅画像：Bangumi 收藏快照 / 报告 ----------
+# ---------- 御宅成分检测：Bangumi 收藏快照 / 报告 ----------
 
 
 def replace_bangumi_collections(
@@ -3472,9 +4044,40 @@ def _delete_by_ids(db: Session, model, ids) -> int:
     return result.rowcount or 0
 
 
+# 作品被删除时要一起清理的弱关联表（都没有外键级联，见各模型注释）。
+# 刻意不含 content_submissions：词条申请是独立生命周期的审核记录，
+# 它的 content_id 是「通过后写入的作品」，删作品不该吞掉审核历史。
+_CONTENT_WEAK_ASSOCIATIONS = (
+    ContentTag,
+    ContentStudio,
+    ContentFact,
+    ContentCast,
+    ContentCredit,
+    ContentEntityLink,
+    ContentFavorite,
+    ContentViewHistory,
+    UserSiteImport,
+    ArticleContentLink,
+)
+
+
 def delete_contents(db: Session, ids) -> int:
-    """删除作品条目（数据管理 → 作品数据）。返回删除行数。"""
-    return _delete_by_ids(db, Content, ids)
+    """删除作品条目及其弱关联（数据管理 → 作品数据）。返回删除行数。
+
+    弱关联（标签 / 公司 / 信息 / 声优 / 制作 / 作者关联 / 收藏 / 浏览记录 /
+    同步记录 / 资讯关联）一并清掉：否则标签计数会长期虚高（线上曾出现点 `TV`
+    出 2974 条、可见作品远少于此），「按标签反查」也会列出空壳。
+
+    ids 先去重再删除，避免同一 id 重复提交导致行数统计偏差。
+    """
+    cleaned = sorted({int(item) for item in ids})
+    if not cleaned:
+        return 0
+    for model in _CONTENT_WEAK_ASSOCIATIONS:
+        db.execute(sa_delete(model).where(model.content_id.in_(cleaned)))
+    result = db.execute(sa_delete(Content).where(Content.id.in_(cleaned)))
+    db.commit()
+    return result.rowcount or 0
 
 
 def delete_articles(db: Session, ids) -> int:
