@@ -272,6 +272,7 @@ def test_index_recommends_by_home_taste(tmp_path):
         tmp_path,
         [
             ("双命中贴贴番", 8.0, ["日常", "百合"]),
+            ("双命中贴贴番", 7.6, ["日常", "百合"]),  # 同名不同条目：门户只占一个位
             ("单命中轻喜剧", 8.9, ["日常"]),
             ("致郁高分雷", 9.9, ["日常", "致郁"]),   # 高分带避雷：一票否决
             ("科幻无关番", 9.5, ["科幻"]),            # 无本命命中：不进推荐位
@@ -280,11 +281,13 @@ def test_index_recommends_by_home_taste(tmp_path):
     )
     try:
         html = client.get("/").text
-        assert "双命中贴贴番" in html and "单命中轻喜剧" in html
+        assert "单命中轻喜剧" in html
         assert "致郁高分雷" not in html
         assert "科幻无关番" not in html
+        titles = re.findall(r'work-card-title">([^<]*)', html)
+        assert titles.count("双命中贴贴番") == 1          # 同名去重
         # 命中数优先于评分：8.0 的双命中排在 8.9 的单命中之前
-        assert html.index("双命中贴贴番") < html.index("单命中轻喜剧")
+        assert titles.index("双命中贴贴番") < titles.index("单命中轻喜剧")
     finally:
         app.dependency_overrides.pop(get_db, None)
 

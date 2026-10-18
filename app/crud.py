@@ -565,6 +565,7 @@ def list_home_recommendations(db: Session, limit: int = 8) -> list[Content]:
     """首页推荐作品：按站长的编辑口味挑（与成分检测的推荐同一套匹配口径）。
 
     - 本命题材命中越多越靠前，同命中数按评分；避雷题材一票否决（9.9 分也不推）；
+    - 同名条目只占一个推荐位（同作品的多季/多卷/OVA 在库里是不同行，门户第一屏去重）；
     - 门户面对游客，没有「已收藏」概念，不传排除集；
     - 目录还小 / 一个命中都没有时回落到评分榜（list_top_contents），保证新站不空；
       只要有命中就只推命中，不拿高分作品稀释口味。
@@ -573,14 +574,27 @@ def list_home_recommendations(db: Session, limit: int = 8) -> list[Content]:
         db,
         positive_tags=list(HOME_TASTE_POSITIVE),
         avoided_tags=list(HOME_TASTE_AVOIDED),
-        limit=limit,
+        limit=max(limit * 3, limit),
     )
     if not picks:
         return list_top_contents(db, limit=limit)
     rows = get_contents_by_ids(db, [item["content_id"] for item in picks])
     by_id = {row.id: row for row in rows}
-    # 按推荐顺序取行：recommend_contents 算分排序，get_contents_by_ids 按主键返回
-    return [by_id[item["content_id"]] for item in picks if item["content_id"] in by_id][:limit]
+    # 按推荐顺序取行（get_contents_by_ids 按主键返回），同名标题只留第一个
+    ordered: list[Content] = []
+    seen_titles: set[str] = set()
+    for item in picks:
+        row = by_id.get(item["content_id"])
+        if row is None:
+            continue
+        title_key = (row.title or "").strip()
+        if title_key in seen_titles:
+            continue
+        seen_titles.add(title_key)
+        ordered.append(row)
+        if len(ordered) >= limit:
+            break
+    return ordered
 
 
 def list_engaged_content_ids(db: Session) -> set[int]:
