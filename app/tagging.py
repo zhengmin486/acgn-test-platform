@@ -89,11 +89,16 @@ GENRE_TAGS |= {
 
 GENRE_KEYWORDS = (
     "治愈", "日常", "热血", "悬疑", "科幻", "恋爱", "奇幻", "搞笑",
-    "音乐", "后宫", "百合", "机战", "运动", "竞技", "偶像", "校园", "青春",
+    "音乐", "后宫", "百合", "机战", "运动", "偶像", "校园", "青春",
     "致郁", "猎奇", "扭曲", "异世界", "魔法", "冒险", "战斗", "推理",
     "恐怖", "犯罪", "历史", "战争", "职场", "美食", "末日", "丧尸",
     "转生", "复仇", "武侠", "神话", "吸血鬼", "妖怪",
 )
+
+# 口味词展开（推荐匹配）的关键词表：题材判定口径 GENRE_KEYWORDS 之上补「竞技」，
+# 让「体育竞技」这类自然语言避雷词能落到站内「运动 / 竞技」标签上。
+# 只服务推荐匹配层，不回流 is_genre_tag——成分测试（画像）的判定口径不动。
+RECOMMEND_GENRE_KEYWORDS = GENRE_KEYWORDS + ("竞技",)
 
 # 题材同义词表：键是展示用规范名（须在 GENRE_TAGS 内），值是常见别名。
 # 归一后写库，标签云与筛选不再因写法不同而分裂。
@@ -325,7 +330,8 @@ def expand_genre_names(names: Iterable[str], site_tags: Iterable[str]) -> list[s
     1. 原名就在站内标签里 → 直接用；
     2. 同义词规范名（致郁系→致郁、日常系→日常）在站内 → 加入；
     3. 名字含某条别名（「轻喜剧」含「喜剧」→搞笑、「体育竞技」含「体育」→运动）→ 加入；
-    4. 名字含题材关键词（「硬核科幻」含科幻、「扭曲情感」含扭曲）→ 加入该关键词。
+    4. 名字含 ``RECOMMEND_GENRE_KEYWORDS`` 里的题材关键词
+       （「硬核科幻」含科幻、「扭曲情感」含扭曲、「体育竞技」含竞技）→ 加入该关键词。
     返回按首次出现顺序去重的列表，保证命中展示顺序稳定。
     """
     site = {str(tag) for tag in site_tags}
@@ -343,7 +349,7 @@ def expand_genre_names(names: Iterable[str], site_tags: Iterable[str]) -> list[s
         for alias, target in _genre_alias_pairs():
             if alias in norm:
                 candidates.append(target)
-        for keyword in GENRE_KEYWORDS:
+        for keyword in RECOMMEND_GENRE_KEYWORDS:
             if keyword in norm:
                 candidates.append(keyword)
         for cand in candidates:

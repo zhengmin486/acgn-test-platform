@@ -20,6 +20,7 @@ from app.models import BangumiCollection, Content, Tag
 from app.tagging import (
     classify_tag,
     expand_genre_names,
+    is_genre_tag,
     split_tags,
     year_from_date,
     year_from_summary,
@@ -124,6 +125,12 @@ class TestClassify:
         assert expand_genre_names([], {"日常"}) == []
         assert expand_genre_names(["日常"], set()) == []
         assert expand_genre_names([None, "  "], {"日常"}) == []
+
+    def test_expand_keywords_do_not_leak_into_profile(self):
+        """展开层私有关键词表不回流 is_genre_tag：成分测试的题材判定口径不动。"""
+        assert is_genre_tag("竞技")       # 规范名本身是题材（两条路都认）
+        assert not is_genre_tag("竞技场")  # 展开层关键词不污染画像判定
+        assert expand_genre_names(["体育竞技"], {"运动", "竞技"}) == ["运动", "竞技"]
 
     def test_year_helpers(self):
         assert year_from_date("2006-04-02") == 2006
