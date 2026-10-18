@@ -595,14 +595,17 @@ def series_title_key(title: str) -> str:
 
 
 def _home_pick_group_key(row: Content, title_keys: list[str]) -> str:
-    """推荐位的系列分组键：有 series_id 用系列，否则用标题前缀聚类。
+    """推荐位的系列分组键：始终按标题前缀聚类（与 series_id 无关）。
+
+    用前缀聚类而非 series_id，是因为 series_id 只覆盖「已在库里显式归系列」的作品，
+    而像「街角魔族 2丁目」「摇曳百合 夏日时光！」这类卷/副标题续作未必进过系列，
+    只有前缀聚类能稳定把它们和正传并成一组，保证「多季只推一季」。series_id 仍服务于
+    系列浏览页，但不参与首页去重，避免系列未建全时首页出现重复。
 
     前缀聚类只认「整标题是另一部的前缀」（且前缀 ≥ 4 字）——
     「摇曳百合」→「摇曳百合 夏日时光」，不会把「魔法少女小圆」和「魔法少女奈叶」
     误并（两者互不为前缀）。
     """
-    if row.series_id:
-        return f"sid:{row.series_id}"
     key = series_title_key(row.title)
     if not key:  # 无标题的脏数据各自成组，避免空前缀把整批并成一个系列
         return f"id:{row.id}"
@@ -616,7 +619,7 @@ def list_home_recommendations(db: Session, limit: int = 8) -> list[Content]:
     """首页推荐作品：按站长的编辑口味挑（与成分检测的推荐同一套匹配口径）。
 
     - 本命题材命中越多越靠前，同命中数按评分；避雷题材一票否决（9.9 分也不推）；
-    - **同系列只占一个推荐位**：有 series_id 按系列归组，没有就按标题前缀聚类；
+    - **同系列只占一个推荐位**：按标题前缀聚类（与 series_id 无关，series_id 只服务系列浏览页），
       代表取该系列最早的一部（年份优先，其次 id）——推荐位要能从第一季看起；
     - 门户面对游客，没有「已收藏」概念，不传排除集；
     - 目录还小 / 一个命中都没有时回落到评分榜（list_top_contents），保证新站不空；
