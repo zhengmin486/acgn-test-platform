@@ -1,29 +1,18 @@
 {% extends "base.html" %}
-{# ACGN 内容平台布局（面向读者 + 内容运营）：内容导航（首页 / ACGN 资讯 / 新番档期）
-   + 管理员可见的「内容管理」「站点设置」+ 右侧跨区入口“测试管理”。
+{# ACGN 内容平台布局（面向读者 + 内容运营）。
+   一级导航只放公共内容域（首页 / ACGN 资讯 / 新番档期），对全部访客一致；
+   「我的」（个人空间 / 阿宅画像）与运营入口（内容管理 / 站点设置 / 测试平台）
+   按身份收进右侧用户下拉菜单，不占一级导航位置。
+   作者/公司花名册（/creators）不是独立内容域：从「全部作品」页头部进入，
+   作品详情页的关系 chips 也可直达，首页态高亮归「首页」。
    内容页与内容管理页统一继承本布局；测试用例 / 执行 / 批次不出现在本导航中。 #}
 {% block navbar %}
 {% set nav_path = request.url.path %}
 {% set nav_items = [
-    ("首页", "/", nav_path == "/" or nav_path.startswith("/contents")),
+    ("首页", "/", nav_path == "/" or nav_path.startswith("/contents") or nav_path.startswith("/creators")),
     ("ACGN 资讯", "/articles", nav_path.startswith("/articles")),
-    ("新番档期", "/schedule", nav_path == "/schedule" or nav_path == "/schedule/"),
-    ("作者/公司", "/creators", nav_path.startswith("/creators"))
+    ("新番档期", "/schedule", nav_path == "/schedule" or nav_path == "/schedule/")
 ] %}
-{# 阿宅画像是引流入口：游客走免登录试算页，登录用户直接进自己的画像页。 #}
-{% set nav_items = nav_items + [("阿宅画像", "/me/persona" if current_user else "/persona", nav_path.startswith("/persona") or nav_path.startswith("/me/persona"))] %}
-{# 登录用户追加「个人空间」入口（游客不显示，未登录访问 /me 会跳登录页） #}
-{% if current_user %}
-{% set nav_items = nav_items + [("个人空间", "/me", nav_path == "/me")] %}
-{% endif %}
-{# 管理员 / 站长：内容数据的运营与站点治理都属于内容平台，在这里各给一个入口。
-   （测试平台只保留测试用例 / 执行历史 / 回归批次，不再承载内容管理。） #}
-{% if current_user and current_user.is_staff %}
-{% set manage_active = nav_path.startswith("/manage") %}
-{% set nav_items = nav_items + [("内容管理", "/manage", manage_active)] %}
-{% set settings_active = nav_path.startswith("/admin/accounts") or nav_path.startswith("/admin/invites") or nav_path.startswith("/admin/roles") %}
-{% set nav_items = nav_items + [("站点设置", "/admin/accounts", settings_active)] %}
-{% endif %}
 <nav class="navbar navbar-expand-lg navbar-dark sticky-top site-navbar content-navbar px-3">
     <a class="navbar-brand" href="/"><span class="brand-mark" aria-hidden="true"></span>ACGN 内容平台</a>
     <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#content-nav"
@@ -39,19 +28,51 @@
             </li>
             {% endfor %}
         </ul>
-        {# 游客：提供注册与登录入口；普通用户：仅内容导航 + 账号与退出；
-           管理员：额外显示跨区入口「测试管理」（不占用内容导航位置）。
+        {# 全局搜索：从首页 hero 收编到导航胶囊，任何内容页都可直接搜，提交到 /contents。
+           类型下拉为「类型 + 关键词」组合检索（type_labels 为模板全局，见 page_common）；
+           放在用户区之前、折叠容器之内——窄屏时随菜单折叠换行，不挤一栏布局。 #}
+        <form class="nav-search" method="get" action="/contents" role="search">
+            <svg class="svg-ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg>
+            <select name="type" id="nav-type" class="nav-search-type" aria-label="作品类型">
+                <option value="">全部类型</option>
+                {% for code, label in type_labels.items() %}
+                <option value="{{ code }}">{{ label }}</option>
+                {% endfor %}
+            </select>
+            <input type="search" name="q" id="nav-q" placeholder="搜索作品…" aria-label="搜索作品">
+        </form>
+        {# 游客：注册（弱）+ 登录（主 CTA）；登录用户：头像胶囊展开用户菜单。
+           运营入口只对管理员 / 站长显示，且在菜单内单独分组，不与「我的」混排。
            导航不展示「未登录」状态提示（用户要求去掉）。 #}
         <div class="d-flex flex-wrap align-items-center gap-2">
             {% if current_user %}
-            {% if current_user.is_staff %}
-            <a class="btn btn-sm nav-cta" href="/testcases">测试管理 &rarr;</a>
-            {% endif %}
-            <span class="navbar-user">
-                <a class="navbar-user-name" href="/me" style="color: inherit;">{{ current_user.username }}</a>
-                <span class="navbar-user-role">{{ current_user.role_label }}</span>
-            </span>
-            <a class="btn btn-sm navbar-action" href="/logout">退出</a>
+            <div class="dropdown">
+                <button class="navbar-user" type="button" id="user-menu-toggle"
+                        data-bs-toggle="dropdown" aria-expanded="false">
+                    {% if current_user.avatar_url %}
+                    <img class="navbar-avatar" src="{{ current_user.avatar_url }}" alt="" width="24" height="24">
+                    {% else %}
+                    <span class="navbar-avatar navbar-avatar-fallback" aria-hidden="true">{{ current_user.username[:1] | upper }}</span>
+                    {% endif %}
+                    <span class="navbar-user-name">{{ current_user.username }}</span>
+                    <span class="navbar-user-role">{{ current_user.role_label }}</span>
+                    <span class="navbar-user-caret" aria-hidden="true">&#9662;</span>
+                </button>
+                <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="user-menu-toggle">
+                    <li><h6 class="dropdown-header">我的</h6></li>
+                    <li><a class="dropdown-item" href="/me">个人空间</a></li>
+                    <li><a class="dropdown-item" href="/me/persona">阿宅画像</a></li>
+                    {% if current_user.is_staff %}
+                    <li><hr class="dropdown-divider"></li>
+                    <li><h6 class="dropdown-header">管理</h6></li>
+                    <li><a class="dropdown-item" href="/manage">内容管理</a></li>
+                    <li><a class="dropdown-item" href="/admin">站点设置</a></li>
+                    <li><a class="dropdown-item" href="/testcases">测试平台 <span class="dropdown-external" aria-hidden="true">&#8599;</span></a></li>
+                    {% endif %}
+                    <li><hr class="dropdown-divider"></li>
+                    <li><a class="dropdown-item" href="/logout">退出登录</a></li>
+                </ul>
+            </div>
             {% else %}
             <a class="btn btn-sm navbar-action" href="/register">注册</a>
             <a class="btn btn-sm nav-cta" href="/login">登录</a>

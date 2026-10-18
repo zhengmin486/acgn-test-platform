@@ -498,6 +498,91 @@ hr {
     box-shadow: 0 3px 12px -5px rgba(10, 45, 66, 0.55);
 }
 
+/* 全局搜索胶囊：从首页 hero 收编到导航的工具位。
+   半透明白胶囊与 nav-link 悬停态同语言，可达但不抢戏；
+   窄屏随折叠菜单换行，输入框收窄避免挤压用户区。 */
+.nav-search {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.3rem 0.85rem;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.34);
+    border: 1px solid rgba(10, 45, 66, 0.18);
+    color: var(--on-bright);
+    transition: background-color 0.15s var(--ease), border-color 0.15s var(--ease);
+}
+
+.nav-search:hover,
+.nav-search:focus-within {
+    background: rgba(255, 255, 255, 0.55);
+    border-color: rgba(10, 45, 66, 0.32);
+}
+
+.nav-search .svg-ic {
+    width: 0.95rem;
+    height: 0.95rem;
+    opacity: 0.75;
+}
+
+.nav-search input {
+    width: 9.5rem;
+    border: 0;
+    background: transparent;
+    padding: 0;
+    font-size: 0.875rem;
+    color: var(--on-bright);
+}
+
+.nav-search input:focus {
+    outline: none;
+    box-shadow: none;
+    background: transparent;
+}
+
+.nav-search input::placeholder {
+    color: var(--on-bright-soft);
+}
+
+/* 类型下拉：融入胶囊的透明 select，只保留文字与原生箭头 */
+.nav-search-type {
+    border: 0;
+    background: transparent;
+    color: var(--on-bright);
+    font-size: 0.8125rem;
+    font-weight: 600;
+    padding: 0;
+    max-width: 5.5rem;
+    cursor: pointer;
+}
+
+.nav-search-type:focus {
+    outline: none;
+    box-shadow: none;
+}
+
+/* 展开列表回白底深字，保证下拉选项可读性 */
+.nav-search-type option {
+    color: var(--on-bright);
+    background: #ffffff;
+}
+
+/* webkit 自动填充会把胶囊底色改成亮黄，压回品牌语言 */
+.nav-search input:-webkit-autofill {
+    -webkit-box-shadow: 0 0 0 1000px rgba(255, 255, 255, 0.55) inset;
+    -webkit-text-fill-color: var(--on-bright);
+}
+
+@media (max-width: 575.98px) {
+    .nav-search {
+        width: 100%;
+    }
+    .nav-search input {
+        width: 100%;
+        flex: 1 1 auto;
+    }
+}
+
 /* 亮底导航的移动端汉堡按钮：改用深色图标，避免白色图标在亮底上看不见 */
 .site-navbar .navbar-toggler,
 .admin-navbar .navbar-toggler {
@@ -543,6 +628,12 @@ hr {
     border-image: linear-gradient(90deg, var(--brand-400), var(--accent-500)) 1;
     background-color: rgba(255, 255, 255, 0.55);
     backdrop-filter: blur(6px);
+}
+
+/* 数据口径说明：比主行再退一档，低调存在但不伪装成没有 */
+.site-footer .footer-source {
+    margin-top: 0.25rem;
+    opacity: 0.72;
 }
 
 /* ---------- 回到顶部 ---------- */
@@ -807,6 +898,63 @@ hr {
     transform: scale(1.1) rotate(-5deg);
 }
 
+/* 首页「阿宅画像」引流卡：品牌蓝浅底 + 深字，整卡可点。
+   游客免登录试算（/persona），登录用户直达自己的画像（/me/persona）。 */
+.home-persona-card {
+    display: block;
+    padding: var(--space-5);
+    border: 1px solid var(--brand-200);
+    border-radius: var(--radius-lg);
+    background-color: var(--brand-50);
+    color: var(--brand-900);
+    text-decoration: none;
+    transition: transform 0.15s var(--ease), box-shadow 0.15s var(--ease),
+        border-color 0.15s var(--ease);
+}
+
+.home-persona-card:hover,
+.home-persona-card:focus {
+    transform: translateY(-2px);
+    border-color: var(--brand-300);
+    box-shadow: var(--shadow-md);
+    color: var(--brand-900);
+}
+
+.home-persona-kicker {
+    display: inline-block;
+    margin-bottom: 0.4rem;
+    padding: 0.08rem 0.55rem;
+    border-radius: 999px;
+    background-color: var(--brand-400);
+    color: var(--on-bright);
+    font-size: var(--text-xs);
+    font-weight: 700;
+    line-height: 1.7;
+}
+
+.home-persona-title {
+    display: block;
+    font-size: var(--text-lg);
+    font-weight: 700;
+    line-height: 1.4;
+}
+
+.home-persona-sub {
+    display: block;
+    margin-top: 0.2rem;
+    font-size: var(--text-sm);
+    line-height: 1.6;
+    color: var(--brand-800);
+}
+
+.home-persona-cta {
+    display: inline-block;
+    margin-top: 0.55rem;
+    font-size: var(--text-sm);
+    font-weight: 700;
+    color: var(--brand-700);
+}
+
 /* ==========================================================================
    内容平台 · 详情页
    ========================================================================== */
@@ -1028,6 +1176,151 @@ img.work-cover {
 
 /* 摘要最多两行，超出省略，保证卡片高度整齐 */
 .work-card-summary {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+}
+
+/* 首页「本周新番」横滑条：轻量卡片，16:9 封面 + 标题，与 work-card 观感协调 */
+.spotlight-wrap {
+    position: relative;
+}
+
+/* 左右滚动按钮：默认藏在轨道外，悬停 / 键盘聚焦时从两侧滑出。
+   绝对定位在 wrap 上（不占布局），触屏与无 hover 设备靠 touch 原生横滑。 */
+.spotlight-nav {
+    position: absolute;
+    top: 50%;
+    z-index: 3;
+    display: grid;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    transform: translateY(-60%);
+    border: 1px solid var(--brand-300);
+    border-radius: 999px;
+    background-color: #fff;
+    color: var(--brand-700);
+    box-shadow: var(--shadow-md);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.18s var(--ease), transform 0.18s var(--ease),
+        background-color 0.18s var(--ease), color 0.18s var(--ease);
+}
+
+.spotlight-nav svg {
+    width: 20px;
+    height: 20px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2.2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+.spotlight-nav-prev {
+    left: -6px;
+}
+
+.spotlight-nav-next {
+    right: -6px;
+}
+
+.spotlight-wrap:hover .spotlight-nav,
+.spotlight-nav:focus-visible {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+.spotlight-nav:hover {
+    background-color: var(--brand-600);
+    border-color: var(--brand-600);
+    color: #fff;
+}
+
+/* 滚到两端时对应按钮淡出（JS 切 .is-end），避免点空 */
+.spotlight-nav.is-end {
+    opacity: 0;
+    pointer-events: none;
+}
+
+.spotlight-track {
+    display: flex;
+    gap: var(--space-3);
+    overflow-x: auto;
+    padding: var(--space-1) var(--space-1) var(--space-3);
+    margin: 0 calc(var(--space-1) * -1);
+    scroll-snap-type: x proximity;
+    -webkit-overflow-scrolling: touch;
+}
+
+.spotlight-track::-webkit-scrollbar {
+    height: 8px;
+}
+
+.spotlight-track::-webkit-scrollbar-thumb {
+    background: var(--brand-200);
+    border-radius: 999px;
+}
+
+.spotlight-card {
+    position: relative;
+    flex: 0 0 auto;
+    width: 220px;
+    display: flex;
+    flex-direction: column;
+    background-color: #fff;
+    border: 1px solid #dfe9f4;
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+    text-decoration: none;
+    color: inherit;
+    box-shadow: var(--shadow-sm);
+    scroll-snap-align: start;
+    transition: transform 0.18s var(--ease), box-shadow 0.18s var(--ease),
+        border-color 0.18s var(--ease);
+}
+
+.spotlight-card:hover {
+    transform: translateY(-3px);
+    border-color: var(--brand-300);
+    box-shadow: var(--shadow-md);
+    color: inherit;
+}
+
+.spotlight-cover {
+    display: grid;
+    place-items: center;
+    aspect-ratio: 16 / 9;
+    background: linear-gradient(135deg, var(--brand-100), var(--brand-200));
+    color: var(--brand-700);
+    font-size: 2.2rem;
+    font-weight: 800;
+    text-shadow: 0 1px 0 rgba(255, 255, 255, 0.35);
+    user-select: none;
+}
+
+img.spotlight-cover {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.spotlight-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+    padding: 0.6rem 0.75rem 0.75rem;
+}
+
+.spotlight-title {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    line-height: 1.35;
     display: -webkit-box;
     -webkit-box-orient: vertical;
     -webkit-line-clamp: 2;
@@ -1431,6 +1724,28 @@ img.work-cover {
 .navbar-user-admin .navbar-user-role {
     background-color: var(--accent-700);
     color: #fff;
+}
+
+/* 用户菜单开关：账号胶囊作 dropdown 按钮（内容平台导航） */
+button.navbar-user {
+    cursor: pointer;
+    font-family: inherit;
+}
+
+.navbar-user-caret {
+    font-size: 0.68rem;
+    opacity: 0.7;
+    margin-left: 0.1rem;
+}
+
+.content-navbar .dropdown-menu {
+    min-width: 11rem;
+}
+
+/* 下拉菜单里的跨域入口（测试平台）：小箭头弱化为文字链，不抢主 CTA */
+.dropdown-external {
+    color: var(--ink-500);
+    font-size: 0.85em;
 }
 
 /* 内容平台 → 测试管理 的跨区入口 */
@@ -2074,4 +2389,35 @@ button[disabled],
         transition-duration: 0.01ms !important;
         scroll-behavior: auto !important;
     }
+}
+
+
+/* ==========================================================================
+   用户头像：导航小圆 + 个人空间大圆
+   ========================================================================== */
+
+/* 个人空间：上传后用图片，方形裁切填满圆形 */
+.space-avatar-img {
+    object-fit: cover;
+    background: var(--surface-2);
+}
+
+.navbar-user .navbar-avatar {
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    object-fit: cover;
+    flex-shrink: 0;
+    background: var(--surface-2);
+}
+
+.navbar-user .navbar-avatar-fallback {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.72rem;
+    font-weight: 700;
+    color: var(--on-bright);
+    background: var(--accent-500);
+    user-select: none;
 }

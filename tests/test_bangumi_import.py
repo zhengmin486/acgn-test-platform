@@ -184,11 +184,26 @@ class TestMapSubject:
         assert subject.source_url == "https://bgm.tv/subject/975"
 
     @pytest.mark.parametrize(
+        ("bgm_type", "expected_type"),
+        [(1, "novel"), (2, "anime"), (4, "game"), (6, "comic")],
+    )
+    def test_four_site_types_are_supported(self, bgm_type, expected_type):
+        """站点四个类型都要能映射：书籍区里小说(1)与漫画(6)混在一起，必须按条目 type 区分。
+
+        回归防护：曾经 TYPE_MAPPING 只有 {2,4}，导致小说和漫画完全收不进来。
+        """
+        payload = make_payload(400, bgm_type)
+
+        subject = import_bangumi.map_subject(payload)
+
+        assert subject.type == expected_type
+
+    @pytest.mark.parametrize(
         ("bgm_type", "expected_reason"),
-        [(1, "书籍"), (3, "音乐"), (5, "三次元"), (None, "未知类型")],
+        [(3, "音乐"), (5, "三次元"), (None, "未知类型")],
     )
     def test_unsupported_types_are_rejected(self, bgm_type, expected_reason):
-        """书籍/音乐/三次元/缺失类型一律跳过，不得错误归类为漫画或小说。"""
+        """音乐 / 三次元 / 缺失类型一律跳过（不属于本站四类型）。"""
         payload = make_payload(300, 1)
         payload["type"] = bgm_type
 
@@ -558,12 +573,15 @@ class TestRunImport:
         assert len(rows) == len(FAKE_CONTENTS) + 2
 
     def test_failed_fetch_and_unsupported_type_are_counted(self, tmp_path):
-        """获取失败与类型不支持分别计入 failed / skipped，不中断其余条目。"""
+        """获取失败与类型不支持分别计入 failed / skipped，不中断其余条目。
+
+        用「音乐」当不支持类型：书籍(1)已支持为 novel，不能再拿它当反例。
+        """
         _, factory = seeded_db(tmp_path)
-        fetch = make_stub_fetch({265: ANIME_PAYLOAD, 1224: make_payload(1224, 1)})
+        fetch = make_stub_fetch({265: ANIME_PAYLOAD, 1224: make_payload(1224, 3)})
 
         summary = import_bangumi.run_import(
-            [111, 265, 1224],  # 111 触发模拟网络失败；1224 是书籍类
+            [111, 265, 1224],  # 111 触发模拟网络失败；1224 是音乐类
             session_factory=factory,
             apply=True,
             fetch=fetch,
@@ -577,7 +595,7 @@ class TestRunImport:
         assert failed.bangumi_id == 111
         assert "失败" in failed.reason
         skipped = next(o for o in summary.outcomes if o.status == "skipped")
-        assert "书籍" in skipped.reason
+        assert "音乐" in skipped.reason
 
     def test_invalid_ids_reported_as_failed(self, tmp_path):
         """0、负数等非法 ID：计入 failed，且不会发起任何 API 请求。"""
@@ -725,8 +743,8 @@ class TestContentModelAndPages:
             "rating": 8.0,
         }
 
-    def test_detail_page_shows_source_link_when_present(self, tmp_path):
-        """详情页：source_url 存在时渲染来源链接（新窗口打开）。"""
+    def test_detail_page_hides_source_link_when_present(self, tmp_path):
+        """详情页：source_url 仅作内部溯源字段，前台不渲染来源链接（去显著化）。"""
         _, factory = seeded_db(tmp_path)
         db = factory()
         try:
@@ -757,8 +775,9 @@ class TestContentModelAndPages:
             resp = client.get(f"/contents/{content_id}")
             assert resp.status_code == 200
             assert "来自 Bangumi 的动画" in resp.text
-            assert "https://bgm.tv/subject/265" in resp.text
-            assert 'target="_blank"' in resp.text
+            # 去显著化：bgm.tv 来源链接与 Bangumi ID 都不再出现在前台
+            assert "https://bgm.tv/subject/265" not in resp.text
+            assert "Bangumi ID" not in resp.text
         finally:
             app.dependency_overrides.pop(get_db, None)
 

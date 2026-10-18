@@ -69,6 +69,7 @@ class CurrentUser:
     id: int
     username: str
     role: str
+    avatar_url: str | None = None
 
     @property
     def is_staff(self) -> bool:
@@ -123,7 +124,12 @@ def get_current_user(request: Request, db: Session) -> CurrentUser | None:
         # 邮箱未验证：即使持有已签发的会话也视作未登录，避免绕过验证流程。
         # 无邮箱的历史账号（脚本创建）不受影响。
         return None
-    return CurrentUser(id=account.id, username=account.username, role=account.role)
+    return CurrentUser(
+        id=account.id,
+        username=account.username,
+        role=account.role,
+        avatar_url=account.avatar_url,
+    )
 
 
 def load_current_user(request: Request, db: DbSession) -> None:

@@ -38,7 +38,6 @@ from app.models import (
     ContentCast,
     ContentCredit,
     ContentFact,
-    ContentStatus,
     ContentStudio,
     ContentSubmission,
     ContentTag,
@@ -418,9 +417,12 @@ def list_content_facts(db: Session, content_id: int) -> list[tuple[str, str]]:
 
 
 def list_engaged_content_ids(db: Session) -> set[int]:
-    """有互动的作品 id：被收藏 / 标注 / 浏览过（多用户并集，补全与封面共用）。"""
+    """有互动的作品 id：被收藏 / 标注 / 浏览过（多用户并集，补全与封面共用）。
+
+    标注已并入收藏行（content_favorites），所以只需扫收藏与浏览记录两张表。
+    """
     ids: set[int] = set()
-    for model in (ContentFavorite, ContentStatus, ContentViewHistory):
+    for model in (ContentFavorite, ContentViewHistory):
         ids.update(int(value) for value in db.scalars(select(model.content_id).distinct()))
     return ids
 
@@ -924,8 +926,12 @@ def list_articles(
     category: str | None = None,
     published_only: bool = True,
     limit: int | None = None,
+    q: str | None = None,
 ) -> list[Article]:
-    """查询资讯列表，可按分类筛选，默认只显示已发布文章；limit 限制返回条数。"""
+    """查询资讯列表，可按分类筛选与关键词搜索，默认只显示已发布文章；limit 限制返回条数。
+
+    q 为标题/摘要/正文的关键词包含匹配（不区分大小写），与 search_articles_page 同语义。
+    """
     stmt = select(Article)
 
     if published_only:
@@ -933,6 +939,16 @@ def list_articles(
 
     if category:
         stmt = stmt.where(Article.category == category)
+
+    if q:
+        pattern = f"%{q.lower()}%"
+        stmt = stmt.where(
+            or_(
+                func.lower(Article.title).like(pattern),
+                func.lower(Article.summary).like(pattern),
+                func.lower(Article.body).like(pattern),
+            )
+        )
 
     stmt = stmt.order_by(
         Article.published_at.desc(),
@@ -1106,11 +1122,12 @@ def ensure_user_email_columns(engine: Engine) -> list[str]:
 # 不回填任何值——简介默认为空，由用户自行填写。
 _USER_PROFILE_COLUMNS: tuple[tuple[str, str], ...] = (
     ("bio", "TEXT"),
+    ("avatar_url", "VARCHAR(500)"),
 )
 
 
 def ensure_user_profile_columns(engine: Engine) -> list[str]:
-    """为已存在的 users 表补齐个人空间列（简介 bio），幂等，返回新增列名。
+    """为已存在的 users 表补齐个人空间列（简介 bio / 头像 avatar_url），幂等。
 
     与 ensure_user_email_columns 同一模式：create_all 只建新表、不给已有表加列，
     个人空间功能上线前创建的库需要在启动时补列，否则查询 bio 直接报错。
@@ -1213,6 +1230,32 @@ def ensure_content_year_column(engine: Engine) -> list[str]:
     return added
 
 
+# 封面按需下载：低热作品先只记远端地址，被访问时再下载回填 image_url。
+_CONTENT_REMOTE_IMAGE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("remote_image_url", "VARCHAR(500)"),
+)
+
+
+def ensure_content_remote_image_column(engine: Engine) -> list[str]:
+    """为已存在的 contents 表补齐 remote_image_url 列，幂等，返回新增列名。
+
+    历史库行留 NULL，表示「没记远端地址」，按需下载直接跳过、不报错。
+    """
+    inspector = inspect(engine)
+    if "contents" not in inspector.get_table_names():
+        return []
+
+    existing = {column["name"] for column in inspector.get_columns("contents")}
+    added: list[str] = []
+    for name, ddl in _CONTENT_REMOTE_IMAGE_COLUMNS:
+        if name in existing:
+            continue
+        with engine.begin() as connection:
+            connection.execute(text(f"ALTER TABLE contents ADD COLUMN {name} {ddl}"))
+        added.append(name)
+    return added
+
+
 # 所属系列（作品关系功能）：同系列的多季 / 剧场版指向 series 表同一行。
 _CONTENT_SERIES_COLUMNS: tuple[tuple[str, str], ...] = (
     ("series_id", "INTEGER"),
@@ -1239,6 +1282,73 @@ def ensure_content_series_column(engine: Engine) -> list[str]:
     return added
 
 
+# 收藏行新增的「名单标志 + 标注」列（历史库只能幂等 ALTER）。
+_CONTENT_FAVORITE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("favorited", "BOOLEAN NOT NULL DEFAULT 1"),
+    ("status", "VARCHAR(20)"),
+    ("status_updated_at", "DATETIME"),
+)
+
+
+def ensure_favorite_status_columns(engine: Engine) -> list[str]:
+    """为收藏行补齐 favorited / status / status_updated_at，并把旧标注表搬进来。
+
+    历史库的 content_favorites 只有 (user_id, content_id)，标注单独存在
+    content_status 表里。这里补列后一次性搬迁：已有收藏行只补状态列，
+    没有收藏行则插入一行（favorited=1——标注过的作品自动成为收藏），
+    搬完删掉旧表。旧表不存在（全新库 / 已迁移过）就只补列，天然幂等。
+    """
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    if "content_favorites" not in tables:
+        return []
+
+    existing = {column["name"] for column in inspector.get_columns("content_favorites")}
+    added: list[str] = []
+    for name, ddl in _CONTENT_FAVORITE_COLUMNS:
+        if name in existing:
+            continue
+        with engine.begin() as connection:
+            connection.execute(
+                text(f"ALTER TABLE content_favorites ADD COLUMN {name} {ddl}")
+            )
+        added.append(name)
+
+    if "content_status" not in tables:
+        return added
+
+    with engine.begin() as connection:
+        # 1) 只有标注、没有收藏行的作品：整行搬过来（标注过的自动成为收藏）
+        connection.execute(
+            text(
+                "INSERT INTO content_favorites "
+                "(user_id, content_id, favorited, status, status_updated_at, created_at) "
+                "SELECT cs.user_id, cs.content_id, 1, cs.status, cs.updated_at, cs.updated_at "
+                "FROM content_status cs "
+                "WHERE NOT EXISTS ("
+                "SELECT 1 FROM content_favorites cf "
+                "WHERE cf.user_id = cs.user_id AND cf.content_id = cs.content_id)"
+            )
+        )
+        # 2) 收藏与标注都有的作品：把标注值补进已有行（收藏时间保留原值）
+        connection.execute(
+            text(
+                "UPDATE content_favorites SET "
+                "status = (SELECT cs.status FROM content_status cs "
+                "WHERE cs.user_id = content_favorites.user_id "
+                "AND cs.content_id = content_favorites.content_id), "
+                "status_updated_at = (SELECT cs.updated_at FROM content_status cs "
+                "WHERE cs.user_id = content_favorites.user_id "
+                "AND cs.content_id = content_favorites.content_id) "
+                "WHERE EXISTS (SELECT 1 FROM content_status cs "
+                "WHERE cs.user_id = content_favorites.user_id "
+                "AND cs.content_id = content_favorites.content_id)"
+            )
+        )
+        connection.execute(text("DROP TABLE content_status"))
+    return added
+
+
 def ensure_content_meta_columns(engine: Engine) -> list[str]:
     """为已存在的 contents 表补齐客观信息列，幂等，返回新增列名。"""
     inspector = inspect(engine)
@@ -1252,6 +1362,32 @@ def ensure_content_meta_columns(engine: Engine) -> list[str]:
             continue
         with engine.begin() as connection:
             connection.execute(text(f"ALTER TABLE contents ADD COLUMN {name} {ddl}"))
+        added.append(name)
+    return added
+
+
+# 画像报告的自定义语气 / 追加提示词列（历史库同样只能幂等 ALTER）。
+_PERSONA_REPORT_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("tone_prompt", "TEXT"),
+    ("extra_prompt", "TEXT"),
+)
+
+
+def ensure_persona_report_columns(engine: Engine) -> list[str]:
+    """为已存在的 persona_reports 表补齐自定义语气 / 追加提示词列，幂等。"""
+    inspector = inspect(engine)
+    if "persona_reports" not in inspector.get_table_names():
+        return []
+
+    existing = {column["name"] for column in inspector.get_columns("persona_reports")}
+    added: list[str] = []
+    for name, ddl in _PERSONA_REPORT_COLUMNS:
+        if name in existing:
+            continue
+        with engine.begin() as connection:
+            connection.execute(
+                text(f"ALTER TABLE persona_reports ADD COLUMN {name} {ddl}")
+            )
         added.append(name)
     return added
 
@@ -1270,8 +1406,11 @@ def init_db(engine: Engine) -> int:
     ensure_user_profile_columns(engine)
     ensure_content_image_column(engine)
     ensure_content_year_column(engine)
+    ensure_content_remote_image_column(engine)
     ensure_content_series_column(engine)
+    ensure_favorite_status_columns(engine)
     ensure_content_meta_columns(engine)
+    ensure_persona_report_columns(engine)
     ensure_test_case_source_column(engine)
     db = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
     try:
@@ -1432,12 +1571,16 @@ MAX_BIO_LENGTH = 500
 # 防止单账号记录无限增长；收藏不设上限（收藏是用户主动行为，量级可控）。
 VIEW_HISTORY_LIMIT = 100
 
-# 作品标注：登录用户对作品的显式标记，与收藏互相独立。
+# 作品标注：登录用户对作品的显式标记，与收藏共处一行（见 models.ContentFavorite）。
+# 标注会自动把作品加入收藏；取消收藏不会清掉标注。
 CONTENT_STATUS_LABELS = {
     "seen": "看过",
     "unseen": "未看",
     "want": "想看",
 }
+
+# 列表筛选用：status=NULL 表示「在名单里但还没标注」，与三个标注值并列成筛选项。
+STATUS_FILTER_UNMARKED = "unmarked"
 
 # 词条申请：登录用户提交新增 / 修改提案，管理员审核通过后才写入 contents。
 CONTENT_TYPES = ("anime", "comic", "game", "novel")
@@ -1482,27 +1625,34 @@ def set_user_bio(db: Session, user: User, bio: str | None) -> User:
 def count_favorites(
     db: Session, user_id: int, content_type: str | None = None
 ) -> int:
-    """收藏作品数（个人空间统计卡）；指定 content_type 时只数该分类。"""
-    if content_type is None:
-        return (
-            db.scalar(
-                select(func.count())
-                .select_from(ContentFavorite)
-                .where(ContentFavorite.user_id == user_id)
-            )
-            or 0
+    """收藏作品数（个人空间统计卡）；指定 content_type 时只数该分类。
+
+    只数 favorited 行：取消过收藏但标注还在的作品不算在名单里。
+    """
+    stmt = (
+        select(func.count())
+        .select_from(ContentFavorite)
+        .where(
+            ContentFavorite.user_id == user_id,
+            ContentFavorite.favorited.is_(True),
         )
-    return (
-        db.scalar(
-            select(func.count())
-            .select_from(ContentFavorite)
-            .join(Content, Content.id == ContentFavorite.content_id)
-            .where(
-                ContentFavorite.user_id == user_id,
-                Content.type == content_type,
-            )
+    )
+    if content_type is not None:
+        stmt = stmt.join(Content, Content.id == ContentFavorite.content_id).where(
+            Content.type == content_type
         )
-        or 0
+    return db.scalar(stmt) or 0
+
+
+def _get_favorite_row(
+    db: Session, user_id: int, content_id: int
+) -> ContentFavorite | None:
+    """取用户与作品的关系行（不论是否仍在收藏名单里）。"""
+    return db.scalar(
+        select(ContentFavorite).where(
+            ContentFavorite.user_id == user_id,
+            ContentFavorite.content_id == content_id,
+        )
     )
 
 
@@ -1513,6 +1663,7 @@ def is_favorite(db: Session, user_id: int, content_id: int) -> bool:
             select(ContentFavorite.id).where(
                 ContentFavorite.user_id == user_id,
                 ContentFavorite.content_id == content_id,
+                ContentFavorite.favorited.is_(True),
             )
         )
         is not None
@@ -1520,38 +1671,66 @@ def is_favorite(db: Session, user_id: int, content_id: int) -> bool:
 
 
 def add_favorite(db: Session, user_id: int, content_id: int) -> bool:
-    """收藏作品；已收藏时返回 False（幂等，不产生重复行）。"""
-    if is_favorite(db, user_id, content_id):
+    """收藏作品；已收藏时返回 False（幂等，不产生重复行）。
+
+    取消过收藏但标注还在的作品直接复用原行：把 favorited 翻回 True，
+    标注原样恢复可见。
+    """
+    row = _get_favorite_row(db, user_id, content_id)
+    if row is None:
+        db.add(
+            ContentFavorite(user_id=user_id, content_id=content_id, favorited=True)
+        )
+        db.commit()
+        return True
+    if row.favorited:
         return False
-    db.add(ContentFavorite(user_id=user_id, content_id=content_id))
+    row.favorited = True
     db.commit()
     return True
 
 
 def remove_favorite(db: Session, user_id: int, content_id: int) -> bool:
-    """取消收藏；返回是否真的删除了一行（幂等）。"""
-    result = db.execute(
-        sa_delete(ContentFavorite).where(
-            ContentFavorite.user_id == user_id,
-            ContentFavorite.content_id == content_id,
-        )
-    )
+    """取消收藏；返回是否真的取消了（幂等）。
+
+    **不动标注**：只把 favorited 置 False。收藏了但没看是名单里的常态，
+    看过 / 想看是耐久事实，移出名单不该把它抹掉；行里两个字段都空了才删行。
+    """
+    row = _get_favorite_row(db, user_id, content_id)
+    if row is None or not row.favorited:
+        return False
+    row.favorited = False
+    if row.status is None:
+        db.delete(row)
     db.commit()
-    return bool(result.rowcount)
+    return True
 
 
 def clear_favorites(
     db: Session, user_id: int, content_type: str | None = None
 ) -> int:
-    """清空收藏，返回删除行数；指定 content_type 时只清空该分类。"""
-    stmt = sa_delete(ContentFavorite).where(ContentFavorite.user_id == user_id)
+    """清空收藏，返回取消收藏的条数；指定 content_type 时只清空该分类。
+
+    语义与单条取消一致：标注保留（只是不再出现在名单里），空壳行顺手删掉。
+    """
+    stmt = update(ContentFavorite).where(
+        ContentFavorite.user_id == user_id,
+        ContentFavorite.favorited.is_(True),
+    )
     if content_type is not None:
         stmt = stmt.where(
             ContentFavorite.content_id.in_(
                 select(Content.id).where(Content.type == content_type)
             )
         )
-    result = db.execute(stmt)
+    result = db.execute(stmt.values(favorited=False))
+    db.execute(
+        sa_delete(ContentFavorite).where(
+            ContentFavorite.user_id == user_id,
+            ContentFavorite.favorited.is_(False),
+            ContentFavorite.status.is_(None),
+        )
+    )
     db.commit()
     return result.rowcount or 0
 
@@ -1562,18 +1741,27 @@ def list_favorites(
     page: int = 1,
     page_size: int = 20,
     content_type: str | None = None,
+    status: str | None = None,
 ) -> tuple[int, list[Content]]:
     """收藏作品分页（按收藏时间倒序）：内连接 contents，作品已删则不展示。
 
-    content_type 不为空时按内容类型筛选，对应个人空间「追番 / 追漫 / 追书 / 追游」分类。
+    - content_type 非空时按内容类型筛选（追番 / 漫画 / 游戏 / 轻小说）；
+    - status 非空时按标注筛选；传 ``STATUS_FILTER_UNMARKED`` 筛「未标注」。
     """
     base = (
         select(Content)
         .join(ContentFavorite, ContentFavorite.content_id == Content.id)
-        .where(ContentFavorite.user_id == user_id)
+        .where(
+            ContentFavorite.user_id == user_id,
+            ContentFavorite.favorited.is_(True),
+        )
     )
     if content_type is not None:
         base = base.where(Content.type == content_type)
+    if status == STATUS_FILTER_UNMARKED:
+        base = base.where(ContentFavorite.status.is_(None))
+    elif status is not None:
+        base = base.where(ContentFavorite.status == status)
     total = (
         db.scalar(select(func.count()).select_from(base.order_by(None).subquery())) or 0
     )
@@ -1593,24 +1781,30 @@ def list_favorites(
 def favorite_type_counts(db: Session, user_id: int) -> dict[str, int]:
     """按内容类型统计收藏数，供个人空间分类筛选条展示各分类条数。
 
-    只统计仍能在 contents 中找到的作品（与列表内连接语义一致）。
+    只统计仍能在 contents 中找到、且仍在名单里的作品（与列表语义一致）。
     """
     rows = db.execute(
         select(Content.type, func.count())
         .select_from(ContentFavorite)
         .join(Content, Content.id == ContentFavorite.content_id)
-        .where(ContentFavorite.user_id == user_id)
+        .where(
+            ContentFavorite.user_id == user_id,
+            ContentFavorite.favorited.is_(True),
+        )
         .group_by(Content.type)
     ).all()
     return {content_type: count for content_type, count in rows}
 
 
 def get_content_status(db: Session, user_id: int, content_id: int) -> str | None:
-    """取用户对某作品的标注；未标注返回 None。"""
+    """取用户对某作品的标注；未标注返回 None。
+
+    不看 favorited：取消收藏后标注仍然有效（详情页照样显示已标注）。
+    """
     return db.scalar(
-        select(ContentStatus.status).where(
-            ContentStatus.user_id == user_id,
-            ContentStatus.content_id == content_id,
+        select(ContentFavorite.status).where(
+            ContentFavorite.user_id == user_id,
+            ContentFavorite.content_id == content_id,
         )
     )
 
@@ -1622,9 +1816,10 @@ def get_content_statuses(
     if not content_ids:
         return {}
     rows = db.execute(
-        select(ContentStatus.content_id, ContentStatus.status).where(
-            ContentStatus.user_id == user_id,
-            ContentStatus.content_id.in_(content_ids),
+        select(ContentFavorite.content_id, ContentFavorite.status).where(
+            ContentFavorite.user_id == user_id,
+            ContentFavorite.content_id.in_(content_ids),
+            ContentFavorite.status.is_not(None),
         )
     ).all()
     return {content_id: status for content_id, status in rows}
@@ -1633,25 +1828,47 @@ def get_content_statuses(
 def set_content_status(
     db: Session, user_id: int, content_id: int, status: str
 ) -> str:
-    """设置 / 更新作品标注（同一作品只保留一条），返回写入的标注值。
+    """写作品标注（看过 / 未看 / 想看），同一作品只保留一条，**并自动收藏**。
 
-    status 非法时抛 ValueError，由路由层决定如何回显。
+    没有关系行就建一行（favorited=True）；有行就更新标注并把 favorited 置回 True
+    ——标注过的作品天然是名单成员。返回写入的标注值；非法值抛 ValueError。
     """
     if status not in CONTENT_STATUS_LABELS:
         raise ValueError(f"不支持的标注：{status}")
-    row = db.scalar(
-        select(ContentStatus).where(
-            ContentStatus.user_id == user_id,
-            ContentStatus.content_id == content_id,
-        )
-    )
+    row = _get_favorite_row(db, user_id, content_id)
+    now = datetime.now()
     if row is None:
-        db.add(ContentStatus(user_id=user_id, content_id=content_id, status=status))
+        db.add(
+            ContentFavorite(
+                user_id=user_id,
+                content_id=content_id,
+                favorited=True,
+                status=status,
+                status_updated_at=now,
+            )
+        )
     else:
         row.status = status
-        row.updated_at = datetime.now()
+        row.status_updated_at = now
+        row.favorited = True
     db.commit()
     return status
+
+
+def clear_content_status(db: Session, user_id: int, content_id: int) -> bool:
+    """清除标注：收藏不受影响，返回是否真的清掉了标注（幂等）。
+
+    行里两个字段都空了（本来就没收藏）才删行，不留空壳。
+    """
+    row = _get_favorite_row(db, user_id, content_id)
+    if row is None or row.status is None:
+        return False
+    row.status = None
+    row.status_updated_at = None
+    if not row.favorited:
+        db.delete(row)
+    db.commit()
+    return True
 
 
 def list_content_status(
@@ -1661,22 +1878,25 @@ def list_content_status(
     page_size: int = 20,
     status: str | None = None,
 ) -> tuple[int, list[tuple[Content, str, datetime]]]:
-    """标注作品分页（按更新时间倒序）：内连接 contents，作品已删则不展示。
+    """有标注的作品分页（按标注时间倒序），供阿宅画像等场景使用。
 
-    返回 (总数, [(内容, 标注, 更新时间)])；status 非空时按标注值筛选。
+    返回 (总数, [(内容, 标注, 标注时间)])；不论是否仍在收藏名单里。
     """
     base = (
-        select(Content, ContentStatus.status, ContentStatus.updated_at)
-        .join(ContentStatus, ContentStatus.content_id == Content.id)
-        .where(ContentStatus.user_id == user_id)
+        select(Content, ContentFavorite.status, ContentFavorite.status_updated_at)
+        .join(ContentFavorite, ContentFavorite.content_id == Content.id)
+        .where(
+            ContentFavorite.user_id == user_id,
+            ContentFavorite.status.is_not(None),
+        )
     )
     if status is not None:
-        base = base.where(ContentStatus.status == status)
+        base = base.where(ContentFavorite.status == status)
     total = (
         db.scalar(select(func.count()).select_from(base.order_by(None).subquery())) or 0
     )
     rows = db.execute(
-        base.order_by(ContentStatus.updated_at.desc(), Content.id.desc())
+        base.order_by(ContentFavorite.status_updated_at.desc(), Content.id.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)
     ).all()
@@ -1686,26 +1906,37 @@ def list_content_status(
 def count_content_status(
     db: Session, user_id: int, status: str | None = None
 ) -> int:
-    """标注作品数；指定 status 时只数该标注。"""
+    """有标注的作品数（不论是否仍在收藏名单里）；指定 status 时只数该标注。"""
     stmt = (
         select(func.count())
-        .select_from(ContentStatus)
-        .join(Content, Content.id == ContentStatus.content_id)
-        .where(ContentStatus.user_id == user_id)
+        .select_from(ContentFavorite)
+        .join(Content, Content.id == ContentFavorite.content_id)
+        .where(
+            ContentFavorite.user_id == user_id,
+            ContentFavorite.status.is_not(None),
+        )
     )
     if status is not None:
-        stmt = stmt.where(ContentStatus.status == status)
+        stmt = stmt.where(ContentFavorite.status == status)
     return db.scalar(stmt) or 0
 
 
 def content_status_counts(db: Session, user_id: int) -> dict[str, int]:
-    """按标注值统计条数（看过 / 未看 / 想看），供个人空间统计卡。"""
+    """按标注值统计「收藏名单内」的条数（看过 / 未看 / 想看），供统计卡与筛选条。
+
+    只数 favorited 行：取消收藏后标注虽然保留，但不在列表里，
+    计数跟着列表走，避免数字对不上。
+    """
     rows = db.execute(
-        select(ContentStatus.status, func.count())
-        .select_from(ContentStatus)
-        .join(Content, Content.id == ContentStatus.content_id)
-        .where(ContentStatus.user_id == user_id)
-        .group_by(ContentStatus.status)
+        select(ContentFavorite.status, func.count())
+        .select_from(ContentFavorite)
+        .join(Content, Content.id == ContentFavorite.content_id)
+        .where(
+            ContentFavorite.user_id == user_id,
+            ContentFavorite.favorited.is_(True),
+            ContentFavorite.status.is_not(None),
+        )
+        .group_by(ContentFavorite.status)
     ).all()
     return {status: count for status, count in rows}
 
@@ -2101,40 +2332,46 @@ def import_works_to_site(
             targets.append((content_id, site_status))
 
     if targets:
-        target_ids = [content_id for content_id, _ in targets]
-        favorites: set[int] = set()
-        marks: dict[int, str] = {}
+        # 同一作品只保留一条关系行：先按作品去重，再批量取已有行（避免 N+1）
+        planned: dict[int, str] = {}
+        for content_id, site_status in targets:
+            planned.setdefault(content_id, site_status)
+        target_ids = list(planned)
+        rows: dict[int, ContentFavorite] = {}
         for start in range(0, len(target_ids), _ID_CHUNK):
             chunk = target_ids[start : start + _ID_CHUNK]
-            favorites.update(
-                int(value)
-                for value in db.scalars(
-                    select(ContentFavorite.content_id).where(
-                        ContentFavorite.user_id == user_id,
-                        ContentFavorite.content_id.in_(chunk),
-                    )
-                )
-            )
-            for content_id, status in db.execute(
-                select(ContentStatus.content_id, ContentStatus.status).where(
-                    ContentStatus.user_id == user_id,
-                    ContentStatus.content_id.in_(chunk),
+            for row in db.scalars(
+                select(ContentFavorite).where(
+                    ContentFavorite.user_id == user_id,
+                    ContentFavorite.content_id.in_(chunk),
                 )
             ):
-                marks[int(content_id)] = status
+                rows[int(row.content_id)] = row
 
-        for content_id, site_status in targets:
-            if content_id not in favorites:
-                db.add(ContentFavorite(user_id=user_id, content_id=content_id))
-                favorites.add(content_id)
-                stats["favorited"] += 1
-            if content_id not in marks:
+        for content_id, site_status in planned.items():
+            row = rows.get(content_id)
+            now = datetime.now()
+            if row is None:
+                # 收藏与标注是同一行：标注过的作品天然进入名单
                 db.add(
-                    ContentStatus(
-                        user_id=user_id, content_id=content_id, status=site_status
+                    ContentFavorite(
+                        user_id=user_id,
+                        content_id=content_id,
+                        favorited=True,
+                        status=site_status,
+                        status_updated_at=now,
                     )
                 )
-                marks[content_id] = site_status
+                stats["favorited"] += 1
+                stats["marked"] += 1
+                continue
+            if not row.favorited:
+                row.favorited = True
+                stats["favorited"] += 1
+            # 已有手动标注不覆盖（与「不覆盖人工维护数据」的约定一致）
+            if row.status is None:
+                row.status = site_status
+                row.status_updated_at = now
                 stats["marked"] += 1
 
     db.commit()
@@ -2195,14 +2432,6 @@ def undo_site_imports(db: Session, user_id: int) -> dict:
             )
             or db.scalar(
                 select(func.count())
-                .select_from(ContentStatus)
-                .where(
-                    ContentStatus.content_id == content_id,
-                    ContentStatus.user_id != user_id,
-                )
-            )
-            or db.scalar(
-                select(func.count())
                 .select_from(ContentViewHistory)
                 .where(
                     ContentViewHistory.content_id == content_id,
@@ -2225,9 +2454,6 @@ def undo_site_imports(db: Session, user_id: int) -> dict:
         db.execute(sa_delete(ContentTag).where(ContentTag.content_id == content_id))
         db.execute(
             sa_delete(ContentFavorite).where(ContentFavorite.content_id == content_id)
-        )
-        db.execute(
-            sa_delete(ContentStatus).where(ContentStatus.content_id == content_id)
         )
         db.execute(
             sa_delete(ContentViewHistory).where(
@@ -2266,6 +2492,8 @@ def save_persona_report(
     payload: dict,
     narrative: str | None = None,
     source: str = "template",
+    tone_prompt: str | None = None,
+    extra_prompt: str | None = None,
 ) -> PersonaReport:
     """新建或覆盖某账号的画像报告（重新生成即覆盖）。"""
     row = get_persona_report(db, user_id)
@@ -2277,6 +2505,8 @@ def save_persona_report(
     row.payload = payload
     row.narrative = narrative
     row.narrative_source = source
+    row.tone_prompt = tone_prompt
+    row.extra_prompt = extra_prompt
     row.generated_at = datetime.now()
     db.commit()
     db.refresh(row)

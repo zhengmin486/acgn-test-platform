@@ -770,7 +770,9 @@ class TestSchedulePages:
         assert "周六" in resp.text
         assert 'referrerpolicy="no-referrer"' in resp.text  # 热链图片需要该属性
         assert "https://www.bilibili.com/" in resp.text
-        assert "Yuc.wiki 来源" in resp.text
+        # 去显著化（2026-10-18）：卡片不再外链 Yuc.wiki，封面点击落到站内搜索
+        assert "Yuc" not in resp.text
+        assert "/contents?q=" in resp.text
         assert "/manage/sync/runs" in resp.text  # 导航入口
 
     def test_schedule_page_season_switch_and_filter(self, seeded):
@@ -800,7 +802,9 @@ class TestSchedulePages:
         try:
             resp = client.get("/schedule")
             assert resp.status_code == 200
-            assert "暂无已同步" in resp.text
+            # 空态面向访客：不再渲染同步脚本命令行（去显著化）
+            assert "整理中" in resp.text
+            assert "sync_yuc_schedule" not in resp.text
             runs = client.get("/manage/sync/runs")
             assert runs.status_code == 200
             assert "暂无同步记录" in runs.text

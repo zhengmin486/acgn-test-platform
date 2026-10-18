@@ -28,7 +28,7 @@ from sqlalchemy.orm import sessionmaker
 from app import crud, entity_links
 from app.database import Base, get_db
 from app.main import app
-from app.models import Content, ContentEntityLink, Entity, Series
+from app.models import Content
 from auth_helpers import create_accounts, login_as_admin, login_as_user
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -417,13 +417,13 @@ class TestEntityCrud:
     def test_add_link_idempotent(self, factory):
         db = factory()
         try:
-            ok, message = crud.add_content_entity_link(db, 1, "晓枣", "原作")
+            ok, _message = crud.add_content_entity_link(db, 1, "晓枣", "原作")
             assert ok is True
             ok2, message2 = crud.add_content_entity_link(db, 1, "晓枣", "原作")
             assert ok2 is True
             assert "已存在" in message2
             assert crud.count_content_entity_links(db, 1) == 1
-            ok3, _ = crud.add_content_entity_link(db, 1, "  ", "原作")
+            ok3, _message = crud.add_content_entity_link(db, 1, "  ", "原作")
             assert ok3 is False
         finally:
             db.close()
@@ -771,9 +771,12 @@ class TestBackfillCli:
         assert summary.failed == 2
         assert all(outcome.status == "failed" for outcome in summary.outcomes if outcome.status != "skipped")
 
-    def test_exit_codes(self, factory, capsys):
+    def test_exit_codes(self, factory, monkeypatch):
+        # main 内部构建 fetcher：替换为离线假函数，避免真实网络请求
         payloads = {100: _infobox_payload(100, [])}
-        fetch, fetch_related = _cli_fetches(payloads)
+        monkeypatch.setattr(
+            link_entities, "build_fetchers", lambda **kwargs: _cli_fetches(payloads)
+        )
         assert (
             link_entities.main(
                 ["--content-id", "9999"], session_factory=factory

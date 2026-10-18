@@ -11,6 +11,7 @@
 - 表单写操作统一 PRG：303 + 查询参数回显。
 """
 
+import re
 from datetime import datetime
 
 from fastapi import APIRouter, Form, Query, Request
@@ -19,16 +20,29 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from app import crud, sync_tasks
 from app.admin_common import (
     actor_id as _actor_id,
+)
+from app.admin_common import (
     collect_ids as _collect_ids,
+)
+from app.admin_common import (
     form_text as _form_text,
+)
+from app.admin_common import (
     page_count as _pages,
+)
+from app.admin_common import (
     page_param as _page_param,
+)
+from app.admin_common import (
     short_text as _short,
+)
+from app.admin_common import (
     url_with as _url,
 )
 from app.business_pages import CONTENT_TYPE_LABELS, WEEKDAY_NAMES
 from app.database import SessionLocal
 from app.page_common import DbSession, render_missing, templates
+from scripts.import_bangumi import random_import, run_import
 from scripts.sync_yuc_schedule import SeasonNotFoundError, YucFetchError, run_sync
 
 router = APIRouter(tags=["content-admin"])
@@ -534,6 +548,7 @@ def _render_sync_page(
     """
     spec = sync_tasks.get_task(task_key) or sync_tasks.TASKS[0]
     total, runs = crud.list_sync_task_runs(db, limit=SYNC_HISTORY_LIMIT)
+    seasons = crud.list_schedule_seasons(db)
     return templates.TemplateResponse(
         request=request,
         name="admin_sync.html",
@@ -541,7 +556,8 @@ def _render_sync_page(
             "spec": spec,
             "tasks": sync_tasks.TASKS,
             "task_labels": sync_tasks.task_labels(),
-            "seasons": crud.list_schedule_seasons(db),
+            "seasons": seasons,
+            "season_suggestions": sync_tasks.suggest_season_codes(seasons),
             "categories": sync_tasks.article_categories(),
             "result": result,
             "can_confirm": can_confirm,
@@ -646,6 +662,183 @@ def sync_apply_page(
             _url("/manage/sync", **base, run=result.run_id), status_code=303
         )
     return RedirectResponse(_url("/manage/sync", **base), status_code=303)
+
+
+# ---------- 随机导入作品（随机偏移翻 Bangumi 排行榜页抽样导入） ----------
+
+RANDOM_COUNT_DEFAULT = 20
+RANDOM_COUNT_MAX = 100
+RANDOM_TYPE_OPTIONS = (
+    ("all", "动画 + 游戏"),
+    ("anime", "仅动画"),
+    ("game", "仅游戏"),
+)
+
+
+def _random_subject_types(rtype: str) -> tuple[int, ...]:
+    """页面类型筛选 -> Bangumi 条目类型元组（与 TYPE_MAPPING 一致：2 动画 / 4 游戏）。"""
+    rtype = (rtype or "all").strip().lower()
+    if rtype == "anime":
+        return (2,)
+    if rtype == "game":
+        return (4,)
+    return (2, 4)
+
+
+def _random_result_payload(
+    summary, *, requested: int, sampled: list[int], mode: str,
+    pages: int = 0, candidates: int = 0, duplicates: int = 0,
+    nsfw_skipped: int = 0, rank_total: int | None = None,
+) -> dict:
+    """把 ImportSummary 拼成模板可读的结果字典（与 admin_sync.html 字段对齐）。
+
+    pages / candidates / duplicates / nsfw_skipped / rank_total 是随机翻页统计：
+    翻了几页、攒到多少新候选、本地跳过多少已入库与 nsfw，让命中情况一目了然。
+    """
+    return {
+        "mode": mode,
+        "requested": requested,
+        "sampled": sampled,
+        "pages": pages,
+        "candidates": candidates,
+        "dup_skipped": duplicates,
+        "nsfw_skipped": nsfw_skipped,
+        "rank_total": rank_total,
+        "added": summary.imported,
+        "preview": summary.preview,
+        "duplicates": summary.duplicates,
+        "skipped": summary.skipped,
+        "failed": summary.failed,
+        "pending": summary.importable,
+        "details": [
+            {"status": o.status, "title": o.title, "reason": o.reason}
+            for o in summary.outcomes
+        ],
+    }
+
+
+@router.get("/manage/import-random", response_class=HTMLResponse)
+def import_random_page(
+    request: Request,
+    db: DbSession,
+    count: str = Query(default="20"),
+    rtype: str = Query(default="all"),
+    error: str = Query(default=""),
+):
+    """随机导入表单页：抓取条数（1-100 可调）+ 类型筛选。"""
+    rtype = rtype if rtype in ("all", "anime", "game") else "all"
+    try:
+        count_val = max(1, min(RANDOM_COUNT_MAX, int(count)))
+    except (TypeError, ValueError):
+        count_val = RANDOM_COUNT_DEFAULT
+    return templates.TemplateResponse(
+        request=request,
+        name="import_random.html",
+        context={
+            "count": count_val,
+            "rtype": rtype,
+            "type_options": RANDOM_TYPE_OPTIONS,
+            "count_max": RANDOM_COUNT_MAX,
+            "error": error,
+            "result": None,
+            "detail_labels": sync_tasks.DETAIL_LABELS,
+        },
+    )
+
+
+@router.post("/manage/import-random", response_class=HTMLResponse)
+def import_random_action(
+    request: Request,
+    db: DbSession,
+    action: str = Form(default="preview"),
+    count: str = Form(default="20"),
+    rtype: str = Form(default="all"),
+    ids: str = Form(default=""),
+):
+    """随机导入：预览（随机翻榜页 + 抽样 + 预映射，不写库）/ 确认写入（锁定预览 ids）。
+
+    确认写入必须复用预览时抽样得到的 ids，否则重新随机会抽到不同的作品。
+    """
+    rtype = rtype if rtype in ("all", "anime", "game") else "all"
+    if action == "apply":
+        # 确认写入：使用预览时锁定的 ids，避免重新随机抽到不同作品
+        id_tokens = [t for t in re.split(r"[\s,，、;；]+", ids or "") if t.isdigit()]
+        sampled = [int(t) for t in id_tokens]
+        if not sampled:
+            return RedirectResponse(
+                _url("/manage/import-random", error="缺少可写入的条目，请重新预览"),
+                status_code=303,
+            )
+        summary = run_import(sampled, session_factory=SessionLocal, apply=True)
+        payload = _random_result_payload(
+            summary, requested=len(sampled), sampled=sampled, mode="apply",
+        )
+        return templates.TemplateResponse(
+            request=request,
+            name="import_random.html",
+            context={
+                "count": len(sampled),
+                "rtype": rtype,
+                "type_options": RANDOM_TYPE_OPTIONS,
+                "count_max": RANDOM_COUNT_MAX,
+                "error": "",
+                "result": payload,
+                "detail_labels": sync_tasks.DETAIL_LABELS,
+            },
+        )
+
+    # 预览：随机偏移翻榜页 + 本地过滤已入库 / nsfw + 随机抽样 + 预映射（不写库）
+    try:
+        count_val = int(count)
+    except (TypeError, ValueError):
+        count_val = RANDOM_COUNT_DEFAULT
+    if count_val < 1 or count_val > RANDOM_COUNT_MAX:
+        return RedirectResponse(
+            _url("/manage/import-random", error=f"抓取条数需在 1-{RANDOM_COUNT_MAX} 之间"),
+            status_code=303,
+        )
+    subject_types = _random_subject_types(rtype)
+    res = random_import(
+        session_factory=SessionLocal,
+        count=count_val,
+        subject_types=subject_types,
+        apply=False,
+    )
+    if res.pages == 0:
+        return RedirectResponse(
+            _url(
+                "/manage/import-random",
+                error="无法访问 Bangumi 排行榜，请检查代理 / 网络后重试",
+            ),
+            status_code=303,
+        )
+    if not res.sampled:
+        return RedirectResponse(
+            _url(
+                "/manage/import-random",
+                error="候选页里已没有未入库的新作品，可换个类型再试或稍后再来",
+            ),
+            status_code=303,
+        )
+    payload = _random_result_payload(
+        res.summary, requested=res.requested, sampled=res.sampled, mode="preview",
+        pages=res.pages, candidates=res.candidates, duplicates=res.duplicates,
+        nsfw_skipped=res.nsfw_skipped, rank_total=res.rank_total,
+    )
+    return templates.TemplateResponse(
+        request=request,
+        name="import_random.html",
+        context={
+            "count": count_val,
+            "rtype": rtype,
+            "type_options": RANDOM_TYPE_OPTIONS,
+            "count_max": RANDOM_COUNT_MAX,
+            "error": "",
+            "result": payload,
+            "ids_str": ",".join(str(s) for s in res.sampled),
+            "detail_labels": sync_tasks.DETAIL_LABELS,
+        },
+    )
 
 
 # ---------- 词条审核 ----------

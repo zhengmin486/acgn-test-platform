@@ -5,8 +5,9 @@
 - 代理可配置：--proxy 参数或 BANGUMI_PROXY 环境变量，默认直连（不读取系统代理）。
 - 只用 Python 标准库（urllib），不新增第三方依赖。
 - 重复导入安全：bangumi_id 已存在时直接跳过，不覆盖本地数据。
-- 类型映射只支持 type=2（anime）、type=4（game）；书籍/音乐等类型明确跳过，
-  不会错误归类为漫画或小说。
+- 类型映射覆盖本站四类型：type=1（novel）、2（anime）、4（game）、6（comic）；
+  音乐（3）与三次元（5）明确跳过。注意「书籍」分区里小说与漫画混在一起，
+  必须按条目 type 区分，不能按分区归类。
 - rating 只取 API 返回的有效评分（rating.score > 0），取不到就跳过，不伪造。
 - **标签随作品一起导入**：取 API tags 中标注数（count）最多的前
   ``MAX_TAGS_PER_SUBJECT`` 个，经 ``crud.replace_content_tags`` 替换式写入
@@ -44,6 +45,7 @@ import argparse
 import http.client
 import json
 import os
+import random
 import sys
 import time
 import urllib.error
@@ -79,19 +81,45 @@ DEFAULT_RETRIES = 2  # 失败后的重试次数（总请求次数 = 1 + retries�
 # 避免标签刷屏稀释筛选意义；与 crud.MAX_CONTENT_TAGS 保持一致（两侧各自兜底）。
 MAX_TAGS_PER_SUBJECT = crud.MAX_CONTENT_TAGS
 
-# Bangumi 条目类型 -> 本站 Content.type；其余类型（1 书籍 / 3 音乐 / 5 三次元）明确跳过。
-TYPE_MAPPING: dict[int, str] = {2: "anime", 4: "game"}
-TYPE_NAMES: dict[int, str] = {1: "书籍", 2: "动画", 3: "音乐", 4: "游戏", 5: "三次元"}
+# Bangumi 条目类型 -> 本站 Content.type。
+# 站点四个类型（anime / comic / game / novel）都覆盖：Bangumi 的「书籍」分区里
+# type=1 是小说、type=6 是漫画，两者都要，所以不能只按分区归类，必须按条目 type 分。
+# 剩余 type=3 音乐 / type=5 三次元不属于本站四类型，明确跳过。
+TYPE_MAPPING: dict[int, str] = {1: "novel", 2: "anime", 4: "game", 6: "comic"}
+TYPE_NAMES: dict[int, str] = {1: "书籍", 2: "动画", 3: "音乐", 4: "游戏", 5: "三次元", 6: "漫画"}
 
 # 这些 HTTP 状态码值得重试（限流或服务端临时故障）；4xx 其余状态直接失败。
 RETRYABLE_HTTP_STATUS = {429, 500, 502, 503, 504}
 
 TITLE_MAX_LENGTH = 200  # 与 Content.title 的 String(200) 一致
 
+# ---------- 随机导入：随机偏移翻排行榜页 ----------
+# Bangumi 没有「随机条目」官方接口。两条路线各有代价：
+# - 随机探测条目 ID：ID 空间稀疏（删除条目留洞）+ 类型过滤，命中率只有个位数
+#   百分比，拿 20 条要试几百个请求，需要请求预算 / 熔断 / 死线一整套护栏；
+# - 攒头部候选池再抽样（旧方案）：只覆盖排行榜头部几百条，库越长越像 Top 榜
+#   大杂烩，而且重复发现要等到入库才发生，「随机 20 条」实际可能只新增几条。
+# 现方案：排行榜接口带分页与 total，先取 offset=0 学习该类型榜单总量，再在
+# [0, total-limit] 里随机抽偏移取页——一页 30 个保证有效、类型正确的候选 ID，
+# 本地过滤已入库与 nsfw 后抽样。每拿 20 条只要 2-3 个请求，护栏只剩页数上限。
+# 候选只取本站支持的类型（1=书籍/小说、2=动画、4=游戏、6=漫画），与 TYPE_MAPPING 保持一致。
+
+RANK_PAGE_LIMIT = 30  # 排行榜单页条数
+RANK_SORT = "rank"  # 固定用综合排序：偏移随机化后，排序本身不再影响覆盖面
+RANK_SLEEP = 0.3  # 翻页间歇（秒），避免触发限流
+RANDOM_PAGE_BUDGET = 10  # 单次随机导入最多请求多少页排行榜（10 页 = 300 个候选）
+RANDOM_PAGE_SHARE = 15  # 每页计划贡献的抽样数：count 超过它就多翻几页混开批内多样性
+
 # ---------- 封面图 ----------
 
-# Bangumi images 字段里的尺寸键，按偏好从大到小取（large 优先）。
-COVER_SIZE_PREFERENCE = ("large", "common", "medium")
+# Bangumi images 字段里的尺寸键，按偏好顺序取。
+#
+# **medium（r/800）优先而非 large**：实测同一封面 medium 比 large 原图小
+# 12–30%（例：428x606 的 68KB vs 60KB；849x1200 的 217KB vs 170KB），
+# 而本站封面最终都要经 /media/full 压到 ≤1200px/≤400KB 的 WebP，
+# 用 medium 几乎无损却省下三成带宽。1000 部作品按 30% 算就是省 20 MB 上行。
+# large 留作 medium 缺失时的兜底。
+COVER_SIZE_PREFERENCE = ("medium", "common", "large")
 
 # 封面文件大小上限：Bangumi 封面一般几十~几百 KB，5 MB 足够兜底异常响应。
 COVER_MAX_BYTES = 5 * 1024 * 1024
@@ -113,10 +141,10 @@ class CoverDownloadError(RuntimeError):
 
 
 def extract_cover_url(payload: dict) -> str | None:
-    """从 Bangumi 条目 JSON 提取封面地址：按尺寸偏好取最大的一张。
+    """从 Bangumi 条目 JSON 提取封面地址：按 COVER_SIZE_PREFERENCE 取第一张可用图。
 
     - images 形如 ``{"large": url, "common": url, "medium": url, ...}``；
-    - 按 COVER_SIZE_PREFERENCE 顺序找第一个非空 http(s) 地址；
+    - 按 COVER_SIZE_PREFERENCE 顺序找第一个非空 http(s) 地址（medium 优先，省带宽）；
     - 字段缺失 / 不是字典 / 全部为空时返回 None——封面是可选增强，
       取不到不影响作品本身入库（模板回退渐变占位图）。
     """
@@ -293,6 +321,15 @@ class SubjectOutcome:
             parts.append(f"- {self.reason}")
         return " ".join(parts)
 
+    def as_dict(self) -> dict:
+        """转成可 JSON 序列化的明细（增量入库 API 的逐条返回用，见 app/ingest_api）。"""
+        return {
+            "bangumi_id": self.bangumi_id,
+            "status": self.status,
+            "title": self.title,
+            "reason": self.reason,
+        }
+
 
 @dataclass
 class ImportSummary:
@@ -325,6 +362,28 @@ class ImportSummary:
                 f"  失败：{self.failed}",
             ]
         )
+
+
+@dataclass
+class RandomImportResult:
+    """随机导入一次运行的汇总：翻页统计 + 实际抽样 ID + 入库汇总。
+
+    统计口径（都用于结果页回显，让命中 / 重复 / 过滤情况一目了然）：
+    - pages：实际请求成功的排行榜页数（含每个类型首个用于学习 total 的页）；
+    - candidates：去重后、库里没有的新候选 ID 数（抽样的总体）；
+    - duplicates：因已入库被本地过滤的候选出现次数（零网络成本跳过）；
+    - nsfw_skipped：页载荷显式标记 nsfw 而被过滤的条数；
+    - rank_total：响应里读到的榜单总量（各类型取最大，读不到为 None），仅回显用。
+    """
+
+    requested: int
+    sampled: list[int]
+    summary: ImportSummary
+    pages: int = 0
+    candidates: int = 0
+    duplicates: int = 0
+    nsfw_skipped: int = 0
+    rank_total: int | None = None
 
 
 # ---------- 网络请求 ----------
@@ -463,6 +522,334 @@ def fetch_related_subjects(
     raise BangumiAPIError(f"获取条目 {subject_id} 的关联条目失败：{last_reason}（{url}）")
 
 
+# ---------- 排行榜随机翻页与随机导入 ----------
+
+
+@dataclass
+class RankPage:
+    """一页排行榜的解析结果。
+
+    - ids：本页有效条目 ID（已剔除非法值与显式标记 nsfw 的条目）；
+    - total：响应里的榜单总量，读不到为 None（此时无法随机偏移，只能取首页）；
+    - nsfw_skipped：因条目显式标记 nsfw 而被剔除的条数。
+    """
+
+    ids: list[int]
+    total: int | None = None
+    nsfw_skipped: int = 0
+
+
+def _rank_item_is_nsfw(item: dict) -> bool:
+    """排行榜条目是否显式标记 nsfw。
+
+    只认 ``item.subject.nsfw`` / ``item.nsfw`` 为真的情况；字段缺失一律放行
+    （不过滤），避免在响应结构跟预期不一致时误杀正常条目。
+    """
+    for source in (item.get("subject"), item):
+        if isinstance(source, dict) and source.get("nsfw"):
+            return True
+    return False
+
+
+def _fetch_rank_page(
+    subject_type: int,
+    sort: str,
+    *,
+    opener: urllib.request.OpenerDirector,
+    timeout: float = DEFAULT_TIMEOUT,
+    retries: int = DEFAULT_RETRIES,
+    user_agent: str = DEFAULT_USER_AGENT,
+    base_url: str = BANGUMI_API_BASE,
+    limit: int = RANK_PAGE_LIMIT,
+    offset: int = 0,
+    sleep=time.sleep,
+) -> RankPage:
+    """抓取一页排行榜并解析为 RankPage。
+
+    与 fetch_subject 同一套网络规则（UA / 超时 / 有限重试），解析的是
+    排行榜接口 ``GET /v0/rank/subject/{type}/{sort}?limit=&offset=`` 的响应：
+    ``{"list": [{"subject_id": ..., "subject": {"nsfw": ...}}, ...], "total": N}``。
+    subject_id 缺失时回退取 ``id``；total 非正整数按读不到处理；nsfw 只认
+    显式为真的标记；响应结构不对就抛 BangumiAPIError（与正文抓取一致，不猜结构）。
+    """
+    url = (
+        f"{base_url.rstrip('/')}/v0/rank/subject/{int(subject_type)}/{sort}"
+        f"?limit={int(limit)}&offset={int(offset)}"
+    )
+    last_reason = "未知错误"
+    for attempt in range(retries + 1):
+        if attempt:
+            sleep(min(0.5 * 2 ** (attempt - 1), 5))
+        try:
+            request = urllib.request.Request(
+                url,
+                headers={"User-Agent": user_agent, "Accept": "application/json"},
+            )
+            with opener.open(request, timeout=timeout) as response:
+                body = response.read()
+            payload = json.loads(body.decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            last_reason = f"HTTP {exc.code} {exc.reason}"
+            if exc.code in RETRYABLE_HTTP_STATUS and attempt < retries:
+                continue
+            raise BangumiAPIError(
+                f"获取排行榜（type={subject_type}, sort={sort}）失败：{last_reason}（{url}）"
+            ) from exc
+        except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
+            last_reason = f"网络错误：{exc}" if not isinstance(exc, TimeoutError) else "请求超时"
+            if attempt < retries:
+                continue
+            raise BangumiAPIError(
+                f"获取排行榜（type={subject_type}, sort={sort}）失败：{last_reason}（{url}）"
+            ) from exc
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            last_reason = f"响应不是有效 JSON：{exc}"
+            if attempt < retries:
+                continue
+            raise BangumiAPIError(
+                f"获取排行榜（type={subject_type}, sort={sort}）失败：{last_reason}（{url}）"
+            ) from exc
+
+        if not isinstance(payload, dict):
+            raise BangumiAPIError(
+                f"获取排行榜（type={subject_type}, sort={sort}）失败：响应不是对象（{url}）"
+            )
+        items = payload.get("list")
+        if not isinstance(items, list):
+            raise BangumiAPIError(
+                f"获取排行榜（type={subject_type}, sort={sort}）失败：缺少 list 字段（{url}）"
+            )
+        total = payload.get("total")
+        if isinstance(total, bool) or not isinstance(total, int) or total < 0:
+            total = None
+        ids: list[int] = []
+        nsfw_skipped = 0
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if _rank_item_is_nsfw(item):
+                nsfw_skipped += 1
+                continue
+            sid = item.get("subject_id")
+            if isinstance(sid, bool) or not isinstance(sid, int) or sid <= 0:
+                sid = item.get("id")
+            if isinstance(sid, int) and not isinstance(sid, bool) and sid > 0:
+                ids.append(sid)
+        return RankPage(ids=ids, total=total, nsfw_skipped=nsfw_skipped)
+
+    raise BangumiAPIError(
+        f"获取排行榜（type={subject_type}, sort={sort}）失败：{last_reason}（{url}）"
+    )
+
+
+def random_import(
+    *,
+    session_factory,
+    count: int,
+    subject_types: tuple[int, ...] = (2, 4),
+    apply: bool = False,
+    proxy: str | None = None,
+    timeout: float = DEFAULT_TIMEOUT,
+    retries: int = DEFAULT_RETRIES,
+    user_agent: str = DEFAULT_USER_AGENT,
+    base_url: str = BANGUMI_API_BASE,
+    fetch_page=None,
+    fetch_subject=None,
+    cover_downloader=None,
+    sleep=time.sleep,
+    rng=None,
+) -> RandomImportResult:
+    """随机抓取 ``count`` 条 Bangumi 作品并导入（预览或正式）。
+
+    流程：随机偏移翻排行榜页 -> 本地过滤已入库 / nsfw -> 抽样 -> 复用 run_import
+    入库。先取 offset=0 学习该类型的榜单总量 total，再在 [0, total-limit] 里随机
+    抽偏移取页，因此覆盖榜单全深度而不只是头部；一页 30 个保证有效的候选 ID，
+    拿 20 条通常只需 2-3 个请求。
+
+    剩余护栏（比随机探测条目 ID 的请求预算 / 熔断 / 死线轻得多）：
+    - 最多翻 ``RANDOM_PAGE_BUDGET`` 页；条数较多时按 ``RANDOM_PAGE_SHARE``
+      拆多页抽样，避免一批作品全来自同一排名段；
+    - 随机偏移失败（API 可能限制深翻页）时偏移减半回退直至 0，并记住该类型
+      实际可用的偏移上限；连 offset=0 都失败视为网络不可用，连续两页失败收手；
+    - 类型只有一页（total <= 单页条数）或读不到 total 时，取过一次就标记耗尽。
+
+    参数：
+    - count：目标条数（受页数预算与候选数量限制，可能拿到少于 count 的部分结果，
+      统计里如实反映）；
+    - fetch_page：可选的 ``fetch_page(subject_type, offset, *, limit) -> RankPage``
+      注入点，测试用它替代真实排行榜请求；不传则按代理参数构造真实请求器；
+    - fetch_subject：传递给 run_import 的单条目抓取注入点（同上，测试用）；
+    - rng：可选随机数发生器（测试可注入固定种子，保证可复现）。
+    """
+    count = max(0, int(count))
+    if rng is None:
+        rng = random.Random()
+    limit = RANK_PAGE_LIMIT
+
+    pages = 0
+    duplicates = 0
+    nsfw_skipped = 0
+    rank_total: int | None = None
+    fresh: list[int] = []
+
+    def _empty_result() -> RandomImportResult:
+        empty = build_summary(requested=count, fetched=0, outcomes=[])
+        return RandomImportResult(
+            requested=count,
+            sampled=[],
+            summary=empty,
+            pages=pages,
+            candidates=len(fresh),
+            duplicates=duplicates,
+            nsfw_skipped=nsfw_skipped,
+            rank_total=rank_total,
+        )
+
+    if count <= 0:
+        return _empty_result()
+
+    if fetch_page is None:
+        opener = build_opener(proxy)
+
+        def fetch_page(subject_type, offset, *, limit=limit):
+            return _fetch_rank_page(
+                subject_type,
+                RANK_SORT,
+                opener=opener,
+                timeout=timeout,
+                retries=retries,
+                user_agent=user_agent,
+                base_url=base_url,
+                limit=limit,
+                offset=offset,
+                sleep=sleep,
+            )
+
+    # 本地查重：一次查询拿全库 bangumi_id，选中之前零成本跳过已入库条目
+    db = session_factory()
+    try:
+        existing = {
+            bid
+            for bid in db.scalars(select(Content.bangumi_id)).all()
+            if isinstance(bid, int) and not isinstance(bid, bool)
+        }
+    finally:
+        db.close()
+
+    types = [t for t in subject_types if isinstance(t, int) and t > 0] or [2]
+    # 每页计划贡献 RANDOM_PAGE_SHARE 条 -> 至少翻 ceil(count/share) 页混开批内多样性
+    min_pages = min(RANDOM_PAGE_BUDGET, max(1, -(-count // RANDOM_PAGE_SHARE)))
+
+    type_total: dict[int, int] = {}  # 从响应学到的各类型榜单总量
+    type_cap: dict[int, int] = {}  # 学到的各类型可用偏移上限（深翻页被拒时收紧）
+    used_offsets: dict[int, set[int]] = {t: set() for t in types}
+    exhausted: set[int] = set()  # 已无新页可翻的类型
+    seen: set[int] = set()
+    consecutive_failures = 0
+
+    while True:
+        if consecutive_failures >= 2:
+            break  # 连续两页连 offset=0 都失败：网络大概率不可用，收手
+        need_min_pages = pages < min_pages
+        need_fill = len(fresh) < count and pages < RANDOM_PAGE_BUDGET
+        if not (need_min_pages or need_fill):
+            break
+        pending = [t for t in types if t not in exhausted]
+        if not pending:
+            break
+        subject_type = rng.choice(pending)
+
+        if subject_type not in type_total:
+            offset = 0  # 该类型第一页：用首页学习榜单总量
+        else:
+            total = type_total[subject_type]
+            cap = type_cap.get(subject_type, total - limit)
+            max_offset = max(0, min(total - limit, cap))
+            slots = [
+                i
+                for i in range(max_offset // limit + 1)
+                if i * limit not in used_offsets[subject_type]
+            ]
+            if not slots:
+                exhausted.add(subject_type)
+                continue
+            offset = rng.choice(slots) * limit
+
+        # 取页：随机偏移被拒（API 可能限制深翻页）时逐步减半回退到 0
+        page = None
+        worked_offset = None
+        probe = offset
+        while True:
+            try:
+                page = fetch_page(subject_type, probe, limit=limit)
+                worked_offset = probe
+                break
+            except BangumiAPIError:
+                if probe <= 0:
+                    break
+                probe //= 2
+        if page is None:
+            consecutive_failures += 1
+            continue
+        consecutive_failures = 0
+        pages += 1
+        used_offsets[subject_type].add(worked_offset)
+        if worked_offset < offset:
+            # 深偏移被拒、回退后才成功：记住该类型实际可用的偏移上限
+            type_cap[subject_type] = worked_offset
+
+        if page.total is not None:
+            known = type_total.get(subject_type)
+            if known is None or page.total > known:
+                type_total[subject_type] = page.total
+            if page.total <= limit:
+                exhausted.add(subject_type)  # 榜单总量不足一页：只有这一页
+            if rank_total is None or page.total > rank_total:
+                rank_total = page.total
+        elif subject_type not in type_total:
+            # 响应缺 total 且此前没学到过：无法随机偏移，该类型只贡献这一页
+            exhausted.add(subject_type)
+
+        for sid in page.ids:
+            if sid in existing:
+                duplicates += 1
+            elif sid not in seen:
+                seen.add(sid)
+                fresh.append(sid)
+        nsfw_skipped += page.nsfw_skipped
+        if pages < RANDOM_PAGE_BUDGET:
+            sleep(RANK_SLEEP)
+
+    if not fresh:
+        return _empty_result()
+
+    n = min(count, len(fresh))
+    sampled = rng.sample(fresh, n)
+    summary = run_import(
+        sampled,
+        session_factory=session_factory,
+        apply=apply,
+        proxy=proxy,
+        timeout=timeout,
+        retries=retries,
+        user_agent=user_agent,
+        base_url=base_url,
+        fetch=fetch_subject,
+        cover_downloader=cover_downloader,
+        sleep=sleep,
+    )
+    return RandomImportResult(
+        requested=count,
+        sampled=sampled,
+        summary=summary,
+        pages=pages,
+        candidates=len(fresh),
+        duplicates=duplicates,
+        nsfw_skipped=nsfw_skipped,
+        rank_total=rank_total,
+    )
+
+
 # ---------- 数据映射（纯函数，便于单独测试） ----------
 
 
@@ -511,7 +898,7 @@ def map_subject(payload: dict) -> MappedSubject:
     - 标题优先 name_cn，为空时回退 name；两者都为空则跳过；
     - summary 映射到摘要；为空则跳过（summary 是必填字段）；
     - rating 只取 rating.score 且必须 > 0，取不到就跳过（rating 必填，不伪造）；
-    - type=2 -> anime，type=4 -> game；其余类型跳过（书籍/音乐不归类为漫画/小说）；
+    - type=1 -> novel，2 -> anime，4 -> game，6 -> comic；其余类型跳过（音乐/三次元不收录）；
     - tags 按标注数取前 MAX_TAGS_PER_SUBJECT 个（见 extract_tags）。
     无法映射时抛 SubjectMappingError，异常信息即跳过原因。
     """
@@ -523,7 +910,7 @@ def map_subject(payload: dict) -> MappedSubject:
     if bgm_type not in TYPE_MAPPING:
         type_name = TYPE_NAMES.get(bgm_type, f"未知类型 {bgm_type!r}")
         raise SubjectMappingError(
-            f"暂不支持导入「{type_name}」类条目（本站目前只支持动画/游戏）"
+            f"暂不支持导入「{type_name}」类条目（本站只收录动画/游戏/小说/漫画）"
         )
 
     title = (payload.get("name_cn") or "").strip() or (payload.get("name") or "").strip()

@@ -13,6 +13,8 @@
   生成失败（源图损坏等）服务端降级返回原图，原图也没有才 404；
 - 管理员上传（POST /manage/contents/{id}/cover）复用同一套校验与派生
   管线：只认魔术字节、不信客户端文件名，落盘名称由服务端生成。
+- 批量导入时低热作品不下封面（内容.remote_image_url 记远端地址），详情页
+  第一次被打开时由 fetch_cover_on_demand 补齐并回填——省预付带宽又不留空洞。
 
 预留：image_url 允许存远端完整地址（历史数据 / 手动维护），模板助手
 对 http(s) 开头的值原样透传；将来图片切 COS / CDN 只改 MEDIA_BASE_URL
@@ -26,6 +28,8 @@ import mimetypes
 import os
 import tempfile
 import time
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 from PIL import Image
@@ -65,6 +69,18 @@ class UploadError(MediaError):
 def cover_root() -> Path:
     """封面根目录：相对路径按项目根解析（与 main.py 的 /covers 挂载一致）。"""
     root = Path(settings.cover_storage_dir)
+    if not root.is_absolute():
+        root = Path(__file__).resolve().parents[1] / root
+    return root
+
+
+# 头像统一正方形尺寸（页面最大显示 96px，256 足够 2x 屏）。
+AVATAR_SIZE = 256
+
+
+def avatar_root() -> Path:
+    """头像根目录：相对路径按项目根解析（与 main.py 的 /avatars 挂载一致）。"""
+    root = Path(settings.avatar_storage_dir)
     if not root.is_absolute():
         root = Path(__file__).resolve().parents[1] / root
     return root
@@ -251,6 +267,64 @@ def save_upload(data: bytes, content_id: int) -> str:
     return f"/covers/{name}"
 
 
+def _square(image: Image.Image) -> Image.Image:
+    """居中裁成正方形：头像不做变形拉伸。"""
+    side = min(image.width, image.height)
+    left = (image.width - side) // 2
+    top = (image.height - side) // 2
+    return image.crop((left, top, left + side, top + side))
+
+
+def save_avatar(data: bytes, user_id: int) -> str:
+    """校验并落盘用户头像，返回站内地址 /avatars/<文件名>。
+
+    与封面上传同一套校验（大小 -> 魔术字节 -> 实际解码）；服务端生成文件名、
+    居中裁方、缩到 256×256 后编 WebP，避免原图直接上站。
+    """
+    if not data:
+        raise UploadError("没有选择要上传的图片", "empty")
+    limit = settings.avatar_upload_max_bytes
+    if len(data) > limit:
+        raise UploadError(f"头像不能超过 {limit // (1024 * 1024)} MB", "too_big")
+    image_format = sniff_image(data)
+    if image_format is None:
+        raise UploadError("只支持 JPEG / PNG / WebP / GIF 格式的图片", "not_image")
+    try:
+        image = _open_image(data)
+    except Exception as exc:
+        raise UploadError("图片文件无法解码，可能已损坏", "corrupt") from exc
+
+    try:
+        square = _square(_flatten(image)).resize(
+            (AVATAR_SIZE, AVATAR_SIZE), Image.Resampling.LANCZOS
+        )
+        payload = _encode_webp(square, 88)
+    except Exception as exc:
+        raise UploadError("头像处理失败，请换一张图片", "corrupt") from exc
+
+    root = avatar_root()
+    root.mkdir(parents=True, exist_ok=True)
+    name = f"avatar_u{user_id}_{int(time.time() * 1000)}.webp"
+    _atomic_write(root / name, payload)
+    return f"/avatars/{name}"
+
+
+def remove_avatar_file(avatar_url: str | None) -> bool:
+    """删除被替换掉的旧头像（只认本站 /avatars/ 下的 .webp）。"""
+    if not avatar_url or is_remote_url(avatar_url):
+        return False
+    if not avatar_url.startswith("/avatars/"):
+        return False
+    name = avatar_url.rpartition("/")[2]
+    if not name or "/" in name or "\\" in name or not name.endswith(".webp"):
+        return False
+    try:
+        (avatar_root() / name).unlink()
+        return True
+    except OSError:
+        return False
+
+
 def remove_cover_file(image_url: str | None) -> bool:
     """删除被替换掉的旧封面（仅限本站 /covers/ 下由本程序生成的文件）。
 
@@ -269,6 +343,74 @@ def remove_cover_file(image_url: str | None) -> bool:
         except OSError:
             pass
     return removed
+
+
+# ---------- 封面按需下载 ----------
+
+# 远端封面下载的护栏：单张大小上限与超时。封面图本身只有几十到几百 KB，
+# 超过 3 MB 一律不收，避免异常响应把磁盘撑满。
+_ON_DEMAND_MAX_BYTES = 3 * 1024 * 1024
+_ON_DEMAND_TIMEOUT = 15.0
+_ON_DEMAND_HEADERS = {"User-Agent": "acgn-test-platform/0.1 (cover on demand)"}
+# 只允许 Bangumi 自家 CDN，防止库里被塞进任意地址后被当成下载器用。
+_ALLOWED_COVER_HOSTS = ("lain.bgm.tv", "bgm.tv", "api.bgm.tv")
+
+
+def fetch_cover_on_demand(content) -> str | None:
+    """下载 ``content`` 的远端封面并回填 image_url，返回站内地址；不可用返回 None。
+
+    存在的意义：批量导入只给高热作品立刻下封面，低热作品只把地址存进
+    ``contents.remote_image_url``。等这部作品真的被人打开时，由详情页调用本函数
+    补齐封面并顺手清掉 remote_image_url——**省掉长尾的预付带宽，同时不留永久空洞**
+    （谁访问谁补）。
+
+    失败一律静默返回 None：封面不是关键路径，取不到就让页面回退渐变占位图，
+    绝不让详情页因它报错或变慢。
+    """
+    remote = getattr(content, "remote_image_url", None)
+    if not remote:
+        return None
+    if getattr(content, "image_url", None):
+        return content.image_url  # 已有本地封面，不需要再下
+
+    host = urllib.parse.urlsplit(remote).hostname or ""
+    if host not in _ALLOWED_COVER_HOSTS:
+        return None
+
+    try:
+        request = urllib.request.Request(remote, headers=_ON_DEMAND_HEADERS)
+        with urllib.request.urlopen(request, timeout=_ON_DEMAND_TIMEOUT) as response:
+            body = response.read(_ON_DEMAND_MAX_BYTES + 1)
+    except Exception:
+        return None  # 网络/超时/404 一律降级
+
+    if not body or len(body) > _ON_DEMAND_MAX_BYTES:
+        return None
+    if sniff_image(body) is None:
+        return None
+
+    bangumi_id = getattr(content, "bangumi_id", None) or content.id
+    suffix = Path(urllib.parse.urlsplit(remote).path).suffix.lower()
+    if suffix not in (".jpg", ".jpeg", ".png", ".webp", ".gif"):
+        suffix = ".jpg"
+    name = f"cover_{bangumi_id}{suffix}"
+
+    root = cover_root()
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        original = root / name
+        _atomic_write(original, body)
+        for kind in ("thumb", "full"):
+            try:
+                generate_variant(kind, original)
+            except MediaError:
+                pass
+    except OSError:
+        return None
+
+    content.image_url = f"/covers/{name}"
+    content.remote_image_url = None
+    return content.image_url
 
 
 # ---------- 模板助手 ----------

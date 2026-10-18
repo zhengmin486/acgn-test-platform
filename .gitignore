@@ -37,3 +37,9 @@ backup.bat
 
 # 页面调试转储草稿（不入库）
 __*.html
+
+# 封面本地化与派生图运行时产物（可用 fetch_covers.py 重新抓，不入库）
+app/static/covers/
+
+# 设计草稿（不入库）
+docs/*.md

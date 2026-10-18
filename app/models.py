@@ -23,6 +23,11 @@ class Content(Base):
     渐变占位图。
     与 bangumi_id 一样，image_url 也不进 as_dict：API 契约保持不变，
     封面是页面展示关注点。
+
+    remote_image_url 为「封面按需下载」的来源地址：批量导入只给高热作品
+    立刻下封面，低热作品只记远端地址，等详情页真的被打开时再下载落盘
+    并回填 image_url（见 app/media.py 的 fetch_cover_on_demand）。
+    同样不进 as_dict。
     """
 
     __tablename__ = "contents"
@@ -38,6 +43,11 @@ class Content(Base):
     bangumi_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     source_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     image_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # Bangumi 原始封面地址（未下载到本地时使用）。
+    # 批量导入只给高热作品下封面，低热作品把地址存这里：详情页第一次被访问时
+    # 再按需下载落盘（见 app/media.py 的 fetch_cover_on_demand），
+    # 避免为「可能永远没人看的长尾」预付 1000 张图的带宽，也避免留下永久空洞。
+    remote_image_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     # 作品发行年（来自 Bangumi date）。单列存而不是塞进标签：
     # 年份对筛选/排序有用，但混进 content_tags 会污染标签云。
     year: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -446,16 +456,25 @@ class User(Base):
     email_verified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     password_changed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     bio: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 头像：站内相对地址（/avatars/avatar_u<id>_<ts>.webp）；NULL 表示用渐变首字占位。
+    avatar_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
 
 
 class ContentFavorite(Base):
-    """个人空间「作品收藏」：登录用户对内容平台作品的收藏关系。
+    """个人空间「作品收藏」：登录用户与内容平台作品的关系行。
 
-    - (user_id, content_id) 联合唯一：重复收藏幂等，不会产生重复行；
-    - content_id 为弱关联（不设外键级联）：作品被管理员删除后，收藏行
-      仍保留（列表页内连接查不到即不展示），清理由用户显式操作触发；
-    - 查询一律带 user_id，保证收藏列表只属于当前登录账号。
+    - (user_id, content_id) 联合唯一：同一作品只保留一行，收藏 / 标注都幂等；
+    - 一行 =「这个用户和这部作品有关系」，两个业务字段各自独立：
+      ``favorited`` 表示在不在收藏名单里，``status`` 表示看过 / 未看 / 想看（可空）；
+    - **标注自动收藏**：写标注时把 favorited 置 True，没有行就建行——标注过的
+      作品天然是名单成员，不需要用户再点一次收藏；
+    - **取消收藏不动标注**：favorited 置 False，status 原样保留。收藏了但没看
+      是名单里的常态，看过 / 想看这类事实不该因为移出名单而消失；只有两个字段
+      都空了才删行，不留空壳；
+    - content_id 为弱关联（不设外键级联）：作品被管理员删除后关系行仍保留
+      （列表页内连接查不到即不展示），清理由用户显式操作触发；
+    - 查询一律带 user_id，保证列表只属于当前登录账号。
     """
 
     __tablename__ = "content_favorites"
@@ -467,6 +486,11 @@ class ContentFavorite(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(Integer, nullable=False)
     content_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    favorited: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    status: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    status_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True, default=None
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
 
 
@@ -490,31 +514,6 @@ class ContentViewHistory(Base):
     user_id: Mapped[int] = mapped_column(Integer, nullable=False)
     content_id: Mapped[int] = mapped_column(Integer, nullable=False)
     viewed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
-
-
-class ContentStatus(Base):
-    """个人空间「作品标注」：登录用户对作品的显式标记（看过 / 未看 / 想看）。
-
-    - (user_id, content_id) 联合唯一：同一用户对同一作品只保留一条标注，
-      重复标注为更新，不堆叠行；
-    - status 取值为 seen / unseen / want（见 crud.CONTENT_STATUS_LABELS）；
-    - 与收藏互相独立：可以只标注不收藏，也可以只收藏不标注；
-    - content_id 为弱关联，作品删除后标注行保留但不展示。
-    """
-
-    __tablename__ = "content_status"
-    __table_args__ = (
-        UniqueConstraint("user_id", "content_id", name="uq_content_status_user_content"),
-        Index("ix_content_status_user", "user_id"),
-    )
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    user_id: Mapped[int] = mapped_column(Integer, nullable=False)
-    content_id: Mapped[int] = mapped_column(Integer, nullable=False)
-    status: Mapped[str] = mapped_column(String(20), nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime, nullable=False, default=datetime.now, onupdate=datetime.now
-    )
 
 
 class ContentSubmission(Base):
@@ -613,6 +612,10 @@ class PersonaReport(Base):
     payload: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     narrative: Mapped[str | None] = mapped_column(Text, nullable=True)
     narrative_source: Mapped[str] = mapped_column(String(20), nullable=False, default="template")
+    # 自定义语气说明（tone=custom 时生效）与用户追加的大段提示词，
+    # 重新生成时沿用，不清空。
+    tone_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    extra_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     generated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
 
 

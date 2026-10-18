@@ -131,3 +131,87 @@ def test_home_uses_svg_icons(ui_client):
     assert resp.status_code == 200
     assert "svg-ic" in resp.text
     assert "🎬" not in resp.text and "📚" not in resp.text
+
+
+# ---------- 首页「本日新番」：只取今天排播、按播出时间到分排序（2026-10-18 改良） ----------
+
+def _seed_schedule(Session, **overrides):
+    """插一条最小可用的档期记录；platforms 有库级默认，无需显式赋值。"""
+    from app.models import AnimeSchedule
+
+    row = AnimeSchedule(
+        season_code="202610",
+        source_key=overrides.get("source_key", ""),
+        title_main=overrides.get("title_main", ""),
+        source_url="https://example.com/anime",
+        weekday=None,
+        broadcast_time=None,
+    )
+    for key, value in overrides.items():
+        setattr(row, key, value)
+    session = Session()
+    session.add(row)
+    session.commit()
+    session.close()
+
+
+@pytest.fixture
+def today_client(tmp_path):
+    """独立临时库：今天与其它星期各插几条档期，覆盖排序与过滤。"""
+    from datetime import datetime
+
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'landing.db'}",
+        connect_args={"check_same_thread": False},
+    )
+    Base.metadata.create_all(engine)
+    TestingSession = sessionmaker(bind=engine, expire_on_commit=False)
+
+    def override_get_db():
+        db = TestingSession()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    app.dependency_overrides[get_db] = override_get_db
+
+    today = datetime.now().isoweekday()
+    other = today % 7 + 1
+    _seed_schedule(TestingSession, source_key="early", title_main="早晨番",
+                   weekday=today, broadcast_time="12:00")
+    _seed_schedule(TestingSession, source_key="late", title_main="深夜番",
+                   weekday=today, broadcast_time="23:00")
+    _seed_schedule(TestingSession, source_key="notime", title_main="无时间番",
+                   weekday=today, broadcast_time=None)
+    _seed_schedule(TestingSession, source_key="othertab", title_main="别天番",
+                   weekday=other, broadcast_time="09:00")
+
+    client = TestClient(app)
+    yield client
+    app.dependency_overrides.pop(get_db, None)
+
+
+def test_home_today_schedule_filtered_and_sorted(today_client):
+    """首页只渲染今天的档期（别天的不出现），且按播出时间到分升序、无时间殿后。"""
+    resp = today_client.get("/")
+    assert resp.status_code == 200
+    html = resp.text
+    assert "本日新番" in html
+    assert "别天番" not in html
+    early = html.index("早晨番")
+    late = html.index("深夜番")
+    notime = html.index("无时间番")
+    assert early < late < notime
+    assert "12:00 更新" in html and "23:00 更新" in html
+    # 更新时间徽标（HH:MM）随卡片渲染
+    assert "schedule-time-badge" in html
+
+
+def test_nav_search_has_type_select(today_client):
+    """导航搜索胶囊：类型下拉（nav-type）+ 关键词框（nav-q）齐备。"""
+    resp = today_client.get("/")
+    assert resp.status_code == 200
+    assert 'id="nav-type"' in resp.text
+    assert 'id="nav-q"' in resp.text
+    assert "动画" in resp.text  # 类型选项来自模板全局 type_labels

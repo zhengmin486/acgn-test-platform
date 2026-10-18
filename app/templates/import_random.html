@@ -1,0 +1,152 @@
+{% extends "base_content.html" %}
+{# 随机导入作品：随机偏移翻 Bangumi 排行榜页 -> 本地过滤已入库 -> 抽样 -> 预览（不写库）-> 确认写入。
+   预览与正式走两步走：预览时锁定的 ids 通过隐藏字段回传，确认时直接按这些 id 入库，
+   避免重新随机抽到不同作品。 #}
+{% block title %}随机导入作品 - ACGN 内容平台{% endblock %}
+
+{% block content %}
+<h1 class="h3 mb-1 section-heading">随机导入作品</h1>
+<p class="text-muted small mb-3">
+    随机偏移翻 Bangumi 排行榜页抽样导入作品（先预览、确认后才写入）。
+    覆盖榜单全深度而不只是头部，选中前先在本地跳过已入库作品；抓取条数 1-{{ count_max }} 可调。
+</p>
+{% include "_manage_nav.html" %}
+
+{% if error %}
+<div class="alert alert-danger py-2 small mb-3" role="alert">{{ error }}</div>
+{% endif %}
+
+<div class="row g-3">
+    <div class="col-lg-7">
+        {# ---------- 抓取设置 ---------- #}
+        <div class="card app-card mb-3">
+            <div class="card-body">
+                <h2 class="h5 mb-3">抓取设置</h2>
+                <form method="post" action="/manage/import-random" id="random-form">
+                    <div class="row g-2 mb-3">
+                        <div class="col-sm-6">
+                            <label class="form-label small mb-1" for="random-count">抓取条数（1-{{ count_max }}）</label>
+                            <input class="form-control form-control-sm" id="random-count" name="count"
+                                   type="number" min="1" max="{{ count_max }}" value="{{ count }}">
+                        </div>
+                        <div class="col-sm-6">
+                            <label class="form-label small mb-1" for="random-type">类型</label>
+                            <select class="form-select form-select-sm" id="random-type" name="rtype">
+                                {% for key, label in type_options %}
+                                <option value="{{ key }}"{% if key == rtype %} selected{% endif %}>{{ label }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                    </div>
+                    <button class="btn btn-primary" type="submit">预览（不写库）</button>
+                    <span class="text-muted small ms-2">预览会先随机翻榜页选出新作品并预映射，确认后再正式写入。</span>
+                </form>
+            </div>
+        </div>
+
+        {# ---------- 结果面板 ---------- #}
+        {% if result %}
+        <div class="card app-card mb-3">
+            <div class="card-body">
+                <h2 class="h5 mb-2">
+                    同步结果
+                    <span class="badge bg-secondary">{{ '正式写入' if result.mode == 'apply' else '预览' }}</span>
+                </h2>
+                <p class="small text-secondary mb-2">
+                    翻页 {{ result.pages }} · 新候选 {{ result.candidates }} · 跳过已入库 {{ result.dup_skipped }} · NSFW 过滤 {{ result.nsfw_skipped }}
+                    {% if result.rank_total %} · 榜单总量约 {{ result.rank_total }}{% endif %}
+                    · 本次抽样 {{ result.sampled|length }} / 目标 {{ result.requested }} 部
+                    {% if result.mode == 'preview' %}（预览，未写入数据库）{% endif %}
+                </p>
+                <div class="table-responsive mb-3">
+                    <table class="table table-sm table-bordered small mb-0">
+                        <thead class="table-light">
+                            <tr>
+                                <th>新增</th><th>重复跳过</th><th>跳过</th><th>失败</th><th>待写入</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td>{{ result.added }}</td>
+                                <td>{{ result.duplicates }}</td>
+                                <td>{{ result.skipped }}</td>
+                                <td{% if result.failed %} class="text-danger fw-semibold"{% endif %}>{{ result.failed }}</td>
+                                <td>{{ result.pending }}</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                {% if result.details %}
+                <h3 class="h6 mb-1">逐条结果</h3>
+                <div class="table-responsive mb-2">
+                    <table class="table table-sm small mb-0">
+                        <thead class="table-light">
+                            <tr><th>状态</th><th>作品</th><th>说明</th></tr>
+                        </thead>
+                        <tbody>
+                            {% for item in result.details %}
+                            <tr>
+                                <td>{{ detail_labels.get(item.status, item.status) }}</td>
+                                <td>{{ item.title or '—' }}</td>
+                                <td class="text-secondary">{{ item.reason or '—' }}</td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                <p class="text-muted small mb-3">共 {{ result.details|length }} 条明细。</p>
+                {% endif %}
+
+                {% if result.mode == 'preview' %}
+                <form method="post" action="/manage/import-random">
+                    <input type="hidden" name="action" value="apply">
+                    <input type="hidden" name="rtype" value="{{ rtype }}">
+                    <input type="hidden" name="count" value="{{ count }}">
+                    <input type="hidden" name="ids" value="{{ ids_str }}">
+                    <div class="d-flex flex-wrap align-items-center gap-2">
+                        <button class="btn btn-success" type="submit">
+                            确认写入{% if result.pending %}<span class="badge bg-white text-success ms-1">{{ result.pending }} 条</span>{% endif %}
+                        </button>
+                        <span class="small text-secondary">
+                            {% if result.pending %}
+                            按预览锁定的 {{ result.sampled|length }} 部作品正式写入；重复条目跳过，不覆盖本地数据。
+                            {% else %}
+                            本次预览没有待写入的新条目，确认写入不会产生变化。
+                            {% endif %}
+                        </span>
+                    </div>
+                </form>
+                {% else %}
+                <p class="small mb-0 mt-2">
+                    数据已变更，建议执行一次回归批次确认接口未被影响 →
+                    <a href="/testcases">去执行回归</a>
+                </p>
+                {% endif %}
+            </div>
+        </div>
+        {% endif %}
+    </div>
+
+    {# ---------- 说明 ---------- #}
+    <div class="col-lg-5">
+        <div class="card app-card">
+            <div class="card-body">
+                <h2 class="h5 mb-2">说明</h2>
+                <p class="text-muted small mb-2">
+                    Bangumi 没有「随机条目」官方接口，随机探测 ID 会产生大量 404 并触发限流。
+                    本功能改用随机偏移翻排行榜页：先读首页拿到榜单总量，再在全部深度里随机抽偏移取页，
+                    一页就是几十个保证有效的候选；选中之前先在本地跳过已入库作品和 NSFW 条目，
+                    最后复用标准导入流程写入作品、标签、作者/公司关系与封面。
+                </p>
+                <ul class="small text-secondary mb-0">
+                    <li>抓取条数 {{ count_max }} 以内可调，默认 {{ count }}；条数多时会翻多页混开批内多样性；</li>
+                    <li>单次最多翻 10 页排行榜，候选不足时按实际可得数量导入；</li>
+                    <li>已存在的作品按 bangumi_id 提前跳过，不覆盖本地数据；</li>
+                    <li>需要可访问 Bangumi 的网络（默认直连，可用 BANGUMI_PROXY 配置代理）。</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

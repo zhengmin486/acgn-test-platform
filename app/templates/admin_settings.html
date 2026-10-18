@@ -1,0 +1,41 @@
+{% extends "base_content.html" %}
+{# 站点设置集合页：账号验证 / 注册邀请码 / 角色管理三个子页的统一入口。
+   一级导航「站点设置」指向本页，不再深链 /admin/accounts——
+   名要副实：集合页让三个子页全部可见可达。 #}
+{% block title %}站点设置 - ACGN 内容平台{% endblock %}
+{% block content %}
+<h1 class="h3 mb-1 section-heading">站点设置</h1>
+<p class="text-muted small mb-4">管「人」与「准入」：账号邮箱验证的人工兜底、注册邀请码的签发与作废、账号角色的调整。</p>
+
+<div class="row g-3">
+    <div class="col-12 col-md-6 col-lg-4">
+        <a class="card app-card h-100 text-decoration-none" href="/admin/accounts">
+            <div class="card-body">
+                <h2 class="h6 mb-1">账号验证</h2>
+                <p class="small text-muted mb-2">待验证账号一键放行，或生成一次性验证链接转交用户。</p>
+                <span class="badge text-bg-secondary">{{ pending_count }} 个待验证</span>
+            </div>
+        </a>
+    </div>
+    <div class="col-12 col-md-6 col-lg-4">
+        <a class="card app-card h-100 text-decoration-none" href="/admin/invites">
+            <div class="card-body">
+                <h2 class="h6 mb-1">注册邀请码</h2>
+                <p class="small text-muted mb-2">批量签发邀请码、查看使用痕迹、作废尚未使用的码。</p>
+                <span class="badge text-bg-secondary">累计签发 {{ invite_count }} 条</span>
+            </div>
+        </a>
+    </div>
+    {% if is_owner %}
+    <div class="col-12 col-md-6 col-lg-4">
+        <a class="card app-card h-100 text-decoration-none" href="/admin/roles">
+            <div class="card-body">
+                <h2 class="h6 mb-1">角色管理</h2>
+                <p class="small text-muted mb-2">调整他人角色；不能改自己，也不能降级最后一个站长。</p>
+                <span class="badge text-bg-secondary">仅站长</span>
+            </div>
+        </a>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

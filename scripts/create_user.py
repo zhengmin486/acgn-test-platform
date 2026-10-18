@@ -73,8 +73,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="创建或维护平台账号（user / admin）。")
     parser.add_argument("--username", help="账号用户名")
     parser.add_argument("--email", help="可选：绑定邮箱；管理员创建的账号一律视为已验证")
-    parser.add_argument("--role", choices=list(crud.VALID_ROLES), default=crud.ROLE_USER,
-                        help="账号角色：user（默认）、admin 或 owner（站长）")
+    parser.add_argument("--role", choices=list(crud.VALID_ROLES), default=None,
+                        help="账号角色：user（默认）、admin 或 owner（站长）；重置密码时不传则保留原角色")
     parser.add_argument("--password", help="密码；不提供则交互输入（推荐）")
     parser.add_argument("--reset-password", action="store_true",
                         help="账号已存在时重置其密码（并可选更新角色）")
@@ -114,7 +114,8 @@ def main(argv: list[str] | None = None) -> int:
                       f"如需重置密码请加 --reset-password。")
                 return 1
             crud.set_password(db, existing, _read_password(args))
-            if existing.role != args.role:
+            # 只有显式传了 --role 才改角色：重置密码不应该顺手把站长降成普通用户。
+            if args.role and existing.role != args.role:
                 existing.role = args.role
                 db.commit()
             print(f"已重置账号 {existing.username} 的密码（角色={existing.role}）。")
@@ -124,7 +125,7 @@ def main(argv: list[str] | None = None) -> int:
             db,
             username=args.username,
             password=_read_password(args),
-            role=args.role,
+            role=args.role or crud.ROLE_USER,
             email=args.email,
             # 管理员亲自创建的账号无需再走验证邮件。
             require_verification=False,

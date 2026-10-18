@@ -9,8 +9,9 @@
 - Tab 非法值回退到收藏；
 - 收藏分类：按内容类型筛选（追番 / 漫画 / 游戏 / 轻小说）、分类计数、分类空态、
   取消与清空保留当前分类、分页保留分类、非法分类回退为全部；
-- 作品标注：看过 / 未看 / 想看的设置、更新幂等、跨账号隔离、标注 Tab 列表与筛选、
-  收藏卡片徽标、非法标注回退、分页保留标注筛选。
+- 作品标注（已并入收藏行）：看过 / 未看 / 想看的设置、更新幂等、跨账号隔离、
+  标注自动加入收藏、取消收藏保留标注、清除标注保留收藏、未标注筛选、
+  收藏列表行内切换与分页保留筛选、历史库标注表迁移。
 
 依赖覆盖 + 独立临时 SQLite，与开发库 local_dev.db 完全隔离。
 """
@@ -19,7 +20,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
 from app import crud
@@ -517,7 +518,7 @@ class TestFavoriteCategories:
 
 
 class TestContentStatus:
-    """作品标注：与收藏互相独立，同一作品只保留一条，按账号隔离。"""
+    """作品标注与收藏同一行：标注自动收藏，取消收藏 / 清除标注都不互相级联。"""
 
     def test_detail_shows_status_selector_for_user(self, space_env):
         login_as_user(space_env.client)
@@ -531,7 +532,7 @@ class TestContentStatus:
         assert "登录后可标注" in page.text
         assert 'action="/contents/1/status"' not in page.text
 
-    def test_set_status_persists(self, space_env):
+    def test_set_status_persists_and_auto_favorites(self, space_env):
         login_as_user(space_env.client)
         resp = space_env.client.post(
             "/contents/1/status",
@@ -545,11 +546,17 @@ class TestContentStatus:
         db = space_env.session_factory()
         try:
             assert crud.get_content_status(db, uid, 1) == "seen"
+            # 标注过的作品自动进入收藏名单，不需要再点一次收藏
+            assert crud.is_favorite(db, uid, 1) is True
+            assert crud.count_favorites(db, uid) == 1
         finally:
             db.close()
 
         page = space_env.client.get("/contents/1?status_ok=1")
-        assert "已标注为「看过」" in page.text
+        assert "已收藏并标注为「看过」" in page.text
+        # 已标注的作品在详情页给出「清除标注」入口，链接指向收藏列表
+        assert 'action="/contents/1/status/clear"' in page.text
+        assert 'href="/me?tab=favorites"' in page.text
 
     def test_status_update_is_idempotent(self, space_env):
         uid = _user_id(space_env.session_factory, USER_USERNAME)
@@ -558,8 +565,9 @@ class TestContentStatus:
             crud.set_content_status(db, uid, 1, "seen")
             crud.set_content_status(db, uid, 1, "want")
             assert crud.get_content_status(db, uid, 1) == "want"
-            # 同一作品只保留一条标注，更新而非堆叠
+            # 同一作品只保留一条关系行：更新而非堆叠
             assert crud.count_content_status(db, uid) == 1
+            assert crud.count_favorites(db, uid) == 1
         finally:
             db.close()
 
@@ -577,6 +585,8 @@ class TestContentStatus:
         db = space_env.session_factory()
         try:
             assert crud.get_content_status(db, uid, 1) is None
+            # 非法标注不落库，也不会把作品塞进收藏
+            assert crud.is_favorite(db, uid, 1) is False
         finally:
             db.close()
 
@@ -603,8 +613,14 @@ class TestContentStatus:
             follow_redirects=False,
         )
         assert resp.status_code == 404
+        resp = space_env.client.post(
+            "/contents/9999/status/clear",
+            data={"next": "/contents/9999"},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 404
 
-    def test_marks_tab_lists_and_filters(self, space_env):
+    def test_favorites_tab_lists_and_filters_by_status(self, space_env):
         login_as_user(space_env.client)
         space_env.client.post(
             "/contents/1/status", data={"status": "seen", "next": "/contents/1"}
@@ -613,30 +629,121 @@ class TestContentStatus:
             "/contents/3/status", data={"status": "want", "next": "/contents/3"}
         )
 
-        all_page = space_env.client.get("/me?tab=marks")
+        all_page = space_env.client.get("/me?tab=favorites")
         assert "星海航线" in all_page.text and "迷宫回响" in all_page.text
-        assert "共 2 部作品" in all_page.text
+        assert "共 2 条收藏" in all_page.text
         assert "看过<span class=\"tag-count\">1</span>" in all_page.text
         assert "想看<span class=\"tag-count\">1</span>" in all_page.text
 
-        seen_page = space_env.client.get("/me?tab=marks&status=seen")
+        seen_page = space_env.client.get("/me?tab=favorites&status=seen")
         assert "星海航线" in seen_page.text
         assert "迷宫回响" not in seen_page.text
-        assert "共 1 部看过作品" in seen_page.text
+        assert "共 1 条收藏（看过）" in seen_page.text
 
-    def test_marks_tab_empty_state(self, space_env):
+    def test_favorites_tab_empty_state(self, space_env):
         login_as_user(space_env.client)
-        page = space_env.client.get("/me?tab=marks")
-        assert "还没有标注任何作品" in page.text
+        page = space_env.client.get("/me?tab=favorites")
+        assert "还没有收藏任何作品" in page.text
+        # 标注不再是独立 Tab：旧地址回退到收藏
+        assert space_env.client.get("/me?tab=marks").status_code == 200
 
-    def test_marks_invalid_status_falls_back(self, space_env):
+    def test_unmarked_filter(self, space_env):
+        login_as_user(space_env.client)
+        space_env.client.post("/contents/1/favorite", data={"next": "/contents/1"})
+        space_env.client.post(
+            "/contents/3/status", data={"status": "seen", "next": "/contents/3"}
+        )
+
+        page = space_env.client.get("/me?tab=favorites&status=unmarked")
+        assert "星海航线" in page.text  # 收藏了但没标注
+        assert "迷宫回响" not in page.text  # 标注过的过滤掉
+        assert "共 1 条收藏（未标注）" in page.text
+        assert "未标注<span class=\"tag-count\">1</span>" in page.text
+
+    def test_invalid_status_filter_falls_back(self, space_env):
         login_as_user(space_env.client)
         space_env.client.post(
             "/contents/1/status", data={"status": "seen", "next": "/contents/1"}
         )
-        page = space_env.client.get("/me?tab=marks&status=bogus")
+        page = space_env.client.get("/me?tab=favorites&status=bogus")
         assert "星海航线" in page.text
-        assert "共 1 部作品" in page.text
+        assert "共 1 条收藏" in page.text
+
+    def test_unfavorite_keeps_status(self, space_env):
+        """取消收藏只移出名单，标注不丢（收藏了但没看是常态）。"""
+        login_as_user(space_env.client)
+        space_env.client.post(
+            "/contents/1/status", data={"status": "seen", "next": "/contents/1"}
+        )
+        resp = space_env.client.post(
+            "/contents/1/favorite", data={"next": "/contents/1"}, follow_redirects=False
+        )
+        assert resp.status_code == 303
+        assert "fav=removed" in resp.headers["location"]
+
+        uid = _user_id(space_env.session_factory, USER_USERNAME)
+        db = space_env.session_factory()
+        try:
+            assert crud.is_favorite(db, uid, 1) is False
+            assert crud.get_content_status(db, uid, 1) == "seen"
+        finally:
+            db.close()
+
+        # 名单里没有了，详情页仍然显示已标注
+        assert "星海航线" not in space_env.client.get("/me?tab=favorites").text
+        assert "已取消收藏；标注仍保留" in space_env.client.get(
+            "/contents/1?fav=removed"
+        ).text
+
+        # 重新收藏：旧标注原样恢复可见
+        space_env.client.post("/contents/1/favorite", data={"next": "/contents/1"})
+        page = space_env.client.get("/me?tab=favorites")
+        assert "星海航线" in page.text
+        assert '<span class="badge bg-success">看过</span>' in page.text
+
+    def test_clear_status_keeps_favorite(self, space_env):
+        login_as_user(space_env.client)
+        space_env.client.post(
+            "/contents/1/status", data={"status": "want", "next": "/contents/1"}
+        )
+        resp = space_env.client.post(
+            "/contents/1/status/clear",
+            data={"next": "/me?tab=favorites"},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        assert resp.headers["location"] == "/me?tab=favorites&status_cleared=1"
+
+        uid = _user_id(space_env.session_factory, USER_USERNAME)
+        db = space_env.session_factory()
+        try:
+            assert crud.get_content_status(db, uid, 1) is None
+            assert crud.is_favorite(db, uid, 1) is True
+        finally:
+            db.close()
+
+        page = space_env.client.get("/me?tab=favorites&status_cleared=1")
+        assert "星海航线" in page.text
+        assert "已清除标注，作品仍在收藏里" in page.text
+        # 详情页的「清除标注」入口随之消失（已无标注可清）
+        detail = space_env.client.get("/contents/1")
+        assert 'action="/contents/1/status/clear"' not in detail.text
+
+    def test_clear_favorites_keeps_status(self, space_env):
+        login_as_user(space_env.client)
+        space_env.client.post(
+            "/contents/1/status", data={"status": "seen", "next": "/contents/1"}
+        )
+        space_env.client.post("/contents/3/favorite", data={"next": "/contents/3"})
+        space_env.client.post("/me/favorites/clear", data={})
+
+        uid = _user_id(space_env.session_factory, USER_USERNAME)
+        db = space_env.session_factory()
+        try:
+            assert crud.count_favorites(db, uid) == 0
+            assert crud.get_content_status(db, uid, 1) == "seen"
+        finally:
+            db.close()
 
     def test_favorite_card_shows_status_badge(self, space_env):
         login_as_user(space_env.client)
@@ -647,19 +754,19 @@ class TestContentStatus:
         page = space_env.client.get("/me?tab=favorites")
         assert '<span class="badge bg-success">看过</span>' in page.text
 
-    def test_marks_tab_inline_status_switch(self, space_env):
+    def test_inline_status_switch(self, space_env):
         login_as_user(space_env.client)
         space_env.client.post(
             "/contents/1/status", data={"status": "seen", "next": "/contents/1"}
         )
-        # 标注列表里直接把「看过」改成「想看」，回到标注 Tab
+        # 收藏列表里直接把「看过」改成「想看」，回到收藏 Tab
         resp = space_env.client.post(
             "/contents/1/status",
-            data={"status": "want", "next": "/me?tab=marks"},
+            data={"status": "want", "next": "/me?tab=favorites"},
             follow_redirects=False,
         )
         assert resp.status_code == 303
-        assert resp.headers["location"] == "/me?tab=marks&status_ok=1"
+        assert resp.headers["location"] == "/me?tab=favorites&status_ok=1"
 
         uid = _user_id(space_env.session_factory, USER_USERNAME)
         db = space_env.session_factory()
@@ -668,7 +775,10 @@ class TestContentStatus:
         finally:
             db.close()
 
-    def test_marks_pager_preserves_status(self, space_env):
+        page = space_env.client.get("/me?tab=favorites&status_ok=1")
+        assert "已更新标注" in page.text
+
+    def test_pager_preserves_type_and_status(self, space_env):
         login_as_user(space_env.client)
         uid = _user_id(space_env.session_factory, USER_USERNAME)
         content_ids = [
@@ -682,7 +792,99 @@ class TestContentStatus:
         finally:
             db.close()
 
-        page = space_env.client.get("/me?tab=marks&status=want")
-        assert "共 12 部想看作品" in page.text
+        page = space_env.client.get("/me?tab=favorites&status=want")
+        assert "共 12 条收藏（想看）" in page.text
         assert "status=want" in page.text
         assert "page=2" in page.text
+
+
+class TestFavoriteStatusMigration:
+    """历史库迁移：收藏行补列，旧标注表 content_status 搬入后删掉。"""
+
+    def _legacy_engine(self, tmp_path):
+        engine = create_engine(f"sqlite:///{tmp_path / 'legacy.db'}")
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "CREATE TABLE content_favorites ("
+                    "id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, "
+                    "content_id INTEGER NOT NULL, created_at DATETIME NOT NULL, "
+                    "UNIQUE (user_id, content_id))"
+                )
+            )
+            connection.execute(
+                text(
+                    "CREATE TABLE content_status ("
+                    "id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL, "
+                    "content_id INTEGER NOT NULL, status VARCHAR(20) NOT NULL, "
+                    "updated_at DATETIME NOT NULL)"
+                )
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO content_favorites (user_id, content_id, created_at) "
+                    "VALUES (1, 6, '2026-01-01 10:00:00')"
+                )
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO content_status "
+                    "(user_id, content_id, status, updated_at) "
+                    "VALUES (1, 5, 'seen', '2026-01-02 10:00:00')"
+                )
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO content_status "
+                    "(user_id, content_id, status, updated_at) "
+                    "VALUES (1, 6, 'want', '2026-01-03 10:00:00')"
+                )
+            )
+        return engine
+
+    def test_migrates_legacy_marks_into_favorites(self, tmp_path):
+        engine = self._legacy_engine(tmp_path)
+        try:
+            added = crud.ensure_favorite_status_columns(engine)
+            assert set(added) == {"favorited", "status", "status_updated_at"}
+
+            with engine.begin() as connection:
+                tables = {
+                    row[0]
+                    for row in connection.execute(
+                        text("SELECT name FROM sqlite_master WHERE type = 'table'")
+                    )
+                }
+                assert "content_status" not in tables
+                rows = {
+                    content_id: (favorited, status, created_at)
+                    for content_id, favorited, status, created_at in connection.execute(
+                        text(
+                            "SELECT content_id, favorited, status, created_at "
+                            "FROM content_favorites ORDER BY content_id"
+                        )
+                    )
+                }
+            # 只有标注的作品补建收藏行；两者都有的保留原收藏时间并补状态
+            assert set(rows) == {5, 6}
+            assert rows[5][0] == 1 and rows[5][1] == "seen"
+            assert rows[6][0] == 1 and rows[6][1] == "want"
+            assert str(rows[6][2]).startswith("2026-01-01 10:00:00")
+        finally:
+            engine.dispose()
+
+    def test_migration_is_idempotent(self, tmp_path):
+        engine = self._legacy_engine(tmp_path)
+        try:
+            crud.ensure_favorite_status_columns(engine)
+            assert crud.ensure_favorite_status_columns(engine) == []
+        finally:
+            engine.dispose()
+
+    def test_fresh_schema_skips_migration(self, tmp_path):
+        engine = create_engine(f"sqlite:///{tmp_path / 'fresh.db'}")
+        try:
+            Base.metadata.create_all(engine)
+            assert crud.ensure_favorite_status_columns(engine) == []
+        finally:
+            engine.dispose()

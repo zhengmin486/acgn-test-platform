@@ -210,6 +210,51 @@ def parse_season_code(text: str) -> str:
     return code
 
 
+def suggest_season_codes(
+    local_seasons: list[dict] | None,
+    *,
+    today: datetime | None = None,
+    back: int = 3,
+    forward: int = 3,
+) -> list[dict]:
+    """档期输入建议项：本地已同步档期 + 今天前后若干月的档期码。
+
+    档期输入框必须是自由输入的——只给「本地已同步档期」的下拉会让页面一旦有
+    数据就只剩老选项，新档期反而无从同步。因此这里只补充建议列表：
+
+    - 本地已同步的档期带本地条数，模板显示为「YYYYMM（本地 N 条）」；
+    - 前后各若干个月（默认各 3 个月）也列进来，方便直接同步下个季度；
+    - 按档期码倒序（最近的在前）返回，同一档期只出现一次；未同步过的档期
+      ``count`` 为 None，模板据此不带本地条数后缀。
+
+    ``today`` 可注入，便于测试固定结果。
+    """
+    local_counts: dict[str, int] = {}
+    for row in local_seasons or []:
+        code = (row or {}).get("season_code")
+        if code:
+            local_counts[str(code)] = row.get("count") or 0
+
+    codes = set(local_counts)
+    base = today or datetime.now()
+    month_index = base.year * 12 + (base.month - 1)
+    for step in range(-max(0, back), max(0, forward) + 1):
+        year, month = divmod(month_index + step, 12)
+        codes.add(f"{year:04d}{month + 1:02d}")
+
+    suggestions = []
+    for code in sorted(codes, reverse=True):
+        count = local_counts.get(code)
+        suggestions.append(
+            {
+                "season_code": code,
+                "count": count,
+                "label": f"{code}（本地 {count} 条）" if count is not None else code,
+            }
+        )
+    return suggestions
+
+
 def parse_article_limit(text: str | None) -> int:
     """解析资讯条数上限：留空表示不限，超过 MAX_ARTICLE_LIMIT 直接拒绝。"""
     raw = (text or "").strip()

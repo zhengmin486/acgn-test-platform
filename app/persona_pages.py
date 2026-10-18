@@ -164,6 +164,10 @@ def persona_page(request: Request, db: DbSession):
             "site_imports": crud.list_user_site_imports(db, uid, limit=10),
             "tone_labels": persona.TONE_LABELS,
             "tone": report.tone if report else "sharp",
+            "tone_prompt": report.tone_prompt if report else "",
+            "extra_prompt": report.extra_prompt if report else "",
+            "tone_prompt_max": persona.MAX_TONE_PROMPT,
+            "extra_prompt_max": persona.MAX_EXTRA_PROMPT,
         },
     )
 
@@ -231,7 +235,13 @@ def undo_site_imports(request: Request, db: DbSession):
 
 
 @router.post("/me/persona/generate")
-def generate_report(request: Request, db: DbSession, tone: str = Form(default="sharp")):
+def generate_report(
+    request: Request,
+    db: DbSession,
+    tone: str = Form(default="sharp"),
+    tone_prompt: str = Form(default=""),
+    extra_prompt: str = Form(default=""),
+):
     """用当前快照 + 站内收藏计算规则画像，并生成模板报告与 LLM 提示词。"""
     uid = _uid(request)
     collections = crud.list_bangumi_collections(db, uid)
@@ -241,6 +251,13 @@ def generate_report(request: Request, db: DbSession, tone: str = Form(default="s
             status_code=303,
         )
     tone = tone if tone in persona.TONE_LABELS else "sharp"
+    tone_prompt = (tone_prompt or "").strip()[: persona.MAX_TONE_PROMPT]
+    extra_prompt = (extra_prompt or "").strip()[: persona.MAX_EXTRA_PROMPT]
+    if tone == "custom" and not tone_prompt:
+        return RedirectResponse(
+            f"{PAGE}?error={quote('选择了「自定义语气」，请先填写语气说明')}",
+            status_code=303,
+        )
 
     bangumi_works = [persona.work_from_bangumi(item) for item in collections]
     bangumi_works = [work for work in bangumi_works if work]
@@ -254,7 +271,9 @@ def generate_report(request: Request, db: DbSession, tone: str = Form(default="s
     payload = {
         "profile": profile,
         "report": persona.build_template_report(profile),
-        "prompt": persona.build_llm_prompt(profile, tone),
+        "prompt": persona.build_llm_prompt(
+            profile, tone, tone_prompt=tone_prompt, extra_prompt=extra_prompt
+        ),
         "radar": persona.build_radar(profile["dimensions"]),
     }
     report = crud.get_persona_report(db, uid)
@@ -266,6 +285,8 @@ def generate_report(request: Request, db: DbSession, tone: str = Form(default="s
         payload=payload,
         narrative=None,
         source="template",
+        tone_prompt=tone_prompt or None,
+        extra_prompt=extra_prompt or None,
     )
     return RedirectResponse(f"{PAGE}?generated=1", status_code=303)
 

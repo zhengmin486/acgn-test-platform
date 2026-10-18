@@ -81,7 +81,7 @@
 <div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-3">
     <div>
         <h1 class="h3 mb-1 section-heading">作者 / 公司</h1>
-        <p class="text-muted small mb-0">按关联作品数从多到少排列；数据来自 Bangumi 信息卡识别。</p>
+        <p class="text-muted small mb-0">按关联作品数从多到少排列。</p>
     </div>
     <a class="btn btn-outline-secondary btn-sm" href="/">&larr; 返回首页</a>
 </div>
@@ -101,9 +101,7 @@
         </div>
         {% else %}
         <div class="detail-empty">
-            还没有识别到任何作者/公司关联。<br>
-            <span class="small">导入 Bangumi 条目时会自动识别信息卡；存量作品可运行
-            <code>python scripts/link_entities.py</code> 回填（预览模式，确认后加 --apply）。</span>
+            暂无作者 / 公司关联数据，先去<a href="/contents">全部作品</a>看看吧。
         </div>
         {% endif %}
     </div>

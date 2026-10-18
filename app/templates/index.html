@@ -10,30 +10,51 @@
 } %}
 {% set fallback_icon = "<svg class='svg-ic' viewBox='0 0 24 24' aria-hidden='true'><path d='M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z'/></svg>" %}
 
-{# ===== 顶部：平台标识 + 搜索入口（始终显示；搜索提交到「全部作品」页） ===== #}
+{# ===== 顶部 hero：只放平台标识 + 价值主张 + 主 CTA。
+   搜索不再占黄金位——已收编为导航栏全局搜索（base_content.html），/ 键聚焦 #nav-q；
+   全量筛选在 /contents 页。黄金位让给内容：hero 之下直接进「本日新番」。 ===== #}
 <section class="home-hero text-white rounded-3 p-4 p-md-5 mb-4">
     <h1 class="h3 mb-1">ACGN 内容平台</h1>
-    <p class="home-hero-sub mb-4">动画 · 漫画 · 游戏 · 轻小说一站浏览，支持关键词搜索与分类筛选。</p>
-    <form class="row g-2 align-items-end" method="get" action="/contents">
-        <div class="col-12 col-md-auto">
-            <label class="form-label small mb-0" for="home-type">类型</label>
-            <select name="type" id="home-type" class="form-select">
-                <option value="">全部</option>
-                {% for code, label in type_labels.items() %}
-                <option value="{{ code }}">{{ label }}</option>
-                {% endfor %}
-            </select>
-        </div>
-        <div class="col">
-            <label class="form-label small mb-0" for="home-q">关键词</label>
-            <input type="text" name="q" id="home-q" class="form-control" placeholder="搜索标题 / 简介">
-        </div>
-        <div class="col-12 col-md-auto">
-            <button class="btn btn-light" type="submit">搜索</button>
-            <a class="btn btn-outline-light" href="/contents">全部作品</a>
-        </div>
-    </form>
+    <p class="home-hero-sub mb-3">动画 · 漫画 · 游戏 · 轻小说一站浏览，本日新番与高分推荐持续更新。</p>
+    <div class="d-flex flex-wrap gap-2">
+        <a class="btn btn-light" href="/contents">浏览全部作品</a>
+        <a class="btn btn-outline-light" href="{{ '/me/persona' if current_user else '/persona' }}">测测你的阿宅画像 &rarr;</a>
+    </div>
 </section>
+
+{# ===== 本日新番：只展示今天排播的作品，紧随 hero 进首屏（内容钩子优先于工具表单）；
+   卡片上的时间即该作更新时间（HH:MM，精确到分），按时间先后排列。 ===== #}
+{% if spotlight %}
+<section class="mb-4">
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <h2 class="h5 mb-0 section-heading">本日新番</h2>
+        <a class="small fw-semibold" href="/schedule">全部档期 &rarr;</a>
+    </div>
+    <div class="spotlight-wrap" data-spotlight>
+        <button class="spotlight-nav spotlight-nav-prev" type="button" data-spotlight-prev aria-label="向左滚动更多新番">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="15 5 8 12 15 19"/></svg>
+        </button>
+        <div class="spotlight-track" data-spotlight-track>
+            {% for item in spotlight %}
+            {# 卡片点击落到站内作品搜索（按标题），不出站 #}
+            <a class="spotlight-card" href="/contents?q={{ item.title_main|urlencode }}">
+                <span class="spotlight-cover" aria-hidden="true">{{ item.title_main[:1] }}</span>
+                {% if item.image_url %}
+                <img class="spotlight-cover" src="{{ item.image_url }}" referrerpolicy="no-referrer" loading="lazy" alt="{{ item.title_main }}封面" onerror="this.style.display='none'">
+                {% endif %}
+                <span class="spotlight-meta">
+                    {% if item.broadcast_time %}<span class="badge schedule-time-badge">{{ item.broadcast_time }} 更新</span>{% endif %}
+                    <span class="spotlight-title">{{ item.title_main }}</span>
+                </span>
+            </a>
+            {% endfor %}
+        </div>
+        <button class="spotlight-nav spotlight-nav-next" type="button" data-spotlight-next aria-label="向右滚动更多新番">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="9 5 16 12 9 19"/></svg>
+        </button>
+    </div>
+</section>
+{% endif %}
 
 {# ===== 分类浏览（数量来自库内真实统计；磁贴进入作品页并按类型筛选） ===== #}
 <section class="mb-4">
@@ -94,6 +115,13 @@
     </section>
 
     <section class="col-12 col-lg-4">
+        {# ===== 阿宅画像引流卡：游客免登录试算，登录用户直达自己的画像 ===== #}
+        <a class="home-persona-card mb-4" href="{{ '/me/persona' if current_user else '/persona' }}">
+            <span class="home-persona-kicker">阿宅画像</span>
+            <span class="home-persona-title">测测你的阿宅画像</span>
+            <span class="home-persona-sub">基于收藏与浏览记录，生成你的专属画像</span>
+            <span class="home-persona-cta">{{ '查看我的画像 →' if current_user else '免登录试算 →' }}</span>
+        </a>
         <div class="d-flex justify-content-between align-items-center mb-3">
             <h2 class="h5 mb-0 section-heading">最新资讯</h2>
             <a class="small" href="/articles">全部资讯 &rarr;</a>

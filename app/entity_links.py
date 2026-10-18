@@ -34,7 +34,6 @@ import unicodedata
 from dataclasses import dataclass, field
 
 from app import crud
-from app.models import Content
 
 # 单部作品最多保留的作者/公司关联数（与 crud.MAX_CONTENT_ENTITY_LINKS 一致）。
 MAX_CONTENT_ENTITY_LINKS = crud.MAX_CONTENT_ENTITY_LINKS

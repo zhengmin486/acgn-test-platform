@@ -1,7 +1,7 @@
 {% extends "base_content.html" %}
 {% from "_pager.html" import pager %}
-{# 个人空间：用户信息 + 简介编辑 + 收藏 / 浏览记录 / 标注（Tab 切换 + 分页）。
-   仅登录用户可达（路由层保证）；收藏、记录与标注均只属于当前账号。 #}
+{# 个人空间：用户信息 + 简介编辑 + 收藏（含标注）/ 浏览记录 / 词条申请（Tab 切换 + 分页）。
+   仅登录用户可达（路由层保证）；收藏（含标注）、记录与申请均只属于当前账号。 #}
 {% block title %}个人空间 - ACGN 内容平台{% endblock %}
 
 {% macro stars(rating) %}
@@ -13,7 +13,7 @@
 <div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-3">
     <div>
         <h1 class="h3 mb-1 section-heading">个人空间</h1>
-        <p class="text-muted small mb-0">账号信息、个人简介、收藏、浏览记录与作品标注，只属于你本人。</p>
+        <p class="text-muted small mb-0">账号信息、个人简介、收藏（含看过 / 未看 / 想看标注）、浏览记录与词条申请，只属于你本人。</p>
     </div>
     <a class="btn btn-outline-secondary btn-sm" href="/">&larr; 返回首页</a>
 </div>
@@ -24,8 +24,29 @@
 {% elif request.query_params.get('bio') == 'error' %}
 <div class="alert alert-danger py-2">简介保存失败：长度不能超过 {{ bio_max_length }} 个字符。</div>
 {% endif %}
+{% if request.query_params.get('avatar') == 'ok' %}
+<div class="alert alert-success py-2">头像已更新。</div>
+{% elif request.query_params.get('avatar') == 'removed' %}
+<div class="alert alert-info py-2">已恢复默认头像。</div>
+{% elif request.query_params.get('avatar_err') %}
+{% set avatar_error = request.query_params.get('avatar_err') %}
+<div class="alert alert-danger py-2">
+    {% if avatar_error == 'too_big' %}图片太大：头像不能超过 2 MB。
+    {% elif avatar_error == 'not_image' %}格式不支持：请上传 JPEG / PNG / WebP / GIF。
+    {% elif avatar_error == 'corrupt' %}图片无法解码，可能已损坏，请换一张。
+    {% elif avatar_error == 'empty' %}没有选择图片。
+    {% else %}头像上传失败，请重试。{% endif %}
+</div>
+{% endif %}
 {% if request.query_params.get('fav_removed') %}
-<div class="alert alert-info py-2">已取消收藏。</div>
+<div class="alert alert-info py-2">已取消收藏{% if request.query_params.get('mark') == 'kept' %}，标注仍保留（重新收藏即恢复可见）{% endif %}。</div>
+{% endif %}
+{% if request.query_params.get('status_ok') %}
+<div class="alert alert-success py-2">已更新标注。</div>
+{% elif request.query_params.get('status_err') %}
+<div class="alert alert-warning py-2">标注无效，请重新选择。</div>
+{% elif request.query_params.get('status_cleared') %}
+<div class="alert alert-info py-2">已清除标注，作品仍在收藏里。</div>
 {% endif %}
 {% if request.query_params.get('fav_cleared') %}
 <div class="alert alert-info py-2">已清空收藏（{{ request.query_params.get('fav_cleared') }} 条）。</div>
@@ -37,11 +58,16 @@
 <div class="alert alert-info py-2">已清空浏览记录（{{ request.query_params.get('history_cleared') }} 条）。</div>
 {% endif %}
 
-{# ===== 用户信息卡：头像占位（渐变 + 首字）+ 账号信息 + 统计 ===== #}
+{# ===== 用户信息卡：头像（已上传则显示图片，否则渐变 + 首字）+ 账号信息 + 统计 ===== #}
 <div class="card app-card mb-3">
     <div class="card-body p-4">
         <div class="d-flex flex-wrap align-items-center gap-3">
+            {% if account.avatar_url %}
+            <img class="space-avatar space-avatar-img" src="{{ account.avatar_url }}"
+                 alt="{{ account.username }} 的头像" width="64" height="64">
+            {% else %}
             <span class="space-avatar" aria-hidden="true">{{ account.username[:1] | upper }}</span>
+            {% endif %}
             <div class="flex-grow-1">
                 <div class="d-flex flex-wrap align-items-center gap-2">
                     <span class="h5 mb-0">{{ account.username }}</span>
@@ -58,6 +84,25 @@
                 <a class="btn btn-outline-secondary btn-sm" href="/me?tab=history">浏览记录 &rarr;</a>
             </div>
         </div>
+        <div class="d-flex flex-wrap align-items-end gap-2 mt-3">
+            <form method="post" action="/me/avatar" enctype="multipart/form-data"
+                  class="d-flex flex-wrap align-items-end gap-2">
+                <div>
+                    <label class="form-label small mb-0" for="avatar-file">换头像</label>
+                    <input class="form-control form-control-sm" type="file" id="avatar-file"
+                           name="file" accept="image/jpeg,image/png,image/webp,image/gif" required>
+                </div>
+                <button class="btn btn-sm btn-outline-primary" type="submit">上传</button>
+            </form>
+            {% if account.avatar_url %}
+            <form method="post" action="/me/avatar/delete" class="m-0"
+                  data-confirm="恢复默认头像？已上传的图片会被删除。" data-confirm-title="恢复默认头像">
+                <button class="btn btn-sm btn-outline-secondary" type="submit">恢复默认</button>
+            </form>
+            {% endif %}
+            <span class="form-text mb-0">JPEG / PNG / WebP / GIF，2 MB 以内；会自动裁成正方形。</span>
+        </div>
+
         <div class="row g-3 mt-3">
             <div class="col-6 col-md-3">
                 <div class="card app-card stat-card text-center h-100">
@@ -119,7 +164,7 @@
     </div>
 </div>
 
-{# ===== Tab：作品收藏 / 浏览记录 / 作品标注 ===== #}
+{# ===== Tab：作品收藏（含标注） / 浏览记录 / 词条申请 ===== #}
 <ul class="nav space-tabs mb-3">
     <li class="nav-item">
         <a class="nav-link space-tab{% if tab == 'favorites' %} active{% endif %}"
@@ -130,26 +175,39 @@
            href="/me?tab=history">浏览记录（{{ history_count }}）</a>
     </li>
     <li class="nav-item">
-        <a class="nav-link space-tab{% if tab == 'marks' %} active{% endif %}"
-           href="/me?tab=marks">作品标注（{{ marks_count }}）</a>
-    </li>
-    <li class="nav-item">
         <a class="nav-link space-tab{% if tab == 'submissions' %} active{% endif %}"
            href="/me?tab=submissions">词条申请（{{ submissions_count }}）</a>
     </li>
 </ul>
 
 {% if tab == 'favorites' %}
-{# ===== 作品收藏：分类筛选（追番 / 漫画 / 游戏 / 轻小说）+ 卡片网格 + 单条取消 + 清空 ===== #}
+{# ===== 作品收藏：分类筛选（追番 / 漫画 / 游戏 / 轻小说）+ 状态筛选（标注）+ 卡片网格 ===== #}
 {% if favorites_count %}
-<div class="tag-filter mb-3">
-    <a class="tag-chip{% if not content_type %} active{% endif %}" href="/me?tab=favorites">
+<div class="tag-filter mb-2">
+    <span class="text-muted small me-1">分类</span>
+    <a class="tag-chip{% if not content_type %} active{% endif %}" href="/me?tab=favorites{% if status %}&amp;status={{ status }}{% endif %}">
         全部<span class="tag-count">{{ favorites_count }}</span>
     </a>
     {% for key, label in favorite_type_labels.items() %}
     <a class="tag-chip{% if content_type == key %} active{% endif %}"
-       href="/me?tab=favorites&amp;type={{ key }}">
+       href="/me?tab=favorites&amp;type={{ key }}{% if status %}&amp;status={{ status }}{% endif %}">
         {{ label }}<span class="tag-count">{{ favorite_type_counts.get(key, 0) }}</span>
+    </a>
+    {% endfor %}
+</div>
+<div class="tag-filter mb-3">
+    <span class="text-muted small me-1">标注</span>
+    <a class="tag-chip{% if not status %} active{% endif %}" href="/me?tab=favorites{% if content_type %}&amp;type={{ content_type }}{% endif %}">
+        全部<span class="tag-count">{{ favorites_count }}</span>
+    </a>
+    <a class="tag-chip{% if status == status_filter_unmarked %} active{% endif %}"
+       href="/me?tab=favorites&amp;status={{ status_filter_unmarked }}{% if content_type %}&amp;type={{ content_type }}{% endif %}">
+        未标注<span class="tag-count">{{ unmarked_count }}</span>
+    </a>
+    {% for key, label in status_labels.items() %}
+    <a class="tag-chip{% if status == key %} active{% endif %}"
+       href="/me?tab=favorites&amp;status={{ key }}{% if content_type %}&amp;type={{ content_type }}{% endif %}">
+        {{ label }}<span class="tag-count">{{ status_counts.get(key, 0) }}</span>
     </a>
     {% endfor %}
 </div>
@@ -157,7 +215,7 @@
 
 {% if favorites %}
 <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
-    <p class="text-muted small mb-0">共 {{ favorites_total }} 条{% if content_type %}{{ favorite_type_labels.get(content_type, '收藏') }}{% else %}收藏{% endif %} · 第 {{ page }}/{{ total_pages }} 页</p>
+    <p class="text-muted small mb-0">共 {{ favorites_total }} 条{% if content_type %}{{ favorite_type_labels.get(content_type, '收藏') }}{% else %}收藏{% endif %}{% if status %}（{% if status == status_filter_unmarked %}未标注{% else %}{{ status_labels.get(status, status) }}{% endif %}）{% endif %} · 第 {{ page }}/{{ total_pages }} 页</p>
     <form method="post" action="/me/favorites/clear" class="m-0"
           data-confirm="{% if content_type %}确定清空该分类的全部收藏吗？{% else %}确定清空全部收藏吗？{% endif %}"
           data-confirm-title="清空收藏">
@@ -191,22 +249,45 @@
                 <span class="small text-secondary mt-1 work-card-summary">{{ item.summary[:60] }}{% if item.summary|length > 60 %}…{% endif %}</span>
             </span>
         </a>
-        <form method="post" action="/me/favorites/{{ item.id }}/remove" class="mt-2">
-            {% if content_type %}<input type="hidden" name="cat" value="{{ content_type }}">{% endif %}
-            <button class="btn btn-outline-secondary btn-sm w-100" type="submit">取消收藏</button>
+        <form method="post" action="/contents/{{ item.id }}/status" class="mt-2 d-flex flex-wrap gap-1">
+            <input type="hidden" name="next" value="/me?tab=favorites{% if content_type %}&amp;type={{ content_type }}{% endif %}{% if status %}&amp;status={{ status }}{% endif %}">
+            {% for key, label in status_labels.items() %}
+            <button class="status-pill status-pill-sm{% if fav_statuses.get(item.id) == key %} active{% endif %}"
+                    type="submit" name="status" value="{{ key }}">{{ label }}</button>
+            {% endfor %}
         </form>
+        <div class="d-flex align-items-center gap-2 mt-1">
+            {% if fav_statuses.get(item.id) %}
+            <form method="post" action="/contents/{{ item.id }}/status/clear" class="m-0">
+                <input type="hidden" name="next" value="/me?tab=favorites{% if content_type %}&amp;type={{ content_type }}{% endif %}{% if status %}&amp;status={{ status }}{% endif %}">
+                <button class="btn btn-link btn-sm text-muted p-0" type="submit">清除标注</button>
+            </form>
+            {% endif %}
+            <form method="post" action="/me/favorites/{{ item.id }}/remove" class="m-0 flex-grow-1">
+                {% if content_type %}<input type="hidden" name="cat" value="{{ content_type }}">{% endif %}
+                {% if status %}<input type="hidden" name="st" value="{{ status }}">{% endif %}
+                <button class="btn btn-outline-secondary btn-sm w-100" type="submit">取消收藏</button>
+            </form>
+        </div>
     </div>
     {% endfor %}
 </div>
 {% if total_pages > 1 %}
-{% set fav_pager_base = '/me?tab=favorites&' ~ ('type=' ~ content_type ~ '&' if content_type else '') %}
+{% set fav_pager_base = '/me?tab=favorites&' ~ ('type=' ~ content_type ~ '&' if content_type else '') ~ ('status=' ~ status ~ '&' if status else '') %}
 <div class="mt-3">
     {{ pager(fav_pager_base, page, total_pages) }}
 </div>
 {% endif %}
 {% else %}
 <div class="detail-empty">
-    {% if content_type and favorites_count %}
+    {% if status and favorites_count %}
+    {% if status == status_filter_unmarked %}
+    名单里没有未标注的作品，都整理完了。<br>
+    {% else %}
+    还没有标注为「{{ status_labels.get(status, '') }}」的作品。<br>
+    {% endif %}
+    <a class="small" href="/me?tab=favorites">查看全部收藏</a>
+    {% elif content_type and favorites_count %}
     {% set cat_label = favorite_type_labels.get(content_type, '收藏') %}
     还没有{{ cat_label }}。<br>
     <a class="small" href="/contents?type={{ content_type }}">去{{ type_labels.get(content_type, '作品') }}分类挑一部</a>
@@ -325,75 +406,6 @@
 <div class="detail-empty">
     还没有提交过词条申请。<br>
     <a class="small" href="/submit">申请新增第一个词条</a>
-</div>
-{% endif %}
-
-{% else %}
-{# ===== 作品标注：看过 / 未看 / 想看（按标注筛选 + 表格内直接切换） ===== #}
-{% if marks_count %}
-<div class="tag-filter mb-3">
-    <a class="tag-chip{% if not status %} active{% endif %}" href="/me?tab=marks">
-        全部<span class="tag-count">{{ marks_count }}</span>
-    </a>
-    {% for key, label in status_labels.items() %}
-    <a class="tag-chip{% if status == key %} active{% endif %}"
-       href="/me?tab=marks&amp;status={{ key }}">
-        {{ label }}<span class="tag-count">{{ status_counts.get(key, 0) }}</span>
-    </a>
-    {% endfor %}
-</div>
-{% endif %}
-
-{% if marks %}
-<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-2">
-    <p class="text-muted small mb-0">共 {{ marks_total }} 部{% if status %}{{ status_labels.get(status, '') }}{% endif %}作品 · 第 {{ page }}/{{ total_pages }} 页</p>
-</div>
-<div class="card table-card">
-    <div class="table-responsive">
-        <table class="table table-hover align-middle mb-0">
-            <thead>
-                <tr>
-                    <th>作品</th>
-                    <th>类型</th>
-                    <th>标注</th>
-                    <th>更新时间</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for item, mark, updated_at in marks %}
-                <tr>
-                    <td><a class="fw-semibold" href="/contents/{{ item.id }}">{{ item.title }}</a></td>
-                    <td><span class="badge detail-type-badge-sm">{{ type_labels.get(item.type, item.type) }}</span></td>
-                    <td>
-                        <form method="post" action="/contents/{{ item.id }}/status" class="m-0 d-flex flex-wrap gap-1">
-                            <input type="hidden" name="next" value="/me?tab=marks{% if status %}&amp;status={{ status }}{% endif %}">
-                            {% for key, label in status_labels.items() %}
-                            <button class="status-pill status-pill-sm{% if mark == key %} active{% endif %}"
-                                    type="submit" name="status" value="{{ key }}">{{ label }}</button>
-                            {% endfor %}
-                        </form>
-                    </td>
-                    <td class="text-muted small">{{ updated_at.strftime('%Y-%m-%d %H:%M') }}</td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-    </div>
-</div>
-{% if total_pages > 1 %}
-{% set marks_pager_base = '/me?tab=marks&' ~ ('status=' ~ status ~ '&' if status else '') %}
-<div class="mt-3">
-    {{ pager(marks_pager_base, page, total_pages) }}
-</div>
-{% endif %}
-{% else %}
-<div class="detail-empty">
-    {% if status %}
-    还没有标注为「{{ status_labels.get(status, '') }}」的作品。<br>
-    {% else %}
-    还没有标注任何作品。<br>
-    {% endif %}
-    <a class="small" href="/contents">去全部作品挑一部标注</a>
 </div>
 {% endif %}
 

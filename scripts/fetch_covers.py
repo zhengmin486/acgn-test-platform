@@ -45,7 +45,7 @@ from sqlalchemy.orm import sessionmaker  # noqa: E402
 from app import crud  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.database import build_engine  # noqa: E402
-from app.models import Content, ContentFavorite, ContentStatus, ContentViewHistory  # noqa: E402
+from app.models import Content, ContentFavorite, ContentViewHistory  # noqa: E402
 
 # 复用导入脚本的网络层（fetch_subject / build_opener / download_cover 等）。
 # scripts/ 不是包，按文件路径加载（与直接运行 import_bangumi.py 等价）。
@@ -106,9 +106,12 @@ class CoverSummary:
 
 
 def _engaged_ids(db) -> set[int]:
-    """有互动的作品 id：被收藏 / 标注 / 浏览过（多用户取并集）。"""
+    """有互动的作品 id：被收藏 / 标注 / 浏览过（多用户取并集）。
+
+    标注已并入收藏行（content_favorites），只需扫收藏与浏览记录两张表。
+    """
     ids: set[int] = set()
-    for model in (ContentFavorite, ContentStatus, ContentViewHistory):
+    for model in (ContentFavorite, ContentViewHistory):
         ids.update(int(value) for value in db.scalars(select(model.content_id).distinct()))
     return ids
 

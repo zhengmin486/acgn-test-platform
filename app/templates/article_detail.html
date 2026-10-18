@@ -32,18 +32,6 @@
 <div class="card detail-section mt-3">
     <div class="card-body p-4">
         <div class="article-body">{{ article.body }}</div>
-
-        {% if article.source or article.original_url %}
-        <hr class="article-source-divider">
-        {% if article.source %}
-        <p class="text-muted small mb-1">来源：{{ article.source }}</p>
-        {% endif %}
-        {% if article.original_url %}
-        <p class="small mb-0">
-            <a href="{{ article.original_url }}" target="_blank" rel="noopener noreferrer">阅读原文 ↗</a>
-        </p>
-        {% endif %}
-        {% endif %}
     </div>
 </div>
 

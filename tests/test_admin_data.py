@@ -15,11 +15,11 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import sessionmaker
 
-from app import content_admin_pages
+from app import content_admin_pages, crud
 from app.database import Base, get_db
 from app.main import app
 from app.models import AnimeSchedule, Article, Content, ExecutionBatch
-from auth_helpers import create_accounts, login_as_admin, login_as_user
+from auth_helpers import create_accounts, login, login_as_admin, login_as_user
 from scripts.sync_yuc_schedule import YucFetchError
 
 CONTENTS = [
@@ -415,6 +415,57 @@ def test_content_platform_hides_content_management_for_user(data_env):
     """普通用户的内容平台导航不出现「内容管理」入口。"""
     body = data_env.user.get("/").text
     assert "/manage" not in body
+
+
+def test_content_platform_nav_collapses_into_user_menu(data_env):
+    """导航瘦身：一级只剩公共内容域；我的与管理收进用户下拉菜单。"""
+    body = data_env.admin.get("/").text
+    assert 'id="user-menu-toggle"' in body
+    assert 'data-bs-toggle="dropdown"' in body
+    # 运营入口仍在页面里，但住在下拉菜单中，不再各占一个一级导航项
+    assert 'href="/manage"' in body and "内容管理" in body
+    assert 'href="/admin"' in body and "站点设置" in body
+    assert 'href="/testcases"' in body and "测试平台" in body
+    # 画像与个人空间同理：菜单内可达，不再并列成两个一级入口
+    assert 'href="/me"' in body and 'href="/me/persona"' in body
+
+
+def test_guest_nav_shows_only_public_items(data_env):
+    """游客：三个公共导航项 + 注册 / 登录；没有用户菜单，也没有任何运营入口。"""
+    body = data_env.guest.get("/").text
+    assert 'data-bs-toggle="dropdown"' not in body
+    assert 'href="/manage"' not in body
+    assert 'href="/admin"' not in body
+    assert 'href="/register"' in body and 'href="/login"' in body
+    # 画像引流卡对游客链到免登录试算页
+    assert 'href="/persona"' in body
+
+
+def test_works_page_links_creator_roster(data_env):
+    """作者/公司花名册不是一级导航项，从「全部作品」页头部进入。"""
+    body = data_env.guest.get("/contents").text
+    assert 'href="/creators"' in body
+
+
+def test_settings_landing_lists_all_subpages(data_env):
+    """/admin 集合页让三个子页全部可见可达；角色管理卡仅站长可见。"""
+    body = data_env.admin.get("/admin").text
+    assert "站点设置" in body
+    assert 'href="/admin/accounts"' in body
+    assert 'href="/admin/invites"' in body
+    assert 'href="/admin/roles"' not in body
+    # 提一个站长账号：角色管理卡出现
+    db = data_env.session_factory()
+    try:
+        crud.create_user(
+            db, username="nav_owner", password="owner-test-pass", role=crud.ROLE_OWNER
+        )
+    finally:
+        db.close()
+    owner_client = TestClient(app)
+    login(owner_client, "nav_owner", "owner-test-pass")
+    owner_body = owner_client.get("/admin").text
+    assert 'href="/admin/roles"' in owner_body
 
 
 # ---------- 回归检查（总览页质量条） ----------

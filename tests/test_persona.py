@@ -21,7 +21,7 @@ from app import crud, persona, persona_pages
 from app.config import settings
 from app.database import Base, get_db
 from app.main import app
-from app.models import Content, ContentFavorite, ContentStatus
+from app.models import Content, ContentFavorite
 from auth_helpers import USER_USERNAME, create_accounts, login_as_user
 
 COLLECTIONS = [
@@ -649,7 +649,10 @@ class TestSiteSync:
             marks = {
                 row.content_id: row.status
                 for row in db.scalars(
-                    select(ContentStatus).where(ContentStatus.user_id == uid)
+                    select(ContentFavorite).where(
+                        ContentFavorite.user_id == uid,
+                        ContentFavorite.status.is_not(None),
+                    )
                 )
             }
             assert marks[by_bgm[1].id] == "seen"
@@ -694,9 +697,9 @@ class TestSiteSync:
             uid = _uid(persona_env.session_factory)
             content = db.scalar(select(Content).where(Content.bangumi_id == 1))
             row = db.scalar(
-                select(ContentStatus).where(
-                    ContentStatus.user_id == uid,
-                    ContentStatus.content_id == content.id,
+                select(ContentFavorite).where(
+                    ContentFavorite.user_id == uid,
+                    ContentFavorite.content_id == content.id,
                 )
             )
             assert row.status == "unseen"
@@ -816,9 +819,6 @@ class TestSiteImportTrace:
             assert crud.count_user_site_imports(db, uid) == 0
             assert db.scalars(
                 select(ContentFavorite).where(ContentFavorite.user_id == uid)
-            ).all() == []
-            assert db.scalars(
-                select(ContentStatus).where(ContentStatus.user_id == uid)
             ).all() == []
         finally:
             db.close()
@@ -957,3 +957,100 @@ class TestContinueImport:
         persona_env.client.post("/me/persona/sync-site", follow_redirects=False)
         after = persona_env.client.get("/me/persona?site=ok&site_new=1&site_linked=3&site_fav=0&site_mark=0&site_limited=0")
         assert "继续导入剩余" not in after.text
+
+
+class TestCustomTone:
+    """自定义语气与大段追加提示词：既能改语气，也能塞整段要求。"""
+
+    def _profile(self):
+        return persona.build_profile(
+            [
+                {
+                    "title": "A", "type": "anime", "year": 2006, "status": "seen",
+                    "tags": ["日常"], "score": 8.4, "popularity": 50000,
+                    "rate": 9, "source": "bangumi",
+                }
+            ],
+            bangumi_total=1,
+        )
+
+    def test_custom_tone_and_extra_appended(self):
+        prompt = persona.build_llm_prompt(
+            self._profile(),
+            "custom",
+            tone_prompt="像老朋友聊天，多用梗，少用书面语",
+            extra_prompt="分三段写，每段不超过 80 字；引用至少两部作品；禁止使用表情符号。",
+        )
+        assert "像老朋友聊天，多用梗，少用书面语" in prompt
+        assert "分三段写，每段不超过 80 字；引用至少两部作品；禁止使用表情符号。" in prompt
+        assert "额外要求（用户自定义" in prompt
+        # 安全底线仍在额外要求之前，不会被覆盖
+        assert prompt.index("不得编造") < prompt.index("额外要求（用户自定义")
+
+    def test_preset_tone_ignores_custom_text(self):
+        prompt = persona.build_llm_prompt(
+            self._profile(), "sharp", tone_prompt="这段不该生效", extra_prompt=""
+        )
+        assert "善意锐评" in prompt
+        assert "这段不该生效" not in prompt
+
+    def test_extra_prompt_truncated(self):
+        long_text = "啊" * (persona.MAX_EXTRA_PROMPT + 50)
+        prompt = persona.build_llm_prompt(self._profile(), "sharp", extra_prompt=long_text)
+        assert prompt.count("啊") == persona.MAX_EXTRA_PROMPT
+
+    def test_generate_saves_custom_prompt(self, persona_env):
+        _seed_collections(persona_env.session_factory)
+        resp = persona_env.client.post(
+            "/me/persona/generate",
+            data={
+                "tone": "custom",
+                "tone_prompt": "像电台主播，语速快、爱插科打诨",
+                "extra_prompt": "最后加一段给新番的推荐清单，按类型分组。",
+            },
+            follow_redirects=False,
+        )
+        assert "generated=1" in resp.headers["location"]
+
+        db = persona_env.session_factory()
+        try:
+            report = crud.get_persona_report(db, _uid(persona_env.session_factory))
+            assert report.tone == "custom"
+            assert report.tone_prompt == "像电台主播，语速快、爱插科打诨"
+            assert report.extra_prompt == "最后加一段给新番的推荐清单，按类型分组。"
+            prompt = report.payload["prompt"]
+            assert "像电台主播" in prompt
+            assert "最后加一段给新番的推荐清单" in prompt
+        finally:
+            db.close()
+
+    def test_generate_requires_custom_text(self, persona_env):
+        _seed_collections(persona_env.session_factory)
+        resp = persona_env.client.post(
+            "/me/persona/generate",
+            data={"tone": "custom", "tone_prompt": "   "},
+            follow_redirects=False,
+        )
+        assert "error=" in resp.headers["location"]
+
+        db = persona_env.session_factory()
+        try:
+            assert crud.get_persona_report(db, _uid(persona_env.session_factory)) is None
+        finally:
+            db.close()
+
+    def test_page_prefills_saved_prompts(self, persona_env):
+        _seed_collections(persona_env.session_factory)
+        persona_env.client.post(
+            "/me/persona/generate",
+            data={
+                "tone": "custom",
+                "tone_prompt": "幽默一点，但别刻薄",
+                "extra_prompt": "每段前面加一个小标题。",
+            },
+            follow_redirects=False,
+        )
+        page = persona_env.client.get("/me/persona")
+        assert "幽默一点，但别刻薄" in page.text
+        assert "每段前面加一个小标题。" in page.text
+        assert "自定义语气" in page.text

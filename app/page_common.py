@@ -39,6 +39,12 @@ templates = Jinja2Templates(
 templates.env.globals["thumb_src"] = media.thumb_src
 templates.env.globals["full_src"] = media.full_src
 
+# 作品类型标签（模板全局 + 各路由复用的规范来源）：
+# 导航搜索的类型下拉在所有内容页都要渲染，不能依赖单页路由传参，
+# 所以提升到这里注册为 Jinja 全局；business_pages 仅 re-export 保持旧导入路径不变。
+CONTENT_TYPE_LABELS = {"anime": "动画", "comic": "漫画", "game": "游戏", "novel": "轻小说"}
+templates.env.globals["type_labels"] = CONTENT_TYPE_LABELS
+
 
 # 按 404 主体归属选择所属区域的布局与返回入口：
 # 内容类主体（内容/资讯）落在内容平台布局，测试/管理类主体落在测试管理平台布局。

@@ -20,6 +20,28 @@ from app.page_common import DbSession, templates
 router = APIRouter(tags=["site-admin"])
 
 
+# ---------- 站点设置总览（三个子页的集合入口） ----------
+
+
+@router.get("/admin", response_class=HTMLResponse)
+def settings_index(request: Request, db: DbSession):
+    """站点设置集合页：账号验证 / 注册邀请码 / 角色管理三个子页的统一入口。
+
+    一级导航「站点设置」指向本页，而不是深链 /admin/accounts：
+    三个子页对管理员全部可见可达（角色管理仅站长可进，路由层另有 owner 校验）。
+    """
+    current_user = getattr(request.state, "current_user", None)
+    return templates.TemplateResponse(
+        request=request,
+        name="admin_settings.html",
+        context={
+            "is_owner": bool(current_user and current_user.is_owner),
+            "pending_count": len(crud.list_unverified_users(db)),
+            "invite_count": len(crud.list_invite_codes(db)),
+        },
+    )
+
+
 # ---------- 账号验证（邮箱验证的人工兜底入口） ----------
 
 

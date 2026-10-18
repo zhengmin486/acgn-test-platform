@@ -242,11 +242,55 @@ def test_data_subnav_has_sync_entry(sync_env):
 
 
 def test_season_form_offers_local_seasons(sync_env):
-    """新番档期表单：档期下拉来自本地已同步档期。"""
+    """新番档期表单：档期输入框可自由填写，建议列表含本地已同步档期。"""
     body = sync_env.admin.get(SYNC_PATH, params={"task": "yuc_schedule"}).text
     assert 'name="scope"' in body
     assert "202610" in body and "202607" in body
     assert "Yuc.wiki" in body
+
+
+def test_season_form_allows_typing_new_season(sync_env):
+    """档期不能只给「本地已同步」的下拉：那会让页面有数据后只剩老选项。"""
+    body = sync_env.admin.get(SYNC_PATH, params={"task": "yuc_schedule"}).text
+    # 自由输入框 + 建议列表，而不是只能选的 select
+    assert '<input class="form-control form-control-sm" id="sync-scope" name="scope"' in body
+    assert 'list="season-suggestions"' in body
+    assert "<select" not in body
+    assert "也可直接填任意 YYYYMM" in body
+
+
+def test_suggest_season_codes_covers_local_and_nearby():
+    """建议项 = 本地已同步档期（带条数）+ 今天前后三个月，按档期倒序。"""
+    from datetime import datetime
+
+    local = [
+        {"season_code": "202610", "count": 12},
+        {"season_code": "202604", "count": 3},
+    ]
+    items = sync_tasks.suggest_season_codes(local, today=datetime(2026, 10, 18))
+    codes = [item["season_code"] for item in items]
+    assert codes == sorted(codes, reverse=True)
+    assert len(codes) == len(set(codes))
+    # 前后三个月 + 本地已有的两个
+    assert {"202607", "202610", "202611", "202701", "202604"} <= set(codes)
+    labels = {item["season_code"]: item["label"] for item in items}
+    assert labels["202610"] == "202610（本地 12 条）"
+    assert labels["202701"] == "202701"  # 没同步过，不带本地条数
+    assert next(i for i in items if i["season_code"] == "202604")["count"] == 3
+
+
+def test_suggest_season_codes_handles_empty_local():
+    """本地没有任何档期时也要有建议（否则用户不知道能填什么）。"""
+    from datetime import datetime
+
+    items = sync_tasks.suggest_season_codes([], today=datetime(2026, 1, 15))
+    codes = [item["season_code"] for item in items]
+    # 2026 年 1 月前后各三个月
+    assert set(codes) == {
+        "202510", "202511", "202512", "202601", "202602", "202603", "202604",
+    }
+    assert codes[0] == "202604"  # 倒序：最近的在前
+    assert all(item["count"] is None for item in items)
 
 
 def test_articles_form_offers_categories_and_limit(sync_env):

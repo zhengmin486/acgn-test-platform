@@ -18,6 +18,7 @@ from app import (
     content_admin_pages,
     cover_admin,
     crud,
+    ingest_api,
     legacy_redirects,
     persona_pages,
     site_admin_pages,
@@ -49,6 +50,11 @@ app = FastAPI(
 
 app.include_router(auth.router)
 app.include_router(api.router)
+# 增量入库通道（/api/ingest/*）：本机抓 Bangumi 后回传服务器入库。
+# 鉴权在端点内（X-Ingest-Key + 站长），不在这里挂 require_admin_api——
+# 抓取端是脚本、没有站内登录态。未配置 INGEST_API_KEY 时端点一律 503。
+app.include_router(ingest_api.router)
+
 # 测试用例 / 执行记录 / 批次 API：仅管理员可访问（未登录 401、越权 403）。
 app.include_router(cases.router, dependencies=[Depends(require_admin_api)])
 app.include_router(business_pages.router)
@@ -83,6 +89,14 @@ if not COVER_DIR.is_absolute():
     COVER_DIR = BASE_DIR.parent / COVER_DIR
 COVER_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/covers", StaticFiles(directory=COVER_DIR), name="covers")
+
+# 用户头像目录：与封面同一套「可指到其它盘符」的配置，挂到 /avatars。
+# User.avatar_url 存 /avatars/<文件名>；目录不存在则建，保证首次上传前挂载有效。
+AVATAR_DIR = Path(settings.avatar_storage_dir)
+if not AVATAR_DIR.is_absolute():
+    AVATAR_DIR = BASE_DIR.parent / AVATAR_DIR
+AVATAR_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/avatars", StaticFiles(directory=AVATAR_DIR), name="avatars")
 
 # 页面级拒绝的统一处理：未登录 -> 登录页；权限不足 -> 403 页面。
 app.add_exception_handler(LoginRequired, login_required_handler)

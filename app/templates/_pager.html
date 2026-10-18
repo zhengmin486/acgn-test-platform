@@ -1,16 +1,18 @@
-{# 分页控件：调用方传入 base（已拼好除 page 外的查询串，以 ? 或 &amp; 结尾） #}
-{% macro pager(base, page, total_pages) %}
+{# 分页控件：调用方传入 base（已拼好除 page 外的查询串，以 ? 或 &amp; 结尾）。
+   frag 为可选锚点（如 #works-list），默认空串——不传时输出与从前完全一致，
+   只有显式传入的调用方才在链接末尾追加片段，用于翻页后把视口落到列表顶部。 #}
+{% macro pager(base, page, total_pages, frag='') %}
 {% if total_pages > 1 %}
 <nav aria-label="分页">
     <ul class="pagination pagination-sm mb-0">
         <li class="page-item{% if page <= 1 %} disabled{% endif %}">
-            <a class="page-link" href="{{ base }}page={{ page - 1 }}">上一页</a>
+            <a class="page-link" href="{{ base }}page={{ page - 1 }}{{ frag }}">上一页</a>
         </li>
         <li class="page-item disabled">
             <span class="page-link">第 {{ page }} / {{ total_pages }} 页</span>
         </li>
         <li class="page-item{% if page >= total_pages %} disabled{% endif %}">
-            <a class="page-link" href="{{ base }}page={{ page + 1 }}">下一页</a>
+            <a class="page-link" href="{{ base }}page={{ page + 1 }}{{ frag }}">下一页</a>
         </li>
     </ul>
 </nav>

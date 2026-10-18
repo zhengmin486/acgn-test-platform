@@ -10,17 +10,19 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse
 from urllib.parse import quote
 
+from sqlalchemy.exc import SQLAlchemyError
+
 from app import bangumi_meta, crud, media
 from app.config import settings
-from app.page_common import DbSession, render_missing, templates
+from app.page_common import CONTENT_TYPE_LABELS, DbSession, render_missing, templates
 
 router = APIRouter(tags=["pages"])
 
 
 # ---------- ACGN 内容展示（契约不变） ----------
 
-# 内容搜索的类型选项（中文标签）与分页大小；与 /api/contents 的类型全集一致。
-CONTENT_TYPE_LABELS = {"anime": "动画", "comic": "漫画", "game": "游戏", "novel": "轻小说"}
+# 内容搜索的类型选项（中文标签）规范来源在 page_common（模板全局 + re-export）；
+# 分页大小沿用本模块常量。
 CONTENT_PAGE_SIZE = 20
 
 
@@ -32,6 +34,21 @@ def index(request: Request, db: DbSession):
     全量浏览与关键词/类型搜索统一落在「全部作品」页（/contents），
     首页不再承载全量列表（无分页的全量表不适合门户页）。
     """
+    # 首页「本日新番」：只取今天星期几（weekday 1=周一…7=周日）的档期作品，
+    # 按播出时间（HH:MM，到分）升序取前 6 条（带真实封面，外链 B 站图床）。
+    # 今天没有排播、或无档期数据时整块不渲染，不影响其它区块。
+    seasons = crud.list_schedule_seasons(db)
+    current_season = seasons[0]["season_code"] if seasons else None
+    today_spotlight = (
+        crud.list_all_schedules(db, season=current_season, weekday=datetime.now().isoweekday())
+        if current_season
+        else []
+    )
+    # 查询按星期/标题排序，这里改按播出时间排（无时间的排最后）；HH:MM 定长字符串可直接比较
+    spotlight = sorted(
+        today_spotlight,
+        key=lambda s: (s.broadcast_time is None, s.broadcast_time or ""),
+    )[:6]
     return templates.TemplateResponse(
         request=request,
         name="index.html",
@@ -40,6 +57,7 @@ def index(request: Request, db: DbSession):
             "type_counts": crud.count_contents_by_type(db),
             "top_contents": crud.list_top_contents(db, limit=6),
             "latest_articles": crud.list_articles(db, limit=5),
+            "spotlight": spotlight,
         },
     )
 
@@ -138,6 +156,16 @@ def content_detail(request: Request, content_id: int, db: DbSession):
             try:
                 bangumi_meta.sync_content_meta(db, item, timeout=6.0, retries=1)
             except Exception:  # noqa: BLE001 - 外部接口不可用不影响页面
+                db.rollback()
+
+    # 封面按需下载：低热作品导入时没批量下封面（只存了远端地址），
+    # 第一次被访问时补齐。失败静默——封面取不到就回退渐变占位图。
+    if item.image_url is None and item.remote_image_url:
+        local_url = media.fetch_cover_on_demand(item)
+        if local_url:
+            try:
+                db.commit()
+            except SQLAlchemyError:  # noqa: N818 - 回填失败不影响页面渲染
                 db.rollback()
 
     series = crud.get_series(db, item.series_id) if item.series_id else None
@@ -292,14 +320,19 @@ def creator_detail(request: Request, name: str, db: DbSession):
 
     return render_missing(request, "作者/公司", name)
 @router.get("/articles", response_class=HTMLResponse)
-def articles_page(request: Request, db: DbSession):
-    """资讯列表页面。"""
-    articles = crud.list_articles(db)
+def articles_page(
+    request: Request,
+    db: DbSession,
+    q: str = Query(default="", max_length=80),
+):
+    """资讯列表页：支持标题/摘要/正文关键词搜索。"""
+    articles = crud.list_articles(db, q=q or None)
     return templates.TemplateResponse(
         request=request,
         name="articles.html",
         context={
             "articles": articles,
+            "q": q,
             # 每篇资讯的识别标签（列表页 chips；一次查询，避免 N+1）
             "article_tags_map": crud.article_tags_map(db, [a.id for a in articles]),
         },

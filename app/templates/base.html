@@ -23,7 +23,11 @@
 {% block footer %}
 <footer class="site-footer">
     <div class="container py-4">
-        <span class="small text-muted">ACGN 内容平台 · 内容浏览与接口测试 · 数据已接入本地 SQLite</span>
+        {# 面向访客的页脚：只谈平台定位；数据口径一句话带过（不点名任何上游源站，
+           来源细节只保留在管理端页面）。末行保留低调的免责说明——聚合站惯例，
+           留一句真话比零来源更安全，也方便权利人联系而不是投诉到主机商。 #}
+        <div class="small text-muted">ACGN 内容平台 · 动画 / 漫画 / 游戏 / 轻小说信息浏览</div>
+        <div class="footer-source small text-muted">数据整理自公开网络信息，仅作展示与学习用途；如有侵权请联系删除。</div>
     </div>
 </footer>
 {% endblock %}
@@ -177,6 +181,201 @@
             window.scrollTo({ top: 0, behavior: "smooth" });
         });
     })();
+</script>
+
+<script>
+{# 交互改良（渐进增强）：全部为「有 JS 才生效」，无 JS 时行为与改造前完全一致。
+   1) data-back-nav：返回链接。同源且有来路时走 history.back()（保住原筛选 / 页码 / 滚动位置），
+      否则按 href 正常跳 /contents。
+   2) data-ajax-fav / -status / -clear：详情页收藏 / 标注 / 清除改为 fetch 无刷新，
+      按服务端 303 跳转 URL 的回参（fav=added|removed、status_ok|status_err|status_cleared）
+      判定成败并原地更新 UI；网络或解析异常时回退成整页表单提交，绝不吞操作。
+   3) 键盘：/ 聚焦站内搜索框，Esc 清空；类型下拉 change 即自动提交所在表单。 #}
+(function () {
+    "use strict";
+
+    /* ---- 1) 返回链接：优先浏览器后退 ---- */
+    document.addEventListener("click", function (event) {
+        var link = event.target.closest && event.target.closest("a[data-back-nav]");
+        if (!link) return;
+        var ref = document.referrer;
+        var sameOrigin = ref && ref.indexOf(location.origin) === 0;
+        /* 直接打开 / 粘贴链接进来时无同源来路，此时按 href 跳 /contents */
+        if (!sameOrigin || history.length <= 1) return;
+        event.preventDefault();
+        history.back();
+    });
+
+    /* ---- 2) 详情页收藏 / 标注：fetch 无刷新 ---- */
+    function postForm(form) {
+        /* 与浏览器一致的表单提交：POST + application/x-www-form-urlencoded，303 交给 fetch 自动跟随，
+           于是 response.url 即服务端 303 的最终地址，回参（fav=added 等）都在其中。*/
+        return fetch(form.action, {
+            method: "POST",
+            body: new URLSearchParams(new FormData(form)),
+            credentials: "same-origin",
+            redirect: "follow",
+        });
+    }
+
+    function fallbackSubmit(form) {
+        /* fetch 不可用 / 网络异常 / 返回非 2xx：退回浏览器原生提交，操作绝不丢。 */
+        if (typeof form.requestSubmit === "function") form.requestSubmit();
+        else form.submit();
+    }
+
+    function setFavoriteUI(btn, favorited) {
+        var label = btn.querySelector("[data-fav-label]");
+        var heart = btn.querySelector("[data-fav-heart]");
+        if (label) label.textContent = favorited ? btn.dataset.labelRemove : btn.dataset.labelAdd;
+        if (heart) heart.classList.toggle("d-none", favorited);
+        btn.classList.toggle("btn-primary", !favorited);
+        btn.classList.toggle("btn-outline-secondary", favorited);
+    }
+
+    function toastOf(form, key) {
+        if (window.App && typeof App.toast === "function") {
+            App.toast(form.dataset[key] || "", "ok");
+        }
+    }
+
+    document.addEventListener("submit", function (event) {
+        var form = event.target;
+        var isFav = form.hasAttribute && form.hasAttribute("data-ajax-fav");
+        var isStatus = form.hasAttribute && form.hasAttribute("data-ajax-status");
+        var isClear = form.hasAttribute && form.hasAttribute("data-ajax-clear");
+        if (!(isFav || isStatus || isClear)) return;
+        if (typeof window.fetch !== "function" || !window.FormData) return; /* 老浏览器：正常提交 */
+
+        event.preventDefault();
+        var btn = form.querySelector("[data-fav-btn],[data-status-btn],button");
+        if (btn) btn.disabled = true;
+        /* 提交时就锁定「点了哪个 pill」，避免 fetch 期间焦点变化导致标错 */
+        var submitter = event.submitter || btn;
+
+        postForm(form).then(function (resp) {
+            if (!resp.ok) throw new Error("bad status " + resp.status);
+            var url = resp.url || "";
+            if (isFav) {
+                if (url.indexOf("fav=added") !== -1) {
+                    var favBtn = form.querySelector("[data-fav-btn]");
+                    if (favBtn) setFavoriteUI(favBtn, true);
+                    toastOf(form, "toastAdd");
+                } else if (url.indexOf("fav=removed") !== -1) {
+                    var favBtn2 = form.querySelector("[data-fav-btn]");
+                    if (favBtn2) setFavoriteUI(favBtn2, false);
+                    toastOf(form, "toastRemove");
+                }
+            } else if (isStatus) {
+                if (url.indexOf("status_err") !== -1) {
+                    if (window.App && App.toast) App.toast("标注无效，请重新选择。", "err");
+                } else if (url.indexOf("status_ok") !== -1) {
+                    var pickedLabel = submitter && submitter.dataset ? submitter.dataset.statusLabel : null;
+                    /* 点的是哪个 pill，就把 active 挪到哪个，并显示对应文案 */
+                    var pills = form.querySelectorAll("[data-status-btn]");
+                    for (var i = 0; i < pills.length; i++) {
+                        pills[i].classList.toggle("active", pills[i] === submitter);
+                    }
+                    if (window.App && App.toast) {
+                        App.toast("已收藏并标注为「" + (pickedLabel || "所选状态") + "」。", "ok");
+                    }
+                    /* 首次标注后服务端才会渲染「清除标注」，这里补出该按钮（与 PRG 下一屏一致） */
+                    ensureClearBtn(form);
+                }
+            } else if (isClear) {
+                if (url.indexOf("status_cleared") !== -1) {
+                    var pills2 = form.querySelectorAll("[data-status-btn]");
+                    for (var j = 0; j < pills2.length; j++) pills2[j].classList.remove("active");
+                    var clearBtn = form.parentNode.querySelector("[data-ajax-clear]");
+                    if (clearBtn) clearBtn.style.display = "none";
+                    if (window.App && App.toast) App.toast("已清除标注，作品仍在收藏里。", "ok");
+                }
+            }
+        }).catch(function () {
+            fallbackSubmit(form);
+            return;
+        }).then(function () {
+            if (btn) btn.disabled = false;
+        });
+    }, true);
+
+    /* 标注成功后，若页面上还没有「清除标注」按钮（首次标注），补一个出来 */
+    function ensureClearBtn(statusForm) {
+        if (statusForm.parentNode.querySelector("[data-ajax-clear]")) return;
+        var wrap = document.createElement("form");
+        wrap.method = "post";
+        wrap.className = "m-0";
+        wrap.setAttribute("data-ajax-clear", "");
+        wrap.action = statusForm.action.replace(/\/status$/, "/status/clear");
+        var next = document.createElement("input");
+        next.type = "hidden";
+        next.name = "next";
+        next.value = statusForm.querySelector('input[name="next"]').value;
+        wrap.appendChild(next);
+        var btn = document.createElement("button");
+        btn.className = "btn btn-link btn-sm text-muted p-0";
+        btn.type = "submit";
+        btn.textContent = "清除标注";
+        wrap.appendChild(btn);
+        statusForm.parentNode.appendChild(wrap);
+    }
+
+    /* ---- 3) 键盘快捷键 + 类型下拉自动提交 ---- */
+    function isTyping(el) {
+        if (!el) return false;
+        var tag = el.tagName;
+        return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || el.isContentEditable;
+    }
+    document.addEventListener("keydown", function (event) {
+        if (event.key === "/" && !isTyping(document.activeElement) && !event.ctrlKey && !event.metaKey) {
+            /* 搜索入口已从首页 hero 收编到导航胶囊（#nav-q），作品页筛选框（#works-q）保留 */
+            var box = document.querySelector("#nav-q, #works-q");
+            if (box) {
+                event.preventDefault();
+                box.focus();
+                box.select && box.select();
+            }
+        } else if (event.key === "Escape") {
+            var active = document.activeElement;
+            if (active && active.matches && active.matches('input[type="text"],input[type="search"]')) {
+                active.value = "";
+                active.blur();
+            }
+        }
+    });
+
+    document.addEventListener("change", function (event) {
+        var sel = event.target;
+        /* 导航搜索选类型即搜（落到 /contents），与作品页筛选栏同交互约定 */
+        if (sel && (sel.id === "works-type" || sel.id === "nav-type") && sel.form) sel.form.submit();
+    });
+
+    /* ---- 本周新番横滑条：左右箭头按一屏宽度步进，两端按钮自动淡出 ---- */
+    Array.prototype.forEach.call(document.querySelectorAll("[data-spotlight]"), function (wrap) {
+        var track = wrap.querySelector("[data-spotlight-track]");
+        var prev = wrap.querySelector("[data-spotlight-prev]");
+        var next = wrap.querySelector("[data-spotlight-next]");
+        if (!track) return;
+
+        function step() {
+            return Math.max(track.clientWidth * 0.8, 200);
+        }
+        function syncEnds() {
+            var max = track.scrollWidth - track.clientWidth;
+            if (prev) prev.classList.toggle("is-end", track.scrollLeft <= 4);
+            if (next) next.classList.toggle("is-end", track.scrollLeft >= max - 4);
+        }
+        if (prev) prev.addEventListener("click", function () {
+            track.scrollBy({ left: -step(), behavior: "smooth" });
+        });
+        if (next) next.addEventListener("click", function () {
+            track.scrollBy({ left: step(), behavior: "smooth" });
+        });
+        track.addEventListener("scroll", syncEnds, { passive: true });
+        window.addEventListener("resize", syncEnds);
+        syncEnds();
+    });
+})();
 </script>
 </body>
 </html>

@@ -21,6 +21,8 @@
         {% else %}
         <a class="btn btn-outline-primary btn-sm" href="/login?next=/submit">登录后申请词条</a>
         {% endif %}
+        {# 作者/公司不是独立内容域：花名册从作品浏览页进入，详情页关系 chips 也可直达 #}
+        <a class="btn btn-outline-secondary btn-sm" href="/creators">作者 / 公司花名册</a>
         <a class="btn btn-outline-secondary btn-sm" href="/">&larr; 返回首页</a>
     </div>
 </div>
@@ -87,8 +89,9 @@
     {% endif %}
 </div>
 {% else %}
-{# ===== 作品卡片网格：封面占位（渐变+首字）+ 标题/类型/评分/摘要 ===== #}
-<div class="row g-3">
+{# ===== 作品卡片网格：封面占位（渐变+首字）+ 标题/类型/评分/摘要 =====
+   id="works-list" 是翻页锚点落点（配合 _pager.html 的 frag 参数），滚到网格顶部而非页面顶部。 #}
+<div class="row g-3" id="works-list">
     {% for item in contents %}
     <div class="col-12 col-sm-6 col-lg-4">
         <a class="work-card" href="/contents/{{ item.id }}">
@@ -120,7 +123,7 @@
 
 {% if total_pages > 1 %}
 <div class="mt-3">
-    {{ pager(pager_prefix, page, total_pages) }}
+    {{ pager(pager_prefix, page, total_pages, '#works-list') }}
 </div>
 {% endif %}
 {% endif %}

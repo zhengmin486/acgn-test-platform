@@ -94,6 +94,12 @@ class Settings(BaseSettings):
     backup_dir: str = "backups"
     backup_retain: int = 14
 
+    # ---------- 增量入库通道（app/ingest_api.py） ----------
+    # 服务器无境外出网，词条由本机抓取后 POST 回服务器入库；请求头 X-Ingest-Key
+    # 比对这个值。留空 = 端点一律 503（默认关闭），配了才启用。
+    # 只放生产 .env（chmod 600），不要提交进仓库。
+    ingest_api_key: str = ""
+
     # ---------- 封面图 ----------
     # 封面本地存储目录：Bangumi 导入时下载到此，Content.image_url 存站内
     # 相对地址（/covers/...）。默认在项目内；想放到其它盘符（如 D:/acgn-covers）
@@ -101,6 +107,12 @@ class Settings(BaseSettings):
     cover_storage_dir: str = "app/static/covers"
     # 导入时是否下载封面；置 False 则只记录远程 URL（不推荐，热链易失效）。
     cover_download_enabled: bool = True
+
+    # ---------- 用户头像 ----------
+    # 头像文件目录（挂到 /avatars）；默认在项目内，也可指到其它盘符。
+    avatar_storage_dir: str = "app/static/avatars"
+    # 上传原图大小上限：头像会被裁成 256×256 WebP，2MB 足够。
+    avatar_upload_max_bytes: int = 2 * 1024 * 1024
 
     # ---------- 封面图片处理（app/media.py） ----------
     # 列表缩略图宽度（px）：只缩不放，输出 WebP；列表页流量主要靠它省。

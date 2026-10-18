@@ -64,7 +64,17 @@ DIMENSION_LABELS = [
     ("completion", "完成度"),
 ]
 
-TONE_LABELS = {"sharp": "善意锐评", "gentle": "温和中性"}
+TONE_LABELS = {"sharp": "善意锐评", "gentle": "温和中性", "custom": "自定义语气"}
+
+# 预设语气的具体措辞；custom 走用户自己填的说明。
+TONE_PRESETS = {
+    "sharp": "善意锐评：可以玩梗、犀利、有一点点毒舌，但不人身攻击、不贬低用户。",
+    "gentle": "温和中性：客观、友善，不玩梗、不毒舌。",
+}
+
+# 自定义语气说明 / 追加要求长度上限（防止把整篇范文塞进提示词）。
+MAX_TONE_PROMPT = 300
+MAX_EXTRA_PROMPT = 2000
 
 
 class PersonaError(Exception):
@@ -574,12 +584,29 @@ def build_template_report(profile: dict) -> dict:
     }
 
 
-def build_llm_prompt(profile: dict, tone: str = "sharp") -> str:
-    """把事实清单与输出要求拼成可直接粘贴给 LLM 的提示词。"""
-    tone_text = (
-        "善意锐评：可以玩梗、犀利、有一点点毒舌，但不人身攻击、不贬低用户。"
-        if tone == "sharp"
-        else "温和中性：客观、友善，不玩梗、不毒舌。"
+def build_llm_prompt(
+    profile: dict,
+    tone: str = "sharp",
+    tone_prompt: str = "",
+    extra_prompt: str = "",
+) -> str:
+    """把事实清单与输出要求拼成可直接粘贴给 LLM 的提示词。
+
+    - tone：sharp / gentle 用内置措辞；custom 用用户填的 tone_prompt；
+    - extra_prompt：用户追加的大段要求，原样附在硬性要求之后（优先级最高），
+      但「不得编造」等安全底线仍然保留在前面，避免被覆盖。
+    """
+    custom_tone = (tone_prompt or "").strip()[:MAX_TONE_PROMPT]
+    if tone == "custom":
+        tone_text = custom_tone or "自然、清晰、有个人风格，不要端着说教。"
+    else:
+        tone_text = TONE_PRESETS.get(tone, TONE_PRESETS["sharp"])
+    extra = (extra_prompt or "").strip()[:MAX_EXTRA_PROMPT]
+    extra_block = (
+        "额外要求（用户自定义，在不违反上面硬性要求的前提下优先满足）：\n"
+        f"{extra}\n\n"
+        if extra
+        else ""
     )
     facts = {
         "总作品数": profile["total"],
@@ -619,6 +646,7 @@ def build_llm_prompt(profile: dict, tone: str = "sharp") -> str:
         "- 只能引用事实清单里出现的作品名、年份、标签、公司，不得编造。\n"
         "- 数据不足的部分直接说明，不要硬编。\n"
         "- 输出纯文本，不要 Markdown 表格。\n\n"
+        f"{extra_block}"
         "事实清单：\n"
         f"{json.dumps(facts, ensure_ascii=False, indent=2)}"
     )

@@ -83,21 +83,17 @@
                     {% elif spec.scope_kind == "season" %}
                     <div class="mb-3">
                         <label class="form-label small mb-1" for="sync-scope">{{ spec.scope_label }}</label>
-                        {% if seasons %}
-                        <select class="form-select form-select-sm" id="sync-scope" name="scope">
-                            {% for s in seasons %}
-                            <option value="{{ s.season_code }}"
-                                    {% if s.season_code == form_scope %}selected{% endif %}>
-                                {{ s.season_code }}（本地 {{ s.count }} 条）
-                            </option>
-                            {% endfor %}
-                        </select>
-                        <div class="form-text">{{ spec.scope_help }}；可选档期来自本地已同步数据。</div>
-                        {% else %}
+                        {# 自由输入 + 建议列表：如果只给「本地已同步档期」的下拉，
+                           页面一旦有数据就只剩老选项，新档期反而无从同步。 #}
                         <input class="form-control form-control-sm" id="sync-scope" name="scope"
-                               value="{{ form_scope }}" placeholder="{{ spec.scope_placeholder }}">
-                        <div class="form-text">本地暂无档期，请填写档期码（YYYYMM）后同步。</div>
-                        {% endif %}
+                               list="season-suggestions" value="{{ form_scope }}"
+                               placeholder="{{ spec.scope_placeholder }}">
+                        <datalist id="season-suggestions">
+                            {% for s in season_suggestions %}
+                            <option value="{{ s.season_code }}">{{ s.label }}</option>
+                            {% endfor %}
+                        </datalist>
+                        <div class="form-text">{{ spec.scope_help }}；建议里是本地已同步与前后三个月的档期，也可直接填任意 YYYYMM。</div>
                     </div>
                     {% else %}
                     <div class="row g-2 mb-3">

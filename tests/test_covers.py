@@ -146,18 +146,22 @@ def make_db(tmp_path, name: str = "covers.db"):
 
 
 class TestExtractCoverUrl:
-    def test_prefers_largest(self):
+    def test_prefers_medium_for_bandwidth(self):
+        """优先 medium(r/800) 而非 large 原图：实测小 12–30%，最终都要压到 ≤400KB WebP。"""
         url = import_bangumi.extract_cover_url(
             {"images": {"large": "https://x/l.jpg", "common": "https://x/c.jpg",
                         "medium": "https://x/m.jpg"}}
         )
-        assert url == "https://x/l.jpg"
+        assert url == "https://x/m.jpg"
 
-    def test_falls_back_to_common(self):
-        url = import_bangumi.extract_cover_url(
-            {"images": {"common": "https://x/c.jpg", "medium": "https://x/m.jpg"}}
-        )
-        assert url == "https://x/c.jpg"
+    def test_falls_back_to_common_then_large(self):
+        """medium 缺失时依次退到 common、large。"""
+        assert import_bangumi.extract_cover_url(
+            {"images": {"large": "https://x/l.jpg", "common": "https://x/c.jpg"}}
+        ) == "https://x/c.jpg"
+        assert import_bangumi.extract_cover_url(
+            {"images": {"large": "https://x/l.jpg"}}
+        ) == "https://x/l.jpg"
 
     def test_falls_back_to_medium(self):
         url = import_bangumi.extract_cover_url({"images": {"medium": "https://x/m.jpg"}})
@@ -539,11 +543,15 @@ class TestLegacySchemaUpgrade:
             assert crud.ensure_content_meta_columns(engine) == []
             # 系列列（并行功能）同样需要补，否则 Content 查询会缺列
             crud.ensure_content_series_column(engine)
+            # 封面按需下载列（批量导入只给高热作品下封面，低热作品记远端地址）
+            assert crud.ensure_content_remote_image_column(engine) == ["remote_image_url"]
+            assert crud.ensure_content_remote_image_column(engine) == []
 
             db = sessionmaker(bind=engine, expire_on_commit=False)()
             try:
                 content = db.get(Content, 1)
                 assert content.image_url is None  # 旧行回退渐变占位，不被写脏值
+                assert content.remote_image_url is None  # 没记远端地址，按需下载会跳过
             finally:
                 db.close()
         finally:

@@ -195,10 +195,26 @@
                 <button class="btn btn-sm btn-primary" type="submit"
                         {% if not collections_count %}disabled{% endif %}>生成 / 重新生成</button>
             </div>
-            <div class="col-auto">
+            <div class="col-12">
+                <label class="form-label small mb-0" for="tone-prompt">
+                    自定义语气说明<span class="text-muted">（选择「自定义语气」时生效，{{ tone_prompt_max }} 字以内）</span>
+                </label>
+                <textarea class="form-control form-control-sm" id="tone-prompt" name="tone_prompt"
+                          rows="2" maxlength="{{ tone_prompt_max }}"
+                          placeholder="例如：像老朋友聊天，多用梗，少用书面语，结尾必须损我一句">{{ tone_prompt or '' }}</textarea>
+            </div>
+            <div class="col-12">
+                <label class="form-label small mb-0" for="extra-prompt">
+                    额外要求 / 追加提示词<span class="text-muted">（可选，{{ extra_prompt_max }} 字以内；会原样拼进提示词，优先级高于默认要求）</span>
+                </label>
+                <textarea class="form-control form-control-sm" id="extra-prompt" name="extra_prompt"
+                          rows="5" maxlength="{{ extra_prompt_max }}"
+                          placeholder="可以整段写：希望分几段、每段多长、要不要用表格以外的排版、想吐槽哪些点、要引用哪几部作品、禁止说什么…">{{ extra_prompt or '' }}</textarea>
+            </div>
+            <div class="col-12">
                 <span class="form-text">
                     {% if not collections_count %}先同步 Bangumi 收藏；{% endif %}
-                    规则算分，LLM 只写文案。
+                    规则算分，LLM 只写文案；「不得编造事实」始终生效，额外要求不能覆盖它。
                 </span>
             </div>
         </form>
