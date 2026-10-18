@@ -16,11 +16,18 @@ class Base(DeclarativeBase):
     """声明式基类；后续由 Alembic 接管迁移。"""
 
 
-def build_engine(url: str) -> Engine:
-    """按 URL 创建引擎；SQLite 需允许跨线程访问（FastAPI 线程池调用）。"""
+def build_engine(url: str, *, busy_timeout: float | None = None) -> Engine:
+    """按 URL 创建引擎；SQLite 需允许跨线程访问（FastAPI 线程池调用）。
+
+    busy_timeout：SQLite 写锁等待秒数。脚本与线上服务共用同一个库文件时，
+    并发写会抛 `database is locked`，把等待时间调宽即可（MySQL 无此问题）。
+    """
     kwargs: dict = {}
     if url.startswith("sqlite"):
-        kwargs["connect_args"] = {"check_same_thread": False}
+        connect_args: dict = {"check_same_thread": False}
+        if busy_timeout is not None:
+            connect_args["timeout"] = busy_timeout
+        kwargs["connect_args"] = connect_args
     return create_engine(url, **kwargs)
 
 

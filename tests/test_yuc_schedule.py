@@ -848,3 +848,93 @@ class TestScheduleModels:
             }
         finally:
             db.close()
+
+
+# ---------- 批量同步与 TLS 降级（放量回填历史档期） ----------
+
+
+def test_run_sync_seasons_writes_one_summary_per_season(tmp_path):
+    """批量同步：每个档期一份汇总，同一页面内容也按档期分别入库。"""
+    factory = make_db(tmp_path)
+    fetch = make_stub_fetch({
+        ATOM_URL: ATOM_XML,
+        SEASON_URL: SEASON_HTML,
+        "http://yuc.wiki/202607/": SEASON_HTML,
+    })
+
+    summaries = sync_yuc.run_sync_seasons(
+        ["202610", "202607"], session_factory=factory, apply=True, fetch=fetch
+    )
+
+    assert [s.season_code for s in summaries] == ["202610", "202607"]
+    assert [s.added for s in summaries] == [3, 3]
+
+
+def test_run_sync_seasons_continues_after_page_failure(tmp_path):
+    """某个档期页抓不到只让该档期失败，不影响其它档期同步。"""
+    factory = make_db(tmp_path)
+    fetch = make_stub_fetch({ATOM_URL: ATOM_XML, SEASON_URL: SEASON_HTML})
+
+    summaries = sync_yuc.run_sync_seasons(
+        ["202610", "202607"], session_factory=factory, apply=True, fetch=fetch
+    )
+
+    assert summaries[0].added == 3
+    assert summaries[1].failed == 1
+    assert summaries[1].outcomes[0].status == "failed"
+
+
+def test_run_sync_seasons_records_missing_season(tmp_path):
+    """档期不在 Atom 中时记为该档期失败，而不是抛异常中断整体。"""
+    factory = make_db(tmp_path)
+    fetch = make_stub_fetch({ATOM_URL: ATOM_XML, SEASON_URL: SEASON_HTML})
+
+    summaries = sync_yuc.run_sync_seasons(
+        ["202610", "209912"], session_factory=factory, apply=True, fetch=fetch
+    )
+
+    assert summaries[0].added == 3
+    assert summaries[1].season_code == "209912"
+    assert summaries[1].failed == 1
+
+
+def test_build_opener_insecure_skips_certificate_checks():
+    """--insecure 给 opener 装上不校验证书的 HTTPSHandler（源站证书过期时用）。"""
+    opener = sync_yuc.build_opener(None, insecure=True)
+    handlers = [h for h in opener.handlers if isinstance(h, urllib.request.HTTPSHandler)]
+    assert handlers, "insecure=True 时应安装 HTTPSHandler"
+    assert handlers[0]._context.check_hostname is False
+
+    strict = sync_yuc.build_opener(None)
+    strict_handlers = [h for h in strict.handlers if isinstance(h, urllib.request.HTTPSHandler)]
+    assert strict_handlers and strict_handlers[0]._context.check_hostname is True
+
+
+def test_cli_rejects_season_and_seasons_together():
+    """--season 与 --seasons 语义互斥，同时给是参数错误。"""
+    assert sync_yuc.main(["--season", "202610", "--seasons", "2"]) == 2
+
+
+def test_resolve_insecure_prefers_flag_over_env():
+    """显式 --insecure 优先于环境变量；环境变量可让 cron/管理端免改命令行。"""
+    assert sync_yuc.resolve_insecure(True, env={"YUC_INSECURE": "0"}) is True
+    assert sync_yuc.resolve_insecure(False, env={"YUC_INSECURE": "1"}) is False
+    assert sync_yuc.resolve_insecure(None, env={"YUC_INSECURE": "1"}) is True
+    assert sync_yuc.resolve_insecure(None, env={"YUC_INSECURE": "true"}) is True
+    assert sync_yuc.resolve_insecure(None, env={}) is False
+
+
+def test_run_sync_accepts_insecure_none_without_env(monkeypatch):
+    """insecure=None 且无环境变量时按严格校验构造请求器（不读真实网络）。"""
+    monkeypatch.delenv("YUC_INSECURE", raising=False)
+    seen = {}
+
+    def fake_make_fetcher(**kwargs):
+        seen.update(kwargs)
+        raise AssertionError("真实请求器不该在这里被调用")
+
+    monkeypatch.setattr(sync_yuc, "_make_fetcher", fake_make_fetcher)
+    monkeypatch.setattr(sync_yuc, "build_opener", lambda proxy, insecure: ("opener", insecure))
+    with pytest.raises(AssertionError):
+        sync_yuc.run_sync(None, session_factory=lambda: None, fetch=None, insecure=None)
+    assert seen["opener"] == ("opener", False)

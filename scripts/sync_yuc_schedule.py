@@ -23,6 +23,10 @@
     python scripts/sync_yuc_schedule.py --season 202610
     # 正式同步最新档期
     python scripts/sync_yuc_schedule.py --apply
+    # 批量同步最近 3 个档期（回填历史档期，按新到旧顺序）
+    python scripts/sync_yuc_schedule.py --seasons 3 --apply
+    # 源站 TLS 证书过期时跳过校验（2026-10 起 yuc.wiki 需要）
+    python scripts/sync_yuc_schedule.py --seasons 3 --apply --insecure
     # 走本机代理
     python scripts/sync_yuc_schedule.py --proxy http://127.0.0.1:9910
 
@@ -37,6 +41,7 @@ import html.parser
 import http.client
 import os
 import re
+import ssl
 import sys
 import time
 import urllib.error
@@ -63,7 +68,11 @@ from app.database import build_engine  # noqa: E402
 
 YUC_BASE_URL = "https://yuc.wiki"
 ATOM_URL = f"{YUC_BASE_URL}/atom.xml"
-DEFAULT_USER_AGENT = "acgn-test-platform/0.1 (anime schedule sync; local project)"
+# 站点对脚本型 UA 返回 403（2026-10 核对），必须用浏览器 UA 才能取到列表/档期页。
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+)
 DEFAULT_TIMEOUT = 15.0  # 单次请求超时（秒）
 DEFAULT_RETRIES = 2  # 失败后的重试次数（总请求次数 = 1 + retries）
 DEFAULT_DELAY = 0.5  # 两次真实网络请求之间的间隔（秒），避免高频请求
@@ -509,13 +518,22 @@ def parse_entry_chunk(
 # ---------- 网络请求 ----------
 
 
-def build_opener(proxy: str | None) -> urllib.request.OpenerDirector:
-    """按代理配置构建 opener：配置代理则走代理，否则显式直连（不读系统代理）。"""
+def build_opener(proxy: str | None, insecure: bool = False) -> urllib.request.OpenerDirector:
+    """按代理配置构建 opener：配置代理则走代理，否则显式直连（不读系统代理）。
+
+    insecure=True 时跳过 TLS 证书校验。仅用于源站证书过期又必须取数的场景
+    （yuc.wiki 证书 2026-07-29 到期后未续期，2026-10 起直连握手失败）；
+    证书正常时不要开，开了就不再能发现中间人篡改。
+    """
     if proxy:
-        handler = urllib.request.ProxyHandler({"http": proxy, "https": proxy})
+        handlers: list[urllib.request.BaseHandler] = [
+            urllib.request.ProxyHandler({"http": proxy, "https": proxy})
+        ]
     else:
-        handler = urllib.request.ProxyHandler({})
-    return urllib.request.build_opener(handler)
+        handlers = [urllib.request.ProxyHandler({})]
+    if insecure:
+        handlers.append(urllib.request.HTTPSHandler(context=ssl._create_unverified_context()))
+    return urllib.request.build_opener(*handlers)
 
 
 def fetch_url(
@@ -534,7 +552,12 @@ def fetch_url(
             sleep(min(0.5 * 2 ** (attempt - 1), 5))
         try:
             request = urllib.request.Request(
-                url, headers={"User-Agent": user_agent, "Accept": "text/html, application/xml"}
+                url,
+                headers={
+                    "User-Agent": user_agent,
+                    "Accept": "text/html, application/xml",
+                    "Accept-Language": "zh-CN,zh;q=0.9",
+                },
             )
             with opener.open(request, timeout=timeout) as response:
                 return response.read().decode("utf-8", errors="replace")
@@ -572,6 +595,7 @@ def run_sync(
     session_factory,
     apply: bool = False,
     proxy: str | None = None,
+    insecure: bool | None = None,
     timeout: float = DEFAULT_TIMEOUT,
     retries: int = DEFAULT_RETRIES,
     delay: float = DEFAULT_DELAY,
@@ -588,9 +612,10 @@ def run_sync(
     - 单条写入失败不中断整体；同步不删除本地已有记录。
     """
     mode = "apply" if apply else "dry-run"
+    insecure = resolve_insecure(insecure)
     if fetch is None:
         fetch = _make_fetcher(
-            opener=build_opener(proxy), timeout=timeout, retries=retries,
+            opener=build_opener(proxy, insecure), timeout=timeout, retries=retries,
             user_agent=user_agent, sleep=sleep,
         )
 
@@ -728,6 +753,59 @@ def run_sync(
         db.close()
 
 
+def run_sync_seasons(
+    season_codes: list[str],
+    *,
+    session_factory,
+    apply: bool = False,
+    proxy: str | None = None,
+    insecure: bool | None = None,
+    timeout: float = DEFAULT_TIMEOUT,
+    retries: int = DEFAULT_RETRIES,
+    delay: float = DEFAULT_DELAY,
+    user_agent: str = DEFAULT_USER_AGENT,
+    fetch=None,
+    sleep=time.sleep,
+) -> list[SyncSummary]:
+    """按给定顺序同步多个档期（回填历史档期用），每个档期一份汇总。
+
+    单个档期失败（档期不存在 / 页面请求失败）不中断整体，失败原因记在该档期的
+    outcomes 里；fetch 传入时多个档期复用同一个请求器，档期之间按 delay 限频。
+    """
+    insecure = resolve_insecure(insecure)
+    summaries: list[SyncSummary] = []
+    for index, code in enumerate(season_codes):
+        try:
+            summaries.append(
+                run_sync(
+                    code,
+                    session_factory=session_factory,
+                    apply=apply,
+                    proxy=proxy,
+                    insecure=insecure,
+                    timeout=timeout,
+                    retries=retries,
+                    delay=delay,
+                    user_agent=user_agent,
+                    fetch=fetch,
+                    sleep=sleep,
+                )
+            )
+        except (YucFetchError, SeasonNotFoundError) as exc:
+            failed = SyncSummary(
+                mode="apply" if apply else "dry-run",
+                season_code=code,
+                season_title="",
+                season_url="",
+            )
+            failed.failed = 1
+            failed.outcomes.append(EntryOutcome(title="", status="failed", reason=str(exc)))
+            summaries.append(failed)
+        if delay > 0 and index + 1 < len(season_codes):
+            sleep(delay)
+    return summaries
+
+
 # ---------- 命令行入口 ----------
 
 
@@ -744,6 +822,19 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="YYYYMM",
         help="指定档期（如 202610）；缺省时自动选择 Atom 中最新的档期",
+    )
+    parser.add_argument(
+        "--seasons",
+        type=int,
+        default=0,
+        metavar="N",
+        help="同步 Atom 中最近的 N 个档期（与 --season 互斥，用于回填历史档期）",
+    )
+    parser.add_argument(
+        "--insecure",
+        action="store_true",
+        default=None,
+        help="跳过 TLS 证书校验（源站证书过期又必须取数时临时使用；也可设 YUC_INSECURE=1）",
     )
     parser.add_argument(
         "--list-seasons",
@@ -790,6 +881,28 @@ def resolve_proxy(explicit_proxy: str | None, env=None) -> str | None:
     return explicit_proxy or env.get("YUC_PROXY") or None
 
 
+def resolve_insecure(explicit: bool | None, env=None) -> bool:
+    """证书校验降级取值：显式参数 > YUC_INSECURE 环境变量 > 关。
+
+    yuc.wiki 证书 2026-07-29 到期后未续期，服务器 cron 与管理端同步需要降级取数；
+    站点续期后把 YUC_INSECURE 去掉即可恢复严格校验。
+    """
+    if env is None:
+        env = os.environ
+    if explicit is not None:
+        return explicit
+    return str(env.get("YUC_INSECURE", "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def build_session_factory(database_url: str, busy_timeout: float = 30.0):
+    """按数据库 URL 建会话工厂（SQLite 放宽写锁等待，容忍与线上服务并发写）。
+
+    返回 (session_factory, engine)：调用方负责 engine.dispose()。
+    """
+    engine = build_engine(database_url, busy_timeout=busy_timeout)
+    return sessionmaker(bind=engine, autoflush=False, expire_on_commit=False), engine
+
+
 def print_seasons(seasons: list[SeasonInfo]) -> None:
     """输出可用档期列表。"""
     print(f"共发现 {len(seasons)} 个档期（新到旧）：")
@@ -805,13 +918,18 @@ def main(argv=None) -> int:
     if args.season is not None and not re.fullmatch(r"20\d{2}(0[1-9]|1[0-2])", args.season):
         print(f"错误：--season 需为 YYYYMM 形式的合法年月（收到 {args.season!r}）")
         return 2
+    if args.season and args.seasons:
+        print("错误：--season 与 --seasons 不能同时使用")
+        return 2
 
     fetch = _make_fetcher(
-        opener=build_opener(proxy), timeout=args.timeout, retries=args.retries,
+        opener=build_opener(proxy, args.insecure), timeout=args.timeout, retries=args.retries,
         user_agent=args.user_agent,
     )
 
     print(f"代理：{proxy if proxy else '未启用（直连）'}")
+    if args.insecure:
+        print("证书校验：已跳过（--insecure）")
     try:
         seasons = parse_atom(fetch(ATOM_URL))
     except YucFetchError as exc:
@@ -827,38 +945,60 @@ def main(argv=None) -> int:
 
     database_url = args.database_url or settings.database_url
     print(f"数据库：{database_url}")
-    engine = build_engine(database_url)
-    session_factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
+    session_factory, engine = build_session_factory(database_url, busy_timeout=60.0)
+    summaries: list[SyncSummary] = []
     try:
-        try:
-            summary = run_sync(
-                args.season,
+        if args.seasons:
+            codes = [season.code for season in seasons[: args.seasons]]
+            print(f"批量同步最近 {len(codes)} 个档期：{'、'.join(codes)}")
+            summaries = run_sync_seasons(
+                codes,
                 session_factory=session_factory,
                 apply=args.apply,
                 proxy=proxy,
+                insecure=args.insecure,
                 timeout=args.timeout,
                 retries=args.retries,
                 delay=args.delay,
                 user_agent=args.user_agent,
                 fetch=fetch,
             )
-        except SeasonNotFoundError as exc:
-            print(f"错误：{exc}")
-            print_seasons(exc.available)
-            return 2
+        else:
+            try:
+                summaries = [
+                    run_sync(
+                        args.season,
+                        session_factory=session_factory,
+                        apply=args.apply,
+                        proxy=proxy,
+                        insecure=args.insecure,
+                        timeout=args.timeout,
+                        retries=args.retries,
+                        delay=args.delay,
+                        user_agent=args.user_agent,
+                        fetch=fetch,
+                    )
+                ]
+            except SeasonNotFoundError as exc:
+                print(f"错误：{exc}")
+                print_seasons(exc.available)
+                return 2
     finally:
         engine.dispose()
 
-    for outcome in summary.issues:
-        label = {"duplicate": "重复", "skipped": "跳过", "failed": "失败"}[outcome.status]
-        parts = [f"[{label}]"]
-        if outcome.title:
-            parts.append(f"《{outcome.title}》")
-        if outcome.reason:
-            parts.append(f"- {outcome.reason}")
-        print(" ".join(parts))
-    print(summary.describe())
-    return 1 if summary.failed else 0
+    total_failed = 0
+    for summary in summaries:
+        for outcome in summary.issues:
+            label = {"duplicate": "重复", "skipped": "跳过", "failed": "失败"}[outcome.status]
+            parts = [f"[{label}]"]
+            if outcome.title:
+                parts.append(f"《{outcome.title}》")
+            if outcome.reason:
+                parts.append(f"- {outcome.reason}")
+            print(" ".join(parts))
+        print(summary.describe())
+        total_failed += summary.failed
+    return 1 if total_failed else 0
 
 
 if __name__ == "__main__":

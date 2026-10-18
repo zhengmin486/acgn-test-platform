@@ -35,7 +35,7 @@ from scripts.import_articles import (
     run_import_articles,
 )
 from scripts.import_bangumi import ImportSummary, run_import
-from scripts.sync_yuc_schedule import SyncSummary, run_sync
+from scripts.sync_yuc_schedule import SyncSummary, resolve_insecure, run_sync
 
 # ---------- 任务标识与状态 ----------
 
@@ -484,7 +484,12 @@ def _execute(
         return _from_bangumi(summary, spec, parsed, mode)
 
     if spec.key == TASK_YUC:
-        summary = run_sync(parsed.season_code, session_factory=session_factory, apply=apply)
+        summary = run_sync(
+            parsed.season_code,
+            session_factory=session_factory,
+            apply=apply,
+            insecure=resolve_insecure(None),
+        )
         return _from_yuc(summary, spec, parsed, mode)
 
     summary = run_import_articles(
