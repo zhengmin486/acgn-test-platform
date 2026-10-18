@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.orm import sessionmaker
 
 from app import crud
@@ -541,11 +541,17 @@ class TestLegacySchemaUpgrade:
                 "media", "source_material", "episodes", "meta_fetched_at",
             }
             assert crud.ensure_content_meta_columns(engine) == []
-            # 系列列（并行功能）同样需要补，否则 Content 查询会缺列
-            crud.ensure_content_series_column(engine)
             # 封面按需下载列（批量导入只给高热作品下封面，低热作品记远端地址）
             assert crud.ensure_content_remote_image_column(engine) == ["remote_image_url"]
             assert crud.ensure_content_remote_image_column(engine) == []
+
+            # 其余历史列（series_id / book_kind / …）不逐个点名：这里直接跑
+            # init_db —— 就是应用启动时真正走的那条路径。手写补列清单的话，
+            # contents 每加一列都得回来改一次，漏一个就让下面 db.get(Content, 1)
+            # 因缺列报错（并行会话加列时尤其容易踩）。
+            crud.init_db(engine)
+            columns = {col["name"] for col in inspect(engine).get_columns("contents")}
+            assert {"image_url", "year", "remote_image_url", "series_id", "book_kind"} <= columns
 
             db = sessionmaker(bind=engine, expire_on_commit=False)()
             try:
@@ -671,5 +677,39 @@ class TestCoverScope:
 
             limited = fetch_covers.list_pending_contents(db, force=False, scope="all", limit=2)
             assert len(limited) == 2
+        finally:
+            db.close()
+
+    def test_scope_home_and_content_ids(self, tmp_path):
+        """scope=home 只补首页口味精选；--content-id 精确点名并忽略 scope。"""
+        factory = self._factory(tmp_path)
+        db = factory()
+        try:
+            daily = Content(title="贴贴日常", type="anime", summary="x", rating=8.0, bangumi_id=11)
+            violent = Content(title="热血战斗", type="anime", summary="x", rating=9.5, bangumi_id=12)
+            db.add_all([daily, violent])
+            db.commit()
+            crud.replace_content_tags(db, daily.id, ["日常", "百合"])
+            crud.replace_content_tags(db, violent.id, ["战斗", "热血"])
+
+            home = fetch_covers.list_pending_contents(db, force=False, scope="home")
+            assert [row.id for row in home] == [daily.id]  # 无本命标签的不在首页范围
+
+            picked = fetch_covers.list_pending_contents(
+                db, force=False, scope="engaged", content_ids=[violent.id]
+            )
+            assert [row.id for row in picked] == [violent.id]
+
+            daily.image_url = "/covers/x.jpg"
+            db.commit()
+            assert all(
+                row.id != daily.id
+                for row in fetch_covers.list_pending_contents(db, force=False, scope="home")
+            )
+            # --force 时已有封面的也重新进队列
+            forced = fetch_covers.list_pending_contents(
+                db, force=True, scope="home", content_ids=[daily.id]
+            )
+            assert [row.id for row in forced] == [daily.id]
         finally:
             db.close()

@@ -10,8 +10,10 @@
   必须按条目 type 区分，不能按分区归类。
 - rating 只取 API 返回的有效评分（rating.score > 0），取不到就跳过，不伪造。
 - **标签随作品一起导入**：取 API tags 中标注数（count）最多的前
-  ``MAX_TAGS_PER_SUBJECT`` 个，经 ``crud.replace_content_tags`` 替换式写入
-  （不复制标签逻辑，与站内筛选共用同一套表）；标签是可选增强，
+  ``MAX_TAGS_PER_SUBJECT`` 个**题材**标签（经 ``app.tagging.classify_tag``
+  归一：同义词归并、年份/公司/声优/媒介/平台在入库前分流——公司进
+  content_studios、年份进 contents.year），经 ``crud.replace_content_tags``
+  替换式写入（不复制标签逻辑，与站内筛选共用同一套表）；标签是可选增强，
   解析不到不影响作品本身入库。
 - **作者/公司关系随作品一起识别**：从条目信息卡（infobox）按白名单识别
   原作 / 导演 / 动画制作等角色，经 ``crud.replace_content_entity_links``
@@ -46,6 +48,7 @@ import http.client
 import json
 import os
 import random
+import re
 import sys
 import time
 import urllib.error
@@ -68,10 +71,19 @@ from app import entity_links  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.database import build_engine  # noqa: E402
 from app.models import Content  # noqa: E402
+from app.tagging import (  # noqa: E402
+    TAG_GENRE,
+    TAG_STUDIO,
+    TAG_YEAR,
+    classify_tag,
+    year_from_date,
+)
 
 # ---------- 常量与配置 ----------
 
-BANGUMI_API_BASE = "https://api.bgm.tv"
+# Bangumi API 基址：默认官方站点；服务器直连被 DNS 污染时可用环境变量指向镜像
+# （如 BANGUMI_API_BASE=https://bgmapi.anibt.net，字节级兼容 v0 接口），无需改代码。
+BANGUMI_API_BASE = os.environ.get("BANGUMI_API_BASE", "https://api.bgm.tv").rstrip("/")
 SOURCE_URL_TEMPLATE = "https://bgm.tv/subject/{subject_id}"
 DEFAULT_USER_AGENT = "acgn-test-platform/0.1 (local import script; github.com/acgn-test-platform)"
 DEFAULT_TIMEOUT = 10.0  # 单次请求超时（秒）
@@ -80,13 +92,196 @@ DEFAULT_RETRIES = 2  # 失败后的重试次数（总请求次数 = 1 + retries�
 # 每个条目最多导入的标签数：源站标签常多达几十个，只保留标注数最多的前几个，
 # 避免标签刷屏稀释筛选意义；与 crud.MAX_CONTENT_TAGS 保持一致（两侧各自兜底）。
 MAX_TAGS_PER_SUBJECT = crud.MAX_CONTENT_TAGS
+# 标签里识别出的制作公司上限（动画常见 1-2 家，多了反而是噪音）。
+MAX_STUDIOS_PER_SUBJECT = 3
+# 书籍条目从 infobox 派生的标签上限（文库 / 丛书，补轻小说区筛选维度）。
+MAX_BOOK_TAGS_PER_SUBJECT = 3
 
 # Bangumi 条目类型 -> 本站 Content.type。
-# 站点四个类型（anime / comic / game / novel）都覆盖：Bangumi 的「书籍」分区里
-# type=1 是小说、type=6 是漫画，两者都要，所以不能只按分区归类，必须按条目 type 分。
-# 剩余 type=3 音乐 / type=5 三次元不属于本站四类型，明确跳过。
-TYPE_MAPPING: dict[int, str] = {1: "novel", 2: "anime", 4: "game", 6: "comic"}
-TYPE_NAMES: dict[int, str] = {1: "书籍", 2: "动画", 3: "音乐", 4: "游戏", 5: "三次元", 6: "漫画"}
+#
+# 实测归档（2026-10-13 dump）确认的真实语义：
+# - type=2 动画、type=4 游戏，直接映射；
+# - type=1 书籍区（42 万条）里漫画与小说混在一起，**必须按 platform 拆分**：
+#   1001=漫画（灌篮高手/剑风传奇/火之鸟）、1002=小说（三体/魔戒/卡拉马佐夫兄弟）、
+#   1003=画集、1004=其它；
+# - type=6 是三次元真人剧（一升的眼泪/白夜行），type=3 是音乐——都不属于本站
+#   四类型，明确跳过。（Archive README 把 6 写成「漫画」是错的，别信。）
+TYPE_MAPPING: dict[int, str] = {2: "anime", 4: "game"}
+TYPE_NAMES: dict[int, str] = {1: "书籍", 2: "动画", 3: "音乐", 4: "游戏", 5: "三次元", 6: "真人"}
+
+# 书籍区 platform -> content_type。数字代码来自归档；API 的 platform 是字符串
+# （"漫画" / "轻小说" / "小说" 等），用 BOOK_PLATFORM_STRINGS 匹配。
+BOOK_PLATFORM_MAPPING: dict[int, str] = {1001: "comic", 1002: "novel"}
+BOOK_PLATFORM_STRINGS: tuple[tuple[str, str], ...] = (
+    ("漫画", "comic"),
+    ("小说", "novel"),
+)
+
+"""书籍细分信号（见 classify_book）：Bangumi 没有「轻小说」独立类型，只能靠标签 /
+文库字段 / 日文特征推断。
+
+两个取值都是**标注**（contents.book_kind），不是内容类型：文学不等于第五种类型。"""
+LIGHT_NOVEL_TAG = "轻小说"
+
+BOOK_KIND_LIGHT_NOVEL = "light_novel"  # 文库出身的轻小说
+BOOK_KIND_LITERATURE = "literature"  # 日本普通小说（非文库轻小说）
+# infobox 里出现这些键就说明有文库归属 -> 轻小说。
+BUNKO_INFOBOX_KEYS: tuple[str, ...] = ("文库", "文庫", "レーベル")
+# 已知轻小说文库（中日两种写法都收，覆盖主要几家）。
+KNOWN_LIGHT_NOVEL_BUNKO: tuple[str, ...] = (
+    "電撃文庫", "电击文库",
+    "富士見ファンタジア文庫", "富士见幻想文库",
+    "角川スニーカー文庫", "角川Sneaker文库",
+    "GA文庫", "GA文库",
+    "MF文庫J", "MF文库J",
+    "ファミ通文庫", "Fami通文库",
+    "講談社ラノベ文庫", "讲谈社轻小说文库",
+    "スーパーダッシュ文庫", "Super Dash文库",
+    "HJ文庫", "HJ文库",
+    "富士見書房", "富士见书房",
+)
+# 日文假名：判断「这本书是不是日本文库/出版社出的」最短平快的信号。
+_JP_KANA_RE = re.compile(r"[\u3041-\u3096\u30a1-\u30fa]")
+# 中文出版社固定用「…出版社」（人民文学出版社 / 重庆出版社），日系不带「出版」二字。
+CN_PUBLISHER_RE = re.compile(r"\S{0,8}出版社")
+# 日系出版社 / 出版品牌（单靠假名判不出来的补位）。
+JP_PUBLISHERS: tuple[str, ...] = (
+    "集英社", "講談社", "讲谈社", "角川", "KADOKAWA", "小学館", "小学馆",
+    "徳間書店", "德间书店", "新潮社", "岩波書店", "岩波书店", "文藝春秋", "文艺春秋",
+    "早川書房", "早川书房", "双葉社", "祥伝社", "白泉社", "KADOKAWA/富士見",
+)
+
+
+def _iter_infobox_strings(payload: dict, *, include_keys: bool = True) -> list[str]:
+    """把 infobox 摊平成字符串列表（键与值都算）。
+
+    API 的 infobox 是 ``[{"key": "作者", "value": "xxx"}, ...]``，value 可能是
+    字符串也可能是列表；这里统一取字符串来匹配，缺字段返回空列表。
+    """
+    raw = payload.get("infobox")
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        if include_keys and isinstance(item.get("key"), str):
+            out.append(item["key"])
+        for field in ("value",):
+            value = item.get(field)
+            if isinstance(value, str):
+                out.append(value)
+            elif isinstance(value, list):
+                out.extend(str(v) for v in value if isinstance(v, (str, int, float)))
+    return out
+
+
+def classify_book(payload: dict) -> tuple[str | None, str | None]:
+    """书籍区细分，返回 ``(content_type, book_kind)``。
+
+    返回 ``(None, None)`` 表示**不入库**——Bangumi 的「小说」platform 覆盖的是
+    所有小说，中译本、欧美古典、中国古典名著都混在里面，本站不收。
+    返回 ``("novel", kind)`` 时 kind 取值：
+
+    - ``light_novel`` 文库出身的轻小说；
+    - ``literature`` 日本普通小说（纯文学 / 一般文艺）。
+
+    为什么 kind 不写成独立类型（2026-10-19）：最初确实把文学拆成了第五种类型，
+    但用户视角这两类都在「轻小说区」翻，拆类型要动导航、筛选、统计、我的空间的
+    类型枚举，换来的只是一眼看出的区分——而这个区别用一枚角标就够了。
+    所以类型落在 novel，book_kind 只作标注（见 app/page_common.BOOK_KIND_LABELS）。
+
+     Bangumi 没有「轻小说」独立类型，只能靠信号判定，优先级从强到弱：
+
+    1. tags 里出现「轻小说」；
+    2. infobox 出现文库/レーベル 字段，或值命中已知轻小说文库（電撃文庫 等）；
+    3. 日本出版物（日文假名 / 日系出版社）-> literature；
+    4. 中文出版社写法 -> 丢弃。
+
+    启发式的取舍：宁可把边界件判成 literature 留在站内（可见、可人工改），
+    也不要漏判成轻小说污染轻小说区，更不要误删一本真日本书。
+    """
+    names = _tag_names(payload) + _iter_infobox_strings(payload)
+    joined = "\n".join(names)
+    # 「出版社」中文写法的判定只看 value：infobox 里 **键名** 就叫「出版社」，
+    # 把键也算进来会让每一本书都被判成中文书。
+    values = "\n".join(_iter_infobox_strings(payload, include_keys=False))
+    if LIGHT_NOVEL_TAG in _tag_names(payload):
+        return "novel", BOOK_KIND_LIGHT_NOVEL
+    if any(key in joined for key in BUNKO_INFOBOX_KEYS):
+        return "novel", BOOK_KIND_LIGHT_NOVEL
+    if any(bunko in joined for bunko in KNOWN_LIGHT_NOVEL_BUNKO):
+        return "novel", BOOK_KIND_LIGHT_NOVEL
+    # 「XX出版社」是中文出版社的固定写法（人民文学出版社 / 重庆出版社 …）；
+    # 日系出版方收尾是 社 / 書店 / 書房，不带「出版」二字——这是性价比最高的
+    # 「这本书不是日本书」信号，比猜作者国籍可靠。
+    if CN_PUBLISHER_RE.search(values):
+        return None, None
+    if _JP_KANA_RE.search(joined) or any(pub in joined for pub in JP_PUBLISHERS):
+        return "novel", BOOK_KIND_LITERATURE
+    # 判不出国籍时按「留下来」处理：宁可在「文学」里多一本待复核的书，
+    # 也不要误删一本真日本书（轻小说区不会被污染，这是底线）。
+    return "novel", BOOK_KIND_LITERATURE
+
+
+def _tag_names(payload: dict) -> list[str]:
+    """全部标签名（不做截断 / 不排序）。
+
+    刻意不走 extract_tags：那个函数只保留标注数最高的前 N 个（那是入库用的
+    题材标签），而分类要的是**全量标签**——「轻小说」标签常常排在十几名之后，
+    被截断掉就永远判不出来。
+    """
+    payload_tags = payload.get("tags")
+    if not isinstance(payload_tags, list):
+        return []
+    out: list[str] = []
+    for item in payload_tags:
+        if isinstance(item, dict) and isinstance(item.get("name"), str):
+            out.append(item["name"])
+        elif isinstance(item, str):
+            out.append(item)
+    return out
+
+
+def resolve_book(payload: dict) -> tuple[str | None, str | None]:
+    """从条目 payload 解析 ``(content_type, book_kind)``。
+
+    书籍条目额外经 ``classify_book`` 决定细分标注：轻小说 light_novel、
+    日本普通小说 literature，非日本书直接丢弃（``(None, None)``）。
+    """
+    bgm_type = payload.get("type")
+    if bgm_type in TYPE_MAPPING:
+        return TYPE_MAPPING[bgm_type], None
+    if bgm_type != 1:
+        return None, None
+    platform = payload.get("platform")
+    if isinstance(platform, int) and not isinstance(platform, bool):
+        if platform == 1001:
+            return "comic", None
+        if platform == 1002:  # 「小说」-> 再判轻小说 / 文学 / 不要
+            return classify_book(payload)
+        return None, None  # 画集（1003）、其它（1004）
+    if isinstance(platform, str):
+        text = platform.strip()
+        if "漫画" in text:
+            return "comic", None
+        if "轻小说" in text:  # platform 直接写明，最强信号
+            return "novel", BOOK_KIND_LIGHT_NOVEL
+        if "小说" in text:
+            return classify_book(payload)
+    return None, None
+
+
+def resolve_content_type(payload: dict) -> str | None:
+    """``resolve_book`` 的只取类型版本，保留给只关心类型的调用方。
+
+    - type=2 -> anime，type=4 -> game；
+    - type=1 书籍按 platform 细分：1001/"漫画" -> comic；「小说」交给
+      ``classify_book`` 再判一层（轻小说 / 日本文学均返回 novel，非日本书丢弃）；
+    - 其余类型（3 音乐 / 5、6 三次元）与解析不出的返回 None。
+    """
+    content_type, _kind = resolve_book(payload)
+    return content_type
 
 # 这些 HTTP 状态码值得重试（限流或服务端临时故障）；4xx 其余状态直接失败。
 RETRYABLE_HTTP_STATUS = {429, 500, 502, 503, 504}
@@ -273,9 +468,13 @@ class SubjectMappingError(ValueError):
 class MappedSubject:
     """映射完成后、等待入库的一条记录（字段与 Content 一一对应）。
 
-    tags 为随作品一起导入的标签名列表（已按标注数截断）；列表为空表示
-    该条目没有可用标签，不影响作品本身入库。
+    tags 为随作品一起导入的**题材**标签名列表（已按标注数截断并经
+    app.tagging 归一）；列表为空表示该条目没有可用题材标签，不影响作品本身入库。
+    studios 为标签里识别出的制作公司（归一规范名），落到 content_studios。
+    year 为发行年（条目 date 优先，标签年份兜底），落到 contents.year。
     image_url 为 Bangumi 远端封面地址（未本地化）；为空表示该条目没有封面。
+    book_kind 只对小说条目有意义（light_novel / literature），是**标注**不是类型：
+    类型始终是 novel，这一列只决定详情页 / 卡片上额外的「文学」角标。
     """
 
     bangumi_id: int
@@ -285,7 +484,10 @@ class MappedSubject:
     rating: float
     source_url: str
     tags: list[str] = field(default_factory=list)
+    studios: list[str] = field(default_factory=list)
+    year: int | None = None
     image_url: str | None = None
+    book_kind: str | None = None
 
 
 @dataclass
@@ -853,21 +1055,15 @@ def random_import(
 # ---------- 数据映射（纯函数，便于单独测试） ----------
 
 
-def extract_tags(payload: dict, limit: int = MAX_TAGS_PER_SUBJECT) -> list[str]:
-    """从 Bangumi 条目 JSON 提取标签：按标注数（count）从多到少取前 limit 个。
+def _tag_candidates(payload: dict) -> list[tuple[int, str]]:
+    """Bangumi tags -> [(标注数, 标签名)]，按标注数降序、同数按名称排序。
 
-    规则：
-    - API 的 tags 形如 ``[{"name": "科幻", "count": 346}, ...]``；count 缺失或
-      非整数按 0 处理（排在后面），不因为个别标签缺计数就整体失败；
-    - 同名标签去重（保序）、丢弃空名与超长名（crud.TAG_NAME_MAX_LENGTH）；
-    - 标注数相同的按名称排序，保证结果确定可复现；
-    - tags 缺失 / 不是列表 / 全部非法时返回空列表——标签是可选增强，
-      不因此跳过整个条目。
+    count 缺失或非整数按 0 处理（排在后面），不因为个别标签缺计数就整体失败；
+    tags 缺失 / 不是列表 / 没有合法项时返回空列表。
     """
     raw_tags = payload.get("tags")
     if not isinstance(raw_tags, list):
         return []
-
     candidates: list[tuple[int, str]] = []
     for item in raw_tags:
         if not isinstance(item, dict):
@@ -879,16 +1075,119 @@ def extract_tags(payload: dict, limit: int = MAX_TAGS_PER_SUBJECT) -> list[str]:
         if not isinstance(count, int) or isinstance(count, bool):
             count = 0
         candidates.append((count, name))
-
     candidates.sort(key=lambda pair: (-pair[0], pair[1]))
+    return candidates
+
+
+def extract_tags(payload: dict, limit: int = MAX_TAGS_PER_SUBJECT) -> list[str]:
+    """从 Bangumi 条目 JSON 提取**题材**标签（经 app.tagging 归一）。
+
+    规则：
+    - 按标注数（count）从多到少过 ``classify_tag``，只留题材（``TAG_GENRE``）：
+      年份、公司、声优、媒介、平台（TV / PC / 剧场版 / 2011年10月…）在入库前
+      就被丢掉，不占题材名额——批量导入链路与站内清洗同一套口径，
+      否则标签云会被媒介标签霸榜（线上曾点 `TV` 出 2974 条）；
+    - 同义词归一到规范名（SF -> 科幻、癒し -> 治愈），标签云不因写法分裂；
+    - 同名去重（保序）、超长名丢弃（不截断，截断会产生语义错误的标签）；
+    - tags 缺失 / 不是列表 / 没有题材标签时返回空列表——标签是可选增强，
+      不因此跳过整个条目。
+    """
     names: list[str] = []
-    for _, name in candidates:
-        if name in names:
-            continue
+    for _count, name in _tag_candidates(payload):
         if len(names) >= limit:
             break
-        names.append(name)
+        kind, value = classify_tag(name)
+        if kind != TAG_GENRE or value in names:
+            continue
+        names.append(value)
     return names
+
+
+def extract_studios(payload: dict, limit: int = MAX_STUDIOS_PER_SUBJECT) -> list[str]:
+    """从标签里识别制作公司（归一规范名，按标注数取前 limit 个）。
+
+    公司不进 content_tags（那会污染标签筛选），结构化落到 content_studios，
+    与收藏同步链路（crud.import_works_to_site）同一套口径。
+    """
+    names: list[str] = []
+    for _count, name in _tag_candidates(payload):
+        if len(names) >= limit:
+            break
+        kind, value = classify_tag(name)
+        if kind != TAG_STUDIO or value in names:
+            continue
+        names.append(value)
+    return names
+
+
+def extract_year(payload: dict) -> int | None:
+    """发行年：优先条目 date（YYYY-MM-DD），其次标签里的四位年份（取最早）。
+
+    标签年份只是兜底——date 缺失的归档条目才用得上。
+    """
+    year = year_from_date(str(payload.get("date") or ""))
+    if year:
+        return year
+    years = [year_of_tag for year_of_tag in _tag_years(payload)]
+    return min(years) if years else None
+
+
+def _tag_years(payload: dict) -> list[int]:
+    out: list[int] = []
+    for _count, name in _tag_candidates(payload):
+        kind, value = classify_tag(name)
+        if kind == TAG_YEAR and value:
+            out.append(int(value))
+    return out
+
+
+# 书籍 infobox 里派生标签的键（文库 / 丛书 / 厂牌）：出版社已由
+# app/entity_links 收进关联实体，文库没有结构化位置，作为标签补进轻小说区筛选。
+BOOK_TAG_INFOBOX_KEYS: tuple[str, ...] = (
+    "文库", "文庫", "レーベル", "label", "丛书", "叢書", "imprint",
+)
+_BOOK_TAG_KEY_LOOKUP = {
+    key.casefold(): key for key in BOOK_TAG_INFOBOX_KEYS
+}
+
+
+def extract_book_tags(payload: dict, limit: int = MAX_BOOK_TAGS_PER_SUBJECT) -> list[str]:
+    """书籍条目从 infobox 派生标签（文库 / 丛书，按出现顺序取前 limit 个）。
+
+    为什么单独一条路（2026-10-19）：轻小说区此前的题材标签几乎全是「轻小说」
+    「小说」这类载体词（归一后属噪音被丢弃），筛选栏形同虚设。文库 / 丛书是
+    轻小说最自然的浏览面（電撃文庫、角川スニーカー文庫…），Bangumi 把它放在
+    infobox 里，而 entity_links 明确不收文库（那不是「系列」语义），所以在这里
+    补成标签。不过 classify_tag——这些是书籍侧的结构化信号，按 key 白名单放行。
+    """
+    raw = payload.get("infobox")
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        key = item.get("key")
+        if not isinstance(key, str):
+            continue
+        if key.strip().casefold() not in _BOOK_TAG_KEY_LOOKUP:
+            continue
+        for value in _infobox_values(item.get("value")):
+            if value and value not in out and len(value) <= crud.TAG_NAME_MAX_LENGTH:
+                out.append(value)
+        if len(out) >= limit:
+            break
+    return out[:limit]
+
+
+def _infobox_values(value) -> list[str]:
+    """infobox 值 -> 字符串列表（字符串原样，列表逐项转字符串）。"""
+    if isinstance(value, str):
+        text = value.strip()
+        return [text] if text else []
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if str(v).strip()]
+    return []
 
 
 def map_subject(payload: dict) -> MappedSubject:
@@ -898,19 +1197,24 @@ def map_subject(payload: dict) -> MappedSubject:
     - 标题优先 name_cn，为空时回退 name；两者都为空则跳过；
     - summary 映射到摘要；为空则跳过（summary 是必填字段）；
     - rating 只取 rating.score 且必须 > 0，取不到就跳过（rating 必填，不伪造）；
-    - type=1 -> novel，2 -> anime，4 -> game，6 -> comic；其余类型跳过（音乐/三次元不收录）；
-    - tags 按标注数取前 MAX_TAGS_PER_SUBJECT 个（见 extract_tags）。
+    - type=2 -> anime，type=4 -> game；type=1 书籍按 platform 拆分（1001/"漫画" ->
+      comic，1002/"小说" -> novel 且经 ``classify_book`` 给出 book_kind 标注；
+      非日本语种的小说直接跳过）；音乐（3）与三次元/真人（5、6）跳过；
+    - tags 只留题材（``extract_tags``，经 app.tagging 归一）；公司进 studios、
+      年份进 year，各自有结构化位置；书籍条目另从 infobox 派生文库标签
+      （``extract_book_tags``）。
     无法映射时抛 SubjectMappingError，异常信息即跳过原因。
     """
     bangumi_id = payload.get("id")
     if not isinstance(bangumi_id, int) or bangumi_id <= 0:
         raise SubjectMappingError(f"缺少有效的条目 id（实际值：{payload.get('id')!r}）")
 
-    bgm_type = payload.get("type")
-    if bgm_type not in TYPE_MAPPING:
-        type_name = TYPE_NAMES.get(bgm_type, f"未知类型 {bgm_type!r}")
+    content_type, book_kind = resolve_book(payload)
+    if content_type is None:
+        type_name = TYPE_NAMES.get(payload.get("type"), f"未知类型 {payload.get('type')!r}")
         raise SubjectMappingError(
-            f"暂不支持导入「{type_name}」类条目（本站只收录动画/游戏/小说/漫画）"
+            f"暂不支持导入「{type_name}」类条目（本站只收录动画/游戏/小说/漫画；"
+            "书籍区画集与非日本语种的小说也不收录）"
         )
 
     title = (payload.get("name_cn") or "").strip() or (payload.get("name") or "").strip()
@@ -932,13 +1236,33 @@ def map_subject(payload: dict) -> MappedSubject:
     return MappedSubject(
         bangumi_id=bangumi_id,
         title=title,
-        type=TYPE_MAPPING[bgm_type],
+        type=content_type,
         summary=summary,
         rating=float(score),
         source_url=SOURCE_URL_TEMPLATE.format(subject_id=bangumi_id),
-        tags=extract_tags(payload),
+        tags=_subject_tags(payload, content_type),
+        studios=extract_studios(payload),
+        year=extract_year(payload),
         image_url=extract_cover_url(payload),
+        book_kind=book_kind,
     )
+
+
+def _subject_tags(payload: dict, content_type: str) -> list[str]:
+    """题材标签：动画/漫画/游戏走 Bangumi 标签归一；书籍另补 infobox 文库标签。
+
+    书籍的 Bangumi 标签常被「轻小说」「小说」这类载体词占满名额（归一后属
+    噪音），所以文库 / 丛书标签对小说区是关键补充，放在归一标签之后。
+    """
+    tags = extract_tags(payload)
+    if content_type != "novel":
+        return tags
+    for name in extract_book_tags(payload):
+        if name not in tags:
+            tags.append(name)
+        if len(tags) >= MAX_TAGS_PER_SUBJECT:
+            break
+    return tags[:MAX_TAGS_PER_SUBJECT]
 
 
 # ---------- 入库流程 ----------
@@ -976,8 +1300,9 @@ def _map_and_store(db, payload: dict, *, apply: bool, cover_downloader=False) ->
     - 预览模式 -> preview，不写库、不下图；
     - 正式模式写入失败（含唯一索引冲突、数据库错误）会回滚并归入对应结果，
       不中断其余条目的导入；
-    - 正式入库成功后，标签经 ``crud.replace_content_tags`` 替换式写入
-      （与站内筛选同一套表，不另写标签逻辑）；
+    - 正式入库成功后，**题材**标签经 ``crud.replace_content_tags`` 替换式写入
+      （与站内筛选同一套表，不另写标签逻辑；年份/公司/声优/媒介已在
+      ``extract_tags`` 阶段分流：公司进 content_studios、年份进 contents.year）；
     - 正式入库成功后，信息卡（infobox）经 ``app.entity_links`` 白名单识别
       作者/公司关系，``crud.replace_content_entity_links`` 替换式写入；
       没有可用键时静默跳过，识别失败（数据库错误）归入 failed；
@@ -1022,11 +1347,16 @@ def _map_and_store(db, payload: dict, *, apply: bool, cover_downloader=False) ->
             rating=subject.rating,
             bangumi_id=subject.bangumi_id,
             source_url=subject.source_url,
+            year=subject.year,
+            book_kind=subject.book_kind,
         )
         db.add(content)
         db.commit()
         # 标签与作品一起落库：替换式写入，重复导入不会堆叠关联行
         crud.replace_content_tags(db, content.id, subject.tags)
+        # 公司单独成表（与收藏同步链路同一套口径）：标签里的公司名不进标签云
+        if subject.studios:
+            crud.replace_content_studios(db, content.id, subject.studios)
 
         # 作者/公司关系与作品一起落库：infobox 白名单识别，替换式写入
         entity_note = _link_entities(db, content.id, payload)

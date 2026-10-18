@@ -123,17 +123,24 @@ def list_pending_contents(
     scope: str = "engaged",
     top: int = 24,
     limit: int | None = None,
+    content_ids: list[int] | None = None,
 ) -> list[Content]:
     """挑出需要回填封面的条目。
 
     只处理有 bangumi_id 且（无 image_url 或 --force）的条目；再用 scope 收窄：
     - ``engaged``（默认）：只补有互动的作品（收藏 / 标注 / 浏览），最省资源；
-    - ``top``：互动作品 + 评分最高的 ``top`` 部（首页推荐、详情页相关作品会用到）；
+    - ``top``：互动作品 + 评分最高的 ``top`` 部（详情页相关作品会用到）；
+    - ``home``：首页「推荐作品」当前口味精选（第一屏的脸面，单独一个范围）；
     - ``all``：全部，慎用（上千条会很慢）。
+
+    传了 ``content_ids`` 就只处理这些 id（忽略 scope，仍受 bangumi_id / force 约束）。
     """
+    wanted = {int(value) for value in (content_ids or [])}
     stmt = select(Content).where(Content.bangumi_id.is_not(None)).order_by(Content.id)
     rows = [row for row in db.scalars(stmt) if force or not row.image_url]
-    if scope == "all":
+    if wanted:
+        rows = [row for row in rows if row.id in wanted]
+    elif scope == "all":
         pass
     else:
         allowed = _engaged_ids(db)
@@ -147,6 +154,9 @@ def list_pending_contents(
                     .limit(top)
                 )
             )
+        elif scope == "home":
+            # 首页推荐是口味精选，命中面与「高分前 N」不重合，必须单独收进来
+            allowed |= {int(row.id) for row in crud.list_home_recommendations(db, limit=16)}
         rows = [row for row in rows if row.id in allowed]
     if limit and limit > 0:
         rows = rows[:limit]
@@ -161,6 +171,7 @@ def run_backfill(
     scope: str = "engaged",
     top: int = 24,
     limit: int | None = None,
+    content_ids: list[int] | None = None,
     pause: float = 0.0,
     proxy: str | None = None,
     timeout: float = import_bangumi.DEFAULT_TIMEOUT,
@@ -201,7 +212,14 @@ def run_backfill(
     db = session_factory()
     try:
         for index, content in enumerate(
-            list_pending_contents(db, force=force, scope=scope, top=top, limit=limit)
+            list_pending_contents(
+                db,
+                force=force,
+                scope=scope,
+                top=top,
+                limit=limit,
+                content_ids=content_ids,
+            )
         ):
             if index and pause > 0:
                 sleep(pause)
@@ -278,9 +296,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--scope",
-        choices=("engaged", "top", "all"),
+        choices=("engaged", "top", "home", "all"),
         default="engaged",
-        help="补图范围：engaged=有互动（收藏/标注/浏览，默认）；top=互动+评分最高 N 部；all=全部",
+        help="补图范围：engaged=有互动（收藏/标注/浏览，默认）；top=互动+评分最高 N 部；home=首页推荐精选；all=全部",
+    )
+    parser.add_argument(
+        "--content-id",
+        type=int,
+        action="append",
+        dest="content_ids",
+        default=None,
+        metavar="ID",
+        help="只补指定作品 id（可重复传），忽略 --scope；仍只处理无封面 / --force 的条目",
     )
     parser.add_argument(
         "--top",
@@ -344,6 +371,7 @@ def main(argv=None, *, fetch=None, cover_downloader=None) -> int:
             scope=args.scope,
             top=args.top,
             limit=args.limit,
+            content_ids=args.content_ids,
             pause=args.sleep,
             apply=args.apply,
             force=args.force,

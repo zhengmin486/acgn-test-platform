@@ -4,6 +4,7 @@
 MySQL 接入与 Alembic 迁移尚未落地。
 """
 
+import re
 import secrets
 import unicodedata
 from datetime import datetime, timedelta
@@ -560,12 +561,63 @@ def recommend_contents(
 HOME_TASTE_POSITIVE = ("日常", "轻喜剧", "后宫", "党争", "百合", "扭曲情感")
 HOME_TASTE_AVOIDED = ("宏大叙事", "致郁系", "体育竞技", "大男主爽番")
 
+# 系列归一键要剥的尾部形态词：季/期用正则（带数字），这些直接按后缀剥。
+_SERIES_SEASON_RE = re.compile(
+    r"(?:第[0-9一二三四五六七八九十百]+[季期部章篇]|[0-9]+\s*期|(?:season|シーズン)\s*[0-9]+)\s*$",
+    re.IGNORECASE,
+)
+_SERIES_TAIL_WORDS = (
+    "剧场版", "劇場版", "总集篇", "總集篇", "特别篇", "特別篇", "特典", "番外篇", "番外",
+    "完结篇", "完結篇", "前篇", "后篇", "後篇", "ova", "oad", "续", "續",
+)
+_SERIES_TAIL_PUNCT = " 　、。，,.!！?？·・-–—~～&＆:：/／\\'\"「」『』【】()（）"
+
+
+def series_title_key(title: str) -> str:
+    """标题的系列归一键：剥掉季/期/剧场版/特典等后缀与尾部标点。
+
+    只做保守归一（不猜剧情）：剥完还剩下的差异交给「前缀聚类」兜底——
+    「街角魔族」是「街角魔族 2丁目」的前缀，两者归到同一系列。
+    """
+    name = unicodedata.normalize("NFKC", (title or "").strip())
+    for _ in range(3):
+        stripped = _SERIES_SEASON_RE.sub("", name)
+        lowered = stripped.casefold()
+        for word in _SERIES_TAIL_WORDS:
+            if lowered.endswith(word):
+                stripped = stripped[: -len(word)]
+                lowered = stripped.casefold()
+        stripped = stripped.rstrip(_SERIES_TAIL_PUNCT)
+        if stripped == name or not stripped:
+            break
+        name = stripped
+    return name.casefold()
+
+
+def _home_pick_group_key(row: Content, title_keys: list[str]) -> str:
+    """推荐位的系列分组键：有 series_id 用系列，否则用标题前缀聚类。
+
+    前缀聚类只认「整标题是另一部的前缀」（且前缀 ≥ 4 字）——
+    「摇曳百合」→「摇曳百合 夏日时光」，不会把「魔法少女小圆」和「魔法少女奈叶」
+    误并（两者互不为前缀）。
+    """
+    if row.series_id:
+        return f"sid:{row.series_id}"
+    key = series_title_key(row.title)
+    if not key:  # 无标题的脏数据各自成组，避免空前缀把整批并成一个系列
+        return f"id:{row.id}"
+    for existing in title_keys:
+        if existing and (key.startswith(existing) or existing.startswith(key)):
+            return f"t:{existing}"
+    return f"t:{key}"
+
 
 def list_home_recommendations(db: Session, limit: int = 8) -> list[Content]:
     """首页推荐作品：按站长的编辑口味挑（与成分检测的推荐同一套匹配口径）。
 
     - 本命题材命中越多越靠前，同命中数按评分；避雷题材一票否决（9.9 分也不推）；
-    - 同名条目只占一个推荐位（同作品的多季/多卷/OVA 在库里是不同行，门户第一屏去重）；
+    - **同系列只占一个推荐位**：有 series_id 按系列归组，没有就按标题前缀聚类；
+      代表取该系列最早的一部（年份优先，其次 id）——推荐位要能从第一季看起；
     - 门户面对游客，没有「已收藏」概念，不传排除集；
     - 目录还小 / 一个命中都没有时回落到评分榜（list_top_contents），保证新站不空；
       只要有命中就只推命中，不拿高分作品稀释口味。
@@ -574,24 +626,33 @@ def list_home_recommendations(db: Session, limit: int = 8) -> list[Content]:
         db,
         positive_tags=list(HOME_TASTE_POSITIVE),
         avoided_tags=list(HOME_TASTE_AVOIDED),
-        limit=max(limit * 3, limit),
+        limit=max(limit * 4, limit),
     )
     if not picks:
         return list_top_contents(db, limit=limit)
     rows = get_contents_by_ids(db, [item["content_id"] for item in picks])
     by_id = {row.id: row for row in rows}
-    # 按推荐顺序取行（get_contents_by_ids 按主键返回），同名标题只留第一个
-    ordered: list[Content] = []
-    seen_titles: set[str] = set()
+
+    # 按推荐顺序（命中数→评分）聚组；组内顺序不代表推荐位顺序
+    groups: dict[str, list[Content]] = {}
+    order: list[str] = []
+    title_keys: list[str] = []
     for item in picks:
         row = by_id.get(item["content_id"])
         if row is None:
             continue
-        title_key = (row.title or "").strip()
-        if title_key in seen_titles:
-            continue
-        seen_titles.add(title_key)
-        ordered.append(row)
+        key = _home_pick_group_key(row, title_keys)
+        if key.startswith("t:") and key[2:] not in title_keys:
+            title_keys.append(key[2:])
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(row)
+
+    ordered: list[Content] = []
+    for key in order:
+        # 同系列只推一部：取最早的一季（年份优先，其次 id）
+        ordered.append(min(groups[key], key=lambda row: (row.year or 9999, row.id)))
         if len(ordered) >= limit:
             break
     return ordered
@@ -903,9 +964,10 @@ def article_tags_map(db: Session, article_ids: list[int]) -> dict[int, list[str]
 def replace_article_content_links(db: Session, article_id: int, titles: list[str]) -> list[Content]:
     """替换某篇资讯的关联作品：按标题匹配 contents，先删旧关联再建新关联。
 
-    titles 为识别出的作品标题（调用方已按得分排序）：同标题作品会全部
-    关联——同名条目很少见，全部关联比任选其一更忠实；返回的作品列表保持
-    传入标题的顺序（得分序），供页面按相关度渲染。空列表 = 清空关联。
+    titles 为识别出的作品标题（调用方已按得分排序）；库中同标题有多条时
+    只关联 id 最小的一条——页面显示两张同名卡对用户没有意义（线上
+    Fate/Zero 就有重复条目）。返回的作品列表保持传入标题的顺序（得分序），
+    供页面按相关度渲染。空列表 = 清空关联。
 
     与 replace_article_tags 一样不自行 commit（调用方统一事务边界）。
     """
@@ -913,10 +975,12 @@ def replace_article_content_links(db: Session, article_id: int, titles: list[str
     db.execute(sa_delete(ArticleContentLink).where(ArticleContentLink.article_id == article_id))
     if not unique:
         return []
-    by_title: dict[str, list[Content]] = {}
-    for content in db.scalars(select(Content).where(Content.title.in_(unique))):
-        by_title.setdefault(content.title, []).append(content)
-    ordered = [content for title in unique for content in by_title.get(title, [])]
+    by_title: dict[str, Content] = {}
+    for content in db.scalars(
+        select(Content).where(Content.title.in_(unique)).order_by(Content.id)
+    ):
+        by_title.setdefault(content.title, content)
+    ordered = [by_title[title] for title in unique if title in by_title]
     for content in ordered:
         db.add(ArticleContentLink(article_id=article_id, content_id=content.id))
     return ordered

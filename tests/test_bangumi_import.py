@@ -184,26 +184,40 @@ class TestMapSubject:
         assert subject.source_url == "https://bgm.tv/subject/975"
 
     @pytest.mark.parametrize(
-        ("bgm_type", "expected_type"),
-        [(1, "novel"), (2, "anime"), (4, "game"), (6, "comic")],
+        ("bgm_type", "platform", "expected_type"),
+        [
+            (2, "TV", "anime"),
+            (4, "PC", "game"),
+            (1, 1001, "comic"),   # 归档：书籍区 1001=漫画
+            (1, 1002, "novel"),   # 归档：1002=小说 —— 类型仍是 novel，无文库信号先打「文学」标注
+            (1, "漫画", "comic"),  # API 字符串 platform
+            (1, "轻小说", "novel"),
+            (1, 1003, None),      # 画集不收
+            (1, None, None),      # 书籍区解析不出细分也不收
+        ],
     )
-    def test_four_site_types_are_supported(self, bgm_type, expected_type):
-        """站点四个类型都要能映射：书籍区里小说(1)与漫画(6)混在一起，必须按条目 type 区分。
+    def test_site_types_resolution(self, bgm_type, platform, expected_type):
+        """站点四类型的解析规则（2026-10-18 按官方归档实测语义修正）：
 
-        回归防护：曾经 TYPE_MAPPING 只有 {2,4}，导致小说和漫画完全收不进来。
+        type=2→anime、4→game；type=1 书籍按 platform 拆分（1001=漫画、1002=小说）；
+        type=6 是三次元真人剧（Archive README 写「6=漫画」是错的），不收录。
         """
         payload = make_payload(400, bgm_type)
+        payload["platform"] = platform
 
-        subject = import_bangumi.map_subject(payload)
-
-        assert subject.type == expected_type
+        if expected_type is None:
+            with pytest.raises(import_bangumi.SubjectMappingError):
+                import_bangumi.map_subject(payload)
+        else:
+            subject = import_bangumi.map_subject(payload)
+            assert subject.type == expected_type
 
     @pytest.mark.parametrize(
         ("bgm_type", "expected_reason"),
-        [(3, "音乐"), (5, "三次元"), (None, "未知类型")],
+        [(3, "音乐"), (6, "真人"), (None, "未知类型")],
     )
     def test_unsupported_types_are_rejected(self, bgm_type, expected_reason):
-        """音乐 / 三次元 / 缺失类型一律跳过（不属于本站四类型）。"""
+        """音乐 / 真人（三次元）/ 缺失类型一律跳过（不属于本站四类型）。"""
         payload = make_payload(300, 1)
         payload["type"] = bgm_type
 
@@ -261,7 +275,7 @@ class TestMapSubject:
 
 class TestExtractTags:
     def test_top_tags_by_count(self):
-        """按 count 从多到少取前 5 个，标注数少的被截掉。"""
+        """按 count 从多到少取前 5 个题材标签，标注数少的被截掉。"""
         tags = import_bangumi.extract_tags(ANIME_PAYLOAD)
 
         assert tags == ["热血", "科幻", "机甲", "战斗", "友情"]
@@ -282,20 +296,51 @@ class TestExtractTags:
 
         assert import_bangumi.extract_tags({}) == []
 
+    def test_non_genre_tags_dropped_before_limit(self):
+        """年份 / 公司 / 声优 / 媒介 / 平台在入库前被丢掉，不占题材名额。
+
+        这条是线上教训：不过滤时标签云被 TV / 剧场版 / PC 这类媒介词霸榜，
+        「按标签筛选」点哪个都是全站作品，等于废掉。
+        """
+        payload = make_payload(402, 2)
+        payload["tags"] = [
+            {"name": "TV", "count": 9999},
+            {"name": "2011", "count": 5000},
+            {"name": "A-1 Pictures", "count": 4000},
+            {"name": "花泽香菜", "count": 3000},
+            {"name": "剧场版", "count": 2000},
+            {"name": "PC", "count": 1000},
+            {"name": "治愈", "count": 100},
+            {"name": "日常", "count": 90},
+        ]
+
+        assert import_bangumi.extract_tags(payload) == ["治愈", "日常"]
+
+    def test_genre_aliases_normalized_on_import(self):
+        """同义词入库即归一：SF -> 科幻、日常系 -> 日常。"""
+        payload = make_payload(405, 2)
+        payload["tags"] = [
+            {"name": "SF", "count": 100},
+            {"name": "日常系", "count": 90},
+            {"name": "癒し", "count": 80},
+        ]
+
+        assert import_bangumi.extract_tags(payload) == ["科幻", "日常", "治愈"]
+
     def test_invalid_entries_are_skipped(self):
         """非 dict 元素、空名、超长名一律丢弃；count 非法按 0 排在最后。"""
-        payload = make_payload(402, 2)
+        payload = make_payload(406, 2)
         payload["tags"] = [
             "not-a-dict",
             {"name": "", "count": 99},
             {"name": "长" * 81, "count": 98},
-            {"name": "无计数"},
-            {"name": "有计数", "count": "abc"},
-            {"name": "正常", "count": 1},
+            {"name": "治愈", "count": 0},
+            {"name": "日常", "count": "abc"},
+            {"name": "热血", "count": 1},
         ]
 
-        # count 非法按 0：两个 0 分标签按名称 codepoint 排序（无 < 有），结果确定
-        assert import_bangumi.extract_tags(payload) == ["正常", "无计数", "有计数"]
+        # count 非法按 0：两个 0 分标签按名称 codepoint 排序（日 < 热），结果确定
+        assert import_bangumi.extract_tags(payload) == ["热血", "日常", "治愈"]
 
     def test_duplicate_names_deduped_keep_first(self):
         """同名标签去重（保留先出现的那次），不占两个名额。"""
@@ -312,17 +357,128 @@ class TestExtractTags:
         """标注数相同按名称排序，保证导入结果确定可复现。"""
         payload = make_payload(404, 2)
         payload["tags"] = [
-            {"name": "bravo", "count": 5},
-            {"name": "alpha", "count": 5},
-            {"name": "charlie", "count": 5},
+            {"name": "治愈", "count": 5},
+            {"name": "热血", "count": 5},
+            {"name": "机甲", "count": 5},
         ]
 
-        assert import_bangumi.extract_tags(payload) == ["alpha", "bravo", "charlie"]
+        assert import_bangumi.extract_tags(payload) == ["机甲", "治愈", "热血"]
 
     def test_custom_limit(self):
         """limit 参数可显式指定（与 crud.MAX_CONTENT_TAGS 兜底一致）。"""
         assert import_bangumi.extract_tags(ANIME_PAYLOAD, limit=2) == ["热血", "科幻"]
         assert import_bangumi.extract_tags(ANIME_PAYLOAD, limit=0) == []
+
+
+class TestExtractStudiosAndYear:
+    def test_studios_from_tags_are_normalized(self):
+        """标签里的公司归一后进 studios，不占题材名额。"""
+        payload = make_payload(410, 2)
+        payload["tags"] = [
+            {"name": "京阿尼", "count": 100},
+            {"name": "A1 Pictures", "count": 90},
+            {"name": "治愈", "count": 80},
+            {"name": "TV", "count": 9999},
+        ]
+
+        assert import_bangumi.extract_studios(payload) == ["京都动画", "A-1 Pictures"]
+        # 公司不影响题材标签
+        assert import_bangumi.extract_tags(payload) == ["治愈"]
+
+    def test_studios_capped(self):
+        payload = make_payload(411, 2)
+        payload["tags"] = [
+            {"name": "BONES", "count": 10},
+            {"name": "MAPPA", "count": 9},
+            {"name": "SHAFT", "count": 8},
+            {"name": "TRIGGER", "count": 7},
+        ]
+
+        assert import_bangumi.extract_studios(payload, limit=2) == ["BONES", "MAPPA"]
+
+    def test_year_prefers_date_then_tags(self):
+        payload = make_payload(412, 2)
+        payload["date"] = "2006-04-02"
+        payload["tags"] = [{"name": "2011", "count": 5}]
+        assert import_bangumi.extract_year(payload) == 2006
+
+        payload["date"] = ""
+        assert import_bangumi.extract_year(payload) == 2011  # 标签年份兜底
+
+        payload["tags"] = [{"name": "治愈", "count": 5}]
+        assert import_bangumi.extract_year(payload) is None
+
+    def test_map_subject_carries_studios_and_year(self):
+        payload = make_payload(413, 2)
+        payload["date"] = "2015-10-01"
+        payload["tags"] = [
+            {"name": "BONES", "count": 10},
+            {"name": "热血", "count": 9},
+            {"name": "2015", "count": 1},
+        ]
+
+        subject = import_bangumi.map_subject(payload)
+        assert subject.studios == ["BONES"]
+        assert subject.year == 2015
+
+
+class TestExtractBookTags:
+    def test_bunko_label_becomes_tag(self):
+        """轻小说的文库标签补进小说区筛选（infobox 派生，不过归一）。"""
+        payload = make_payload(420, 1)
+        payload["platform"] = 1002
+        payload["infobox"] = [
+            {"key": "作者", "value": "镰池和马"},
+            {"key": "文库", "value": "電撃文庫"},
+            {"key": "出版社", "value": "KADOKAWA"},
+        ]
+
+        assert import_bangumi.extract_book_tags(payload) == ["電撃文庫"]
+
+    def test_japanese_and_chinese_keys(self):
+        payload = make_payload(421, 1)
+        payload["infobox"] = [
+            {"key": "レーベル", "value": "角川スニーカー文庫"},
+            {"key": "丛书", "value": ["轻小说", "日本文学"]},
+        ]
+
+        assert import_bangumi.extract_book_tags(payload) == ["角川スニーカー文庫", "轻小说", "日本文学"]
+
+    def test_other_keys_ignored_and_capped(self):
+        payload = make_payload(422, 1)
+        payload["infobox"] = [
+            {"key": "出版社", "value": "讲谈社"},
+            {"key": "文库", "value": "A"},
+            {"key": "文庫", "value": "B"},
+            {"key": "label", "value": "C"},
+            {"key": "imprint", "value": "D"},
+        ]
+
+        # 出版社由 entity_links 收进关联实体，不在这里派生；上限 3 个
+        assert import_bangumi.extract_book_tags(payload) == ["A", "B", "C"]
+
+    def test_missing_infobox_returns_empty(self):
+        payload = make_payload(423, 1)
+        assert import_bangumi.extract_book_tags(payload) == []
+        payload["infobox"] = "not-a-list"
+        assert import_bangumi.extract_book_tags(payload) == []
+
+    def test_novel_mapping_appends_bunko_tag(self):
+        """书籍条目：归一题材 + infobox 文库标签一起进 MappedSubject。"""
+        payload = make_payload(424, 1)
+        payload["platform"] = 1002
+        payload["infobox"] = [{"key": "文库", "value": "電撃文庫"}]
+        payload["tags"] = [
+            {"name": "轻小说", "count": 500},
+            {"name": "科幻", "count": 100},
+            {"name": "魔法", "count": 90},
+        ]
+
+        subject = import_bangumi.map_subject(payload)
+        assert subject.type == "novel"
+        assert subject.book_kind == "light_novel"
+        # 「轻小说」是载体词（归一后属噪音），文库标签补位
+        assert subject.tags == ["科幻", "魔法", "電撃文庫"]
 
 
 # ---------- 网络层：超时、重试与代理配置 ----------
@@ -392,6 +548,17 @@ class TestFetchSubject:
 
 
 class TestProxyConfig:
+    def test_api_base_env_override(self, monkeypatch):
+        """BANGUMI_API_BASE 环境变量可指向镜像（服务器直连被污染时的逃生口）。"""
+        monkeypatch.setenv("BANGUMI_API_BASE", "https://mirror.example/")
+        _spec.loader.exec_module(import_bangumi)  # 重跑模块级代码（合成模块名不能 reload）
+        try:
+            assert import_bangumi.BANGUMI_API_BASE == "https://mirror.example"  # 去尾斜杠
+        finally:
+            monkeypatch.delenv("BANGUMI_API_BASE", raising=False)
+            _spec.loader.exec_module(import_bangumi)
+        assert import_bangumi.BANGUMI_API_BASE == "https://api.bgm.tv"
+
     def test_proxy_handler_used_when_configured(self):
         """配置代理时，opener 的 ProxyHandler 指向该代理。"""
         opener = import_bangumi.build_opener("http://127.0.0.1:9910")

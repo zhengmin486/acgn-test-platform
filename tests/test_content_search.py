@@ -307,6 +307,28 @@ def test_index_falls_back_to_rating_without_taste_match(tmp_path):
         app.dependency_overrides.pop(get_db, None)
 
 
+def test_index_recommends_one_per_series(tmp_path):
+    """同系列多季只占一个推荐位，且取最早的一季（从头看起）。"""
+    client, factory = _client_with_works(
+        tmp_path,
+        [
+            ("街角魔族", 8.0, ["日常", "百合"]),
+            ("街角魔族 2丁目", 8.9, ["日常", "百合", "搞笑"]),   # 同系列第二季，命中更多
+            ("摇曳百合", 8.2, ["日常", "百合"]),
+            ("摇曳百合 夏日时光！", 7.6, ["日常", "百合"]),      # 尾缀 + 标点不同
+            ("别当欧尼酱了！", 7.5, ["日常", "搞笑"]),
+        ],
+        "series.db",
+    )
+    try:
+        titles = re.findall(r'work-card-title">([^<]*)', client.get("/").text)
+        assert titles.count("街角魔族") == 1 and "街角魔族 2丁目" not in titles
+        assert titles.count("摇曳百合") == 1 and "摇曳百合 夏日时光！" not in titles
+        assert "别当欧尼酱了！" in titles
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+
 def test_empty_database_portal_and_works_search(empty_client):
     """空库：首页门户展示推荐空态；作品页搜索提示无匹配，两者都保持 200。"""
     plain = empty_client.get("/")
