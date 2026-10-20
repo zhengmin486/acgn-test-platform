@@ -1,10 +1,13 @@
 {% extends "base.html" %}
+{% from "_brand.html" import wordmark %}
 {# 测试管理平台布局（面向开发者）：只承载「测试用例 / 执行历史 / 回归批次」，
    是与内容平台并列的独立界面域。
-   内容数据的管理（作品 / 资讯 / 档期 / 同步 / 词条审核）与站点治理（账号 / 邀请码 / 角色）
+   内容数据的管理（作品 / 资讯 / 档期 / 同步 / 作品审核）与站点治理（账号 / 邀请码 / 角色）
    都不在本导航内——它们属于内容平台（见 base_content.html 的「内容管理」「站点设置」）。
    本布局只保留一个跨域入口：返回内容平台。 #}
 {% block body_class %}admin-body{% endblock %}
+{# 测试平台是内部工具域，标题不挂品牌名，后缀收口在这里（各页只写页面名）。 #}
+{% block title_suffix %} · 测试平台{% endblock %}
 
 {% block navbar %}
 {% set nav_path = request.url.path %}
@@ -15,8 +18,9 @@
 ] %}
 <header class="admin-header sticky-top">
     <nav class="navbar navbar-expand-lg navbar-dark admin-navbar px-3">
-        <a class="navbar-brand" href="/testcases">
-            <span class="brand-mark" aria-hidden="true"></span><span class="admin-brand-badge">测试</span>测试管理平台
+        <a class="navbar-brand brand-wordmark brand-wordmark-sm" href="/testcases"
+           aria-label="{{ site_name }} 测试管理平台（返回用例列表）">
+            {{ wordmark() }}<span class="admin-brand-badge">测试</span><span class="admin-brand-name">测试管理平台</span>
         </a>
         <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#admin-nav"
                 aria-controls="admin-nav" aria-expanded="false" aria-label="切换导航">

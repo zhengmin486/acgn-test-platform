@@ -4,7 +4,7 @@
    - view=entity 单个作者/公司：其作品列表（按评分降序）；
    - view=series 单个系列：同系列作品列表（按评分降序）。
    数据来自 Bangumi 信息卡识别（app/entity_links.py 回填写入）。 #}
-{% block title %}{% if view == 'entity' %}{{ entity.name }}{% elif view == 'series' %}{{ series.name }}{% else %}作者 / 公司{% endif %} - ACGN 内容平台{% endblock %}
+{% block title %}{% if view == 'entity' %}{{ entity.name }}{% elif view == 'series' %}{{ series.name }}{% else %}作者 / 公司{% endif %}{% endblock %}
 
 {% macro stars(rating) %}
 {% set star_count = (rating / 2) | int %}
@@ -12,29 +12,29 @@
 {% endmacro %}
 
 {% macro work_cards(contents) %}
-<div class="row g-3">
+<div class="works-grid">
     {% for item in contents %}
-    <div class="col-12 col-sm-6 col-lg-4">
-        <a class="work-card" href="/contents/{{ item.id }}">
-            <span class="work-cover-box">
-                <span class="work-cover" aria-hidden="true">{{ item.title[:1] }}</span>
-                {% if item.image_url %}
-                <img class="work-cover" src="{{ thumb_src(item.image_url) }}" alt="{{ item.title }}封面" loading="lazy" onerror="this.style.display='none'">
+    <a class="work-card" href="/contents/{{ item.id }}">
+        <span class="work-cover-box">
+            <span class="work-cover" aria-hidden="true">{{ item.title[:1] }}</span>
+            {% if item.image_url %}
+            <img class="work-cover" src="{{ thumb_src(item.image_url) }}" alt="{{ item.title }}封面" loading="lazy" onerror="this.style.display='none'">
+            {% endif %}
+        </span>
+        <span class="work-card-body">
+            <span class="work-card-title">{{ item.title }}</span>
+            <span class="work-card-rating">
+                <span class="badge detail-type-badge-sm">{{ type_labels.get(item.type, item.type) }}</span>
+                {% if item.rating > 0 %}
+                {{ stars(item.rating) }}
+                <span>{{ '%.1f' % item.rating }}</span>
+                {% else %}
+                <span class="text-muted small">暂无评分</span>
                 {% endif %}
             </span>
-            <span class="work-card-body">
-                <span class="d-flex justify-content-between align-items-center gap-2">
-                    <span class="fw-semibold text-truncate">{{ item.title }}</span>
-                    <span class="badge detail-type-badge-sm">{{ type_labels.get(item.type, item.type) }}</span>
-                </span>
-                <span class="d-flex align-items-center gap-2 mt-1">
-                    {{ stars(item.rating) }}
-                    <span class="small text-muted">{{ '%.1f' % item.rating }}</span>
-                </span>
-                <span class="small text-secondary mt-1 work-card-summary">{{ item.summary[:60] }}{% if item.summary|length > 60 %}…{% endif %}</span>
-            </span>
-        </a>
-    </div>
+            <span class="text-secondary work-card-summary">{{ item.summary[:60] }}{% if item.summary|length > 60 %}…{% endif %}</span>
+        </span>
+    </a>
     {% endfor %}
 </div>
 {% endmacro %}
@@ -101,7 +101,8 @@
         </div>
         {% else %}
         <div class="detail-empty">
-            暂无作者 / 公司关联数据，先去<a href="/contents">全部作品</a>看看吧。
+            还没有识别到任何作者/公司关联。<br>
+            <span class="small">作者与制作公司由作品信息卡自动识别，可先去<a href="/contents">全部作品</a>浏览。</span>
         </div>
         {% endif %}
     </div>
@@ -120,9 +121,9 @@
         </div>
         {% else %}
         <div class="detail-empty">
-            还没有识别到任何系列。<br>
+            还没有识别到任何系列。{% if current_user and current_user.is_staff %}<br>
             <span class="small">存量作品可运行 <code>python scripts/link_entities.py --series</code>
-            从关联条目回填（仅当配对作品也在库内时才归系列）。</span>
+            从关联条目回填（仅当配对作品也在库内时才归系列）。</span>{% endif %}
         </div>
         {% endif %}
     </div>

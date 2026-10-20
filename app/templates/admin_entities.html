@@ -2,7 +2,7 @@
 {% from "_pager.html" import pager %}
 {# 关联管理：按作品手工维护「作者/公司关联」与「所属系列」。
    自动识别（导入 / scripts/link_entities.py）覆盖不了的边角用例在这里补删。 #}
-{% block title %}关联管理 - ACGN 内容平台{% endblock %}
+{% block title %}关联管理{% endblock %}
 {% block content %}
 <h1 class="h3 mb-1 section-heading">关联管理</h1>
 <p class="text-muted small mb-3">维护作品的作者/公司关联与所属系列：补一个信息卡没解析出来的作者、删一个错认的公司、把两部作品归入同一个系列。共 {{ total }} 部作品。</p>

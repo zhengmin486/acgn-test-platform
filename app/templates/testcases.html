@@ -1,5 +1,5 @@
 {% extends "base_admin.html" %}
-{% block title %}测试用例管理 - 测试管理平台{% endblock %}
+{% block title %}测试用例管理{% endblock %}
 {% block content %}
 {% set total = all_cases | length %}
 {% set enabled_count = all_cases | selectattr("enabled") | list | length %}

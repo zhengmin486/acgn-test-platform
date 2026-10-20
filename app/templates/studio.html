@@ -1,5 +1,5 @@
 {% extends "base_content.html" %}
-{% block title %}{{ studio_name }} - ACGN 内容平台{% endblock %}
+{% block title %}{{ studio_name }}{% endblock %}
 {% block content %}
 <div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-3">
     <div>
@@ -20,7 +20,7 @@
                     <span class="badge detail-type-badge-sm">{{ type_labels.get(item.type, item.type) }}</span>
                 </span>
                 <span class="d-flex align-items-center gap-2 mt-1">
-                    <span class="small text-muted">评分 {{ '%.1f' % item.rating }}</span>
+                    <span class="small text-muted">{% if item.rating > 0 %}评分 {{ '%.1f' % item.rating }}{% else %}暂无评分{% endif %}</span>
                 </span>
                 <span class="small text-muted mt-1">
                     {% if item.year %}{{ item.year }}{% endif %}

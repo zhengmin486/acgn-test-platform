@@ -1,12 +1,12 @@
 {% extends "base_content.html" %}
-{% block title %}{{ '修改词条' if mode == 'update' else '新增词条' }} - ACGN 内容平台{% endblock %}
+{% block title %}{{ '修改作品' if mode == 'update' else '新增作品' }}{% endblock %}
 {% block content %}
 <div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-3">
     <div>
-        <h1 class="h3 mb-1 section-heading">{{ '申请修改词条' if mode == 'update' else '申请新增词条' }}</h1>
+        <h1 class="h3 mb-1 section-heading">{{ '申请修改资料' if mode == 'update' else '申请新增作品' }}</h1>
         <p class="text-muted small mb-0">提交后进入审核队列，管理员通过后才会写入内容库。</p>
     </div>
-    <a class="btn btn-outline-secondary btn-sm" href="/me?tab=submissions">&larr; 我的词条申请</a>
+    <a class="btn btn-outline-secondary btn-sm" href="/me?tab=submissions">&larr; 我的作品申请</a>
 </div>
 
 {% if error %}
@@ -15,7 +15,8 @@
 
 {% if mode == 'update' and content %}
 <div class="alert alert-info py-2">
-    正在修改：<a href="/contents/{{ content.id }}">{{ content.title }}</a>（当前评分 {{ '%.1f' % content.rating }}）
+    正在修改：<a href="/contents/{{ content.id }}">{{ content.title }}</a>（当前评分 {{ '%.1f' % content.rating if content.rating > 0 else '暂无' }}）
+    <div class="small mt-1">评分来自外部数据源（Bangumi 等）的统计，本流程不能修改，只同步展示。</div>
 </div>
 {% endif %}
 
@@ -38,11 +39,42 @@
                     </select>
                 </div>
                 <div class="col-sm-6">
-                    <label class="form-label" for="sub-rating">评分（0-10）</label>
-                    <input class="form-control" id="sub-rating" name="rating" type="number"
-                           step="0.1" min="0" max="10" value="{{ values.get('rating', '8.0') }}">
+                    <label class="form-label" for="sub-year">年份</label>
+                    <input class="form-control" id="sub-year" name="year" type="number"
+                           min="1900" max="2100" value="{{ values.get('year', '') }}"
+                           placeholder="{% if mode == 'update' %}留空则不修改{% else %}如 2024{% endif %}">
                 </div>
             </div>
+            <div class="row g-3 mt-0">
+                <div class="col-sm-4">
+                    <label class="form-label" for="sub-media">媒介</label>
+                    <select class="form-select" id="sub-media" name="media">
+                        <option value="">{% if mode == 'update' %}不修改{% else %}未指定{% endif %}</option>
+                        {% for choice in media_choices %}
+                        <option value="{{ choice }}"{% if values.get('media') == choice %} selected{% endif %}>{{ choice }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="col-sm-4">
+                    <label class="form-label" for="sub-episodes">话数</label>
+                    <input class="form-control" id="sub-episodes" name="episodes" type="number"
+                           min="1" max="10000" value="{{ values.get('episodes', '') }}"
+                           placeholder="{% if mode == 'update' %}留空则不修改{% else %}如 12{% endif %}">
+                </div>
+                <div class="col-sm-4">
+                    <label class="form-label" for="sub-source-material">原作载体</label>
+                    <select class="form-select" id="sub-source-material" name="source_material">
+                        <option value="">{% if mode == 'update' %}不修改{% else %}未指定{% endif %}</option>
+                        {% for choice in source_material_choices %}
+                        <option value="{{ choice }}"{% if values.get('source_material') == choice %} selected{% endif %}>{{ choice }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+            </div>
+            {% if mode == 'update' %}
+            <p class="form-text mb-0 mt-2">年份 / 媒介 / 话数 / 原作载体留空即保持原值，只有填了才会被修改。</p>
+            {% endif %}
+            <p class="form-text mb-0 mt-2">本流程不收集评分：作品评分由外部数据源（Bangumi 等）同步，审核通过后也不会改动原作品的评分。</p>
             <div class="mb-3 mt-3">
                 <label class="form-label" for="sub-summary">简介</label>
                 <textarea class="form-control" id="sub-summary" name="summary" rows="5"

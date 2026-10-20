@@ -1,7 +1,10 @@
 {% extends "base_content.html" %}
 
-{% block title %}ACGN 资讯 - ACGN 内容平台{% endblock %}
+{% block title %}ACGN 资讯{% endblock %}
 
+{# 列表版式：头条卡（左图右文）+ 卡片网格。
+   全部资讯按发布时间从新到旧排列，第一篇天然是「最新」，用头条位承载；
+   搜索态不分主次，结果一律进网格。 #}
 {% block content %}
 <div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-3">
     <div>
@@ -14,7 +17,7 @@
 </div>
 
 {# ===== 资讯搜索：标题/摘要/正文关键词（GET，无 JS），与作品页筛选栏同款式 ===== #}
-<form class="row g-2 align-items-end mb-3" method="get" action="/articles">
+<form class="filter-panel row g-2 align-items-end mb-3" method="get" action="/articles">
     <div class="col-12 col-md">
         <label class="form-label small mb-0" for="articles-q">关键词</label>
         <input type="text" name="q" id="articles-q" value="{{ q }}" class="form-control form-control-sm" placeholder="搜索标题 / 摘要 / 正文">
@@ -30,31 +33,91 @@
     {% if q %}没有匹配“{{ q }}”的资讯，换个关键词试试。<br><a class="small" href="/articles">查看全部资讯</a>{% else %}暂无资讯内容。{% endif %}
 </div>
 {% else %}
-<div class="article-list">
-    {% for article in articles %}
-    <article class="article-card">
-        <div class="d-flex flex-wrap align-items-center gap-2 mb-1">
-            <span class="badge detail-type-badge-sm">{{ article.category }}</span>
-            <span class="text-muted small">{{ article.published_at.strftime('%Y-%m-%d %H:%M') }}</span>
-        </div>
-        <h2 class="h6 mb-1">
-            <a class="article-card-title" href="/articles/{{ article.id }}">{{ article.title }}</a>
-        </h2>
-        {% if article.summary %}
-        <p class="small text-secondary mb-0">
-            {{ article.summary[:80] }}{% if article.summary|length > 80 %}…{% endif %}
-        </p>
+{% set featured = articles[0] if not q else None %}
+{% set rest = articles[1:] if not q else articles %}
+{# 成人内容全局显示设置：开启时隐藏已标记资讯的图片与露骨摘要，以普通提示替代；
+   作品名 / 日期 / 非露骨信息照常展示（这不是年龄验证）。 #}
+{% macro adult_summary(article, limit) %}
+{% if hide_adult and article.is_adult %}
+该资讯含成人向内容，已按站点设置隐藏摘要。
+{% else %}
+{{ article.summary[:limit] }}{% if article.summary|length > limit %}…{% endif %}
+{% endif %}
+{% endmacro %}
+
+{% if featured %}
+{# ===== 头条：最新一篇。左大图 + 右文字，图片列与文字列等高裁切 ===== #}
+<article class="article-feature">
+    <a class="article-card-thumb" href="/articles/{{ featured.id }}" tabindex="-1" aria-hidden="true">
+        {% if hide_adult and featured.is_adult %}
+        <span class="article-thumb-fallback">{{ featured.category }}</span>
+        {% elif featured.image_url %}
+        <img src="{{ featured.image_url }}" alt="" loading="eager">
+        {% else %}
+        <span class="article-thumb-fallback">{{ featured.category }}</span>
         {% endif %}
-        {# 识别标签（自动识别写入）：点击跳全部作品页按该标签筛选 #}
-        {% if article_tags_map.get(article.id) %}
-        <div class="d-flex flex-wrap align-items-center gap-2 mt-2">
-            {% for name in article_tags_map.get(article.id) %}
+    </a>
+    <div class="article-feature-body">
+        <div class="article-meta">
+            <span class="badge detail-type-badge-sm">{{ featured.category }}</span>
+            <span>{{ featured.published_at.strftime('%Y-%m-%d %H:%M') }}</span>
+            <span class="article-flag">最新</span>
+        </div>
+        <h2 class="article-feature-title">
+            <a href="/articles/{{ featured.id }}">{{ featured.title }}</a>
+        </h2>
+        {% if featured.summary %}
+        <p class="article-feature-summary">{{ adult_summary(featured, 160) }}</p>
+        {% endif %}
+        {% if article_tags_map.get(featured.id) %}
+        <div class="d-flex flex-wrap align-items-center gap-2">
+            {% for name in article_tags_map.get(featured.id) %}
             <a class="tag-chip" href="/contents?tag={{ name|urlencode }}">{{ name }}</a>
             {% endfor %}
         </div>
         {% endif %}
+    </div>
+</article>
+{% endif %}
+
+{% if rest %}
+{# ===== 其余资讯：16:9 封面 + 标题两行 + 摘要两行，网格自适应 1/2/3 栏 ===== #}
+<div class="article-grid">
+    {% for article in rest %}
+    <article class="article-card">
+        <a class="article-card-thumb" href="/articles/{{ article.id }}" tabindex="-1" aria-hidden="true">
+            {% if hide_adult and article.is_adult %}
+            <span class="article-thumb-fallback">{{ article.category }}</span>
+            {% elif article.image_url %}
+            <img src="{{ article.image_url }}" alt="" loading="lazy">
+            {% else %}
+            <span class="article-thumb-fallback">{{ article.category }}</span>
+            {% endif %}
+        </a>
+        <div class="article-card-main">
+            <div class="article-meta">
+                <span class="badge detail-type-badge-sm">{{ article.category }}</span>
+                <span>{{ article.published_at.strftime('%Y-%m-%d %H:%M') }}</span>
+                {% if hide_adult and article.is_adult %}<span class="article-flag">成人内容已隐藏</span>{% endif %}
+            </div>
+            <h2 class="article-card-heading">
+                <a class="article-card-title" href="/articles/{{ article.id }}">{{ article.title }}</a>
+            </h2>
+            {% if article.summary %}
+            <p class="article-card-summary">{{ adult_summary(article, 80) }}</p>
+            {% endif %}
+            {# 识别标签（自动识别写入）：点击跳全部作品页按该标签筛选 #}
+            {% if article_tags_map.get(article.id) %}
+            <div class="d-flex flex-wrap align-items-center gap-2 mt-1">
+                {% for name in article_tags_map.get(article.id) %}
+                <a class="tag-chip" href="/contents?tag={{ name|urlencode }}">{{ name }}</a>
+                {% endfor %}
+            </div>
+            {% endif %}
+        </div>
     </article>
     {% endfor %}
 </div>
+{% endif %}
 {% endif %}
 {% endblock %}

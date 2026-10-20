@@ -4,16 +4,20 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#66ccff">
-    <title>{% block title %}ACGN 内容平台{% endblock %}</title>
-    {# 站点图标：内联 SVG（紫色圆角方块 + 播放符），无需外部图片文件 #}
-    {# favicon：与导航 logo 同一枚双色「屏幕 + 播放键」标识 #}
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='15' fill='%230a2d42'/%3E%3Crect x='11' y='14' width='42' height='28' rx='6' fill='none' stroke='%2366ccff' stroke-width='4.5'/%3E%3Cpath d='M25 48h14M32 42v6' stroke='%2366ccff' stroke-width='4.5' stroke-linecap='round'/%3E%3Cpath d='M27 21l12 7-12 7z' fill='%2339c5bb'/%3E%3C/svg%3E">
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link href="/static/style.css" rel="stylesheet">
+    {# 标题统一拼接：子模板只写页面名，品牌名与后缀在 base 收口。
+       测试平台另有自己的后缀（见 base_admin.html 覆盖 title_suffix）。 #}
+    <title>{% block title %}{{ site_tagline }}{% endblock %}{% block title_suffix %} · {{ site_name }}{% endblock %}</title>
+    {# favicon：与导航字标同源的「星芒」标识（深底 + 青绿四角星 + 蓝点）。
+       不再使用「屏幕 + 播放键」——这站是编目站，不是视频站。 #}
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='15' fill='%230a2d42'/%3E%3Cpath d='M32 7c1.7 14.4 10.6 23.3 25 25-14.4 1.7-23.3 10.6-25 25-1.7-14.4-10.6-23.3-25-25 14.4-1.7 23.3-10.6 25-25Z' fill='%2339c5bb'/%3E%3Ccircle cx='50' cy='48' r='3.6' fill='%2366ccff'/%3E%3C/svg%3E">
+    {# Bootstrap 自托管（static/vendor），去掉对 jsdelivr 等 CDN 的网络依赖：
+       国内网络偶尔拉不到 CDN 会导致整页无样式、所有栅格竖向堆叠（与「分类变竖向」高度相关）。 #}
+    <link href="/static/vendor/bootstrap.min.css" rel="stylesheet">
+    <link href="/static/style.css?v={{ asset_v }}" rel="stylesheet">
 </head>
 {# 公共骨架：仅提供站点结构（head / 导航槽 / 主体 / 页脚槽）。
    页面区域身份由子布局决定：
-   - base_content.html → ACGN 内容平台布局（内容导航 + 测试管理入口）
+   - base_content.html → 内容平台布局（Otaku：内容导航 + 测试管理入口）
    - base_admin.html   → 测试管理平台布局（管理导航 + 返回内容平台入口） #}
 <body class="{% block body_class %}{% endblock %}">
 {% block navbar %}{% endblock %}
@@ -26,12 +30,17 @@
         {# 面向访客的页脚：只谈平台定位；数据口径一句话带过（不点名任何上游源站，
            来源细节只保留在管理端页面）。末行保留低调的免责说明——聚合站惯例，
            留一句真话比零来源更安全，也方便权利人联系而不是投诉到主机商。 #}
-        <div class="small text-muted">ACGN 内容平台 · 动画 / 漫画 / 游戏 / 轻小说信息浏览</div>
+        <div class="small text-muted footer-brandline">
+            <span class="footer-wordmark">{{ site_name }}</span>
+            <span class="footer-dot" aria-hidden="true">·</span>
+            <span class="footer-tagline">{{ site_tagline }}</span>
+            <span class="footer-scope">动画 / 漫画 / 游戏 / 轻小说信息浏览</span>
+        </div>
         <div class="footer-source small text-muted">数据整理自公开网络信息，仅作展示与学习用途；如有侵权请联系删除。</div>
     </div>
 </footer>
 {% endblock %}
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script src="/static/vendor/bootstrap.bundle.min.js"></script>
 
 {# 界面改良 P1：全局轻反馈基建（渐进增强，无 JS 时退回浏览器原生行为）
    1) Toast 容器：异步/耗时操作结果的即时感知（与 PRG 回显 alert 并存）
@@ -346,9 +355,19 @@
 
     document.addEventListener("change", function (event) {
         var sel = event.target;
-        /* 导航搜索选类型即搜（落到 /contents），与作品页筛选栏同交互约定 */
-        if (sel && (sel.id === "works-type" || sel.id === "nav-type") && sel.form) sel.form.submit();
+        /* 导航搜索选类型即搜（落到 /contents），与作品页筛选栏同交互约定。
+           桌面 #nav-type 与移动面板 #nav-type-m 共用同一逻辑。 */
+        if (sel && (sel.id === "works-type" || sel.id === "nav-type" || sel.id === "nav-type-m") && sel.form) sel.form.submit();
     });
+
+    /* 移动端搜索图标点开后自动聚焦输入框，减少一次点击（无 JS 时不影响基础展开） */
+    var navSearchPanel = document.getElementById("navSearchPanel");
+    if (navSearchPanel && window.bootstrap) {
+        navSearchPanel.addEventListener("shown.bs.collapse", function () {
+            var inp = navSearchPanel.querySelector('input[type="search"]');
+            if (inp) inp.focus();
+        });
+    }
 
     /* ---- 本周新番横滑条：左右箭头按一屏宽度步进，两端按钮自动淡出 ---- */
     Array.prototype.forEach.call(document.querySelectorAll("[data-spotlight]"), function (wrap) {

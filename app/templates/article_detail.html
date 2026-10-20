@@ -1,8 +1,6 @@
 {% extends "base_content.html" %}
 
-{% block title %}
-{{ article.title }} - ACGN 内容平台
-{% endblock %}
+{% block title %}{{ article.title }}{% endblock %}
 
 {% block content %}
 <p class="small mb-3"><a href="/articles">&larr; 返回资讯频道</a></p>
@@ -26,12 +24,46 @@
             {% endfor %}
         </div>
         {% endif %}
+        {# 作品信息（作者/公司/系列/译名，自动识别写入）：实体/系列进花名册页，译名进作品页 #}
+        {% if article_entity_chips %}
+        <div class="mt-3 d-flex flex-wrap align-items-center gap-2">
+            <span class="text-muted small">作品信息：</span>
+            {% for chip in article_entity_chips %}
+            <a class="tag-chip" href="{{ chip.url }}">{{ chip.name }}<span class="work-info-kind">{{ chip.label }}</span></a>
+            {% endfor %}
+        </div>
+        {% endif %}
     </div>
 </div>
 
 <div class="card detail-section mt-3">
     <div class="card-body p-4">
-        <div class="article-body">{{ article.body }}</div>
+        {% if article.image_url %}
+        <figure class="article-hero">
+            <img src="{{ article.image_url }}" alt="{{ article.title }}" loading="lazy">
+        </figure>
+        {% endif %}
+        {# 正文按块渲染：文本段 / [图]（本地化后的站内路径或源站外链）/ [媒体] 链接 #}
+        <div class="article-body">
+            {% for block in body_blocks %}
+            {% if block.kind == 'image' %}
+            <figure class="article-figure">
+                <img src="{{ block.url }}" alt="" loading="lazy">
+            </figure>
+            {% elif block.kind == 'media' %}
+            <p class="article-media-line">[媒体] <a href="{{ block.url }}" target="_blank" rel="noopener noreferrer">{{ block.url }}</a></p>
+            {% else %}
+            <p>{{ block.text }}</p>
+            {% endif %}
+            {% endfor %}
+        </div>
+
+        {# 原文链接：只留中性入口，不展示来源名称（original_url 多为发行商官网） #}
+        {% if article.original_url %}
+        <p class="small mb-0 mt-3">
+            <a href="{{ article.original_url }}" target="_blank" rel="noopener noreferrer">原文链接 &nearr;</a>
+        </p>
+        {% endif %}
     </div>
 </div>
 
@@ -49,7 +81,7 @@
                     <div class="d-flex justify-content-between align-items-center gap-2">
                         <span class="fw-semibold text-truncate">{{ work.title }}</span>
                     </div>
-                    <div class="small text-muted mt-1">评分 {{ '%.1f' % work.rating }}</div>
+                    <div class="small text-muted mt-1">{% if work.rating > 0 %}评分 {{ '%.1f' % work.rating }}{% else %}暂无评分{% endif %}</div>
                     <p class="small text-secondary mb-0 mt-1">
                         {{ work.summary[:40] }}{% if work.summary|length > 40 %}…{% endif %}
                     </p>
@@ -60,7 +92,7 @@
         {% else %}
         <div class="detail-empty">
             暂未关联到作品。<br>
-            <span class="small">识别依据是资讯文本中真实出现的作品标题；作品库扩充后可重跑识别（见 README「资讯自动识别」）。</span>
+            <span class="small">识别依据是资讯文本中真实出现的作品标题、译名与作者/公司/系列等作品信息；作品库扩充后可重跑识别（见 README「资讯自动识别」）。</span>
         </div>
         {% endif %}
     </div>

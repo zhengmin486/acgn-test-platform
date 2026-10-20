@@ -1,7 +1,8 @@
 {% extends "base.html" %}
+{% from "_brand.html" import wordmark %}
 {# ACGN 内容平台布局（面向读者 + 内容运营）。
    一级导航只放公共内容域（首页 / ACGN 资讯 / 新番档期），对全部访客一致；
-   「我的」（个人空间 / 阿宅画像）与运营入口（内容管理 / 站点设置 / 测试平台）
+   「我的」（个人空间 / 成分检测）与运营入口（内容管理 / 站点设置 / 测试平台）
    按身份收进右侧用户下拉菜单，不占一级导航位置。
    作者/公司花名册（/creators）不是独立内容域：从「全部作品」页头部进入，
    作品详情页的关系 chips 也可直达，首页态高亮归「首页」。
@@ -13,12 +14,27 @@
     ("ACGN 资讯", "/articles", nav_path.startswith("/articles")),
     ("新番档期", "/schedule", nav_path == "/schedule" or nav_path == "/schedule/")
 ] %}
-<nav class="navbar navbar-expand-lg navbar-dark sticky-top site-navbar content-navbar px-3">
-    <a class="navbar-brand" href="/"><span class="brand-mark" aria-hidden="true"></span>ACGN 内容平台</a>
-    <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#content-nav"
-            aria-controls="content-nav" aria-expanded="false" aria-label="切换导航">
-        <span class="navbar-toggler-icon"></span>
-    </button>
+<nav class="navbar navbar-expand-md navbar-dark sticky-top site-navbar content-navbar">
+    {# 站点字标：星芒 + 竖排片假名「オタク」（见 _brand.html / style.css）。
+       品牌名与性质描述不在这里重复——「ACGN 内容平台」退到页脚与 <title>，
+       导航与首屏只保留字标本身。 #}
+    <a class="navbar-brand brand-wordmark" href="/" aria-label="{{ site_name }} · {{ site_tagline }}（返回首页）">
+        {{ wordmark() }}
+    </a>
+    {# 移动端常驻操作区（<md 才显示）：搜索图标 + 汉堡。
+       折叠断点取 md(768)：平板横屏 / 缩放笔记本(≥768)都展开成 PC 导航，避免「PC 显示成移动 UI」；
+       搜索图标点开下方 #navSearchPanel 面板，不进汉堡二级菜单，首屏即可触发。 #}
+    <div class="navbar-top-actions d-flex d-md-none align-items-center gap-2">
+        <button class="nav-search-toggle" type="button" data-bs-toggle="collapse"
+                data-bs-target="#navSearchPanel" aria-controls="navSearchPanel"
+                aria-expanded="false" aria-label="展开搜索">
+            <svg class="svg-ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg>
+        </button>
+        <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#content-nav"
+                aria-controls="content-nav" aria-expanded="false" aria-label="切换导航">
+            <span class="navbar-toggler-icon"></span>
+        </button>
+    </div>
     <div class="collapse navbar-collapse" id="content-nav">
         <ul class="navbar-nav flex-grow-1">
             {% for label, href, is_active in nav_items %}
@@ -30,8 +46,8 @@
         </ul>
         {# 全局搜索：从首页 hero 收编到导航胶囊，任何内容页都可直接搜，提交到 /contents。
            类型下拉为「类型 + 关键词」组合检索（type_labels 为模板全局，见 page_common）；
-           放在用户区之前、折叠容器之内——窄屏时随菜单折叠换行，不挤一栏布局。 #}
-        <form class="nav-search" method="get" action="/contents" role="search">
+           桌面端（≥md）此胶囊常驻；移动端（<md）隐藏，改用导航栏搜索图标展开 #navSearchPanel。 #}
+        <form class="nav-search d-none d-md-flex" method="get" action="/contents" role="search">
             <svg class="svg-ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg>
             <select name="type" id="nav-type" class="nav-search-type" aria-label="作品类型">
                 <option value="">全部类型</option>
@@ -61,7 +77,8 @@
                 <ul class="dropdown-menu dropdown-menu-end" aria-labelledby="user-menu-toggle">
                     <li><h6 class="dropdown-header">我的</h6></li>
                     <li><a class="dropdown-item" href="/me">个人空间</a></li>
-                    <li><a class="dropdown-item" href="/me/persona">阿宅画像</a></li>
+                    <li><a class="dropdown-item" href="/settings/profile">账号设置</a></li>
+                    <li><a class="dropdown-item" href="/me/persona">成分检测</a></li>
                     {% if current_user.is_staff %}
                     <li><hr class="dropdown-divider"></li>
                     <li><h6 class="dropdown-header">管理</h6></li>
@@ -80,4 +97,18 @@
         </div>
     </div>
 </nav>
+{# 移动端搜索展开面板：仅 <md 由导航栏搜索图标触发；暗底全宽，内含完整「类型 + 关键词」表单。
+   输入框 id 用 nav-q-m 避免与桌面 #nav-q 重复；类型下拉 change 即提交（见 base.html 全局监听）。 #}
+<div class="collapse nav-search-panel" id="navSearchPanel">
+    <form class="nav-search nav-search--mobile" method="get" action="/contents" role="search">
+        <svg class="svg-ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg>
+        <select name="type" id="nav-type-m" class="nav-search-type" aria-label="作品类型">
+            <option value="">全部类型</option>
+            {% for code, label in type_labels.items() %}
+            <option value="{{ code }}">{{ label }}</option>
+            {% endfor %}
+        </select>
+        <input type="search" name="q" id="nav-q-m" placeholder="搜索作品…" aria-label="搜索作品">
+    </form>
+</div>
 {% endblock %}

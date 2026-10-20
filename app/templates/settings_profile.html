@@ -1,0 +1,91 @@
+{% extends "base_content.html" %}
+{# 账号设置 · 个人资料：性别 / 生日 / 所在地 + 简介。
+   从个人空间（/me）独立成页——/me 是「我收藏了什么」的内容页，资料属于低频设置。
+   三项资料只在本人页面出现：站内没有公开用户主页，也没有任何模板把
+   gender / birthday / location 渲染给别人看。 #}
+{% block title %}账号设置 · 个人资料{% endblock %}
+
+{% block content %}
+<div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-3">
+    <div>
+        <h1 class="h3 mb-1 section-heading">账号设置</h1>
+        <p class="text-muted small mb-0">资料、邮箱与手机都在这里管理；这些内容只属于你本人，站内没有公开主页。</p>
+    </div>
+    <a class="btn btn-outline-secondary btn-sm" href="/me">个人空间 &rarr;</a>
+</div>
+
+{% include "_account_nav.html" %}
+
+{% if flash %}
+<div class="alert alert-{{ flash.level }} py-2">{{ flash.text }}</div>
+{% endif %}
+
+<div class="card app-card">
+    <div class="card-header bg-white d-flex flex-wrap justify-content-between align-items-center gap-2">
+        <span class="fw-semibold">个人资料</span>
+        <span class="space-private-hint">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+                <rect x="4.4" y="10.4" width="15.2" height="9.4" rx="2.1"/>
+                <path d="M8.2 10.4V7.9a3.8 3.8 0 0 1 7.6 0v2.5"/>
+            </svg>
+            仅你本人可见
+        </span>
+    </div>
+    <div class="card-body">
+        <form method="post" action="/settings/profile">
+            <div class="row g-3">
+                <div class="col-12 col-md-4">
+                    <span class="form-label small d-block mb-1">性别</span>
+                    <div class="space-gender-group" role="radiogroup" aria-label="性别">
+                        <label class="space-gender-option">
+                            <input type="radio" name="gender" value=""
+                                   {% if not account.gender %}checked{% endif %}>
+                            <span>保密</span>
+                        </label>
+                        {% for key, label in gender_labels.items() %}
+                        <label class="space-gender-option">
+                            <input type="radio" name="gender" value="{{ key }}"
+                                   {% if account.gender == key %}checked{% endif %}>
+                            <span>{{ label }}</span>
+                        </label>
+                        {% endfor %}
+                    </div>
+                </div>
+                <div class="col-12 col-md-4">
+                    <label class="form-label small mb-1" for="acct-birthday">生日</label>
+                    <input class="form-control" type="date" id="acct-birthday"
+                           name="birthday" value="{{ account.birthday.isoformat() if account.birthday else '' }}"
+                           min="1900-01-01" max="{{ today_iso }}">
+                    {# 星座与年龄由生日现算、不落库，这里只是即时反馈，不进数据库 #}
+                    <div class="acct-field-hint">
+                        {% if account.birthday and zodiac %}
+                        {{ zodiac }}{% if age is not none %} · {{ age }} 岁{% endif %}
+                        {% else %}
+                        填了生日会显示星座与年龄，其他人看不到。
+                        {% endif %}
+                    </div>
+                </div>
+                <div class="col-12 col-md-4">
+                    <label class="form-label small mb-1" for="acct-location">所在地</label>
+                    <input class="form-control" type="text" id="acct-location"
+                           name="location" value="{{ account.location or '' }}"
+                           maxlength="{{ location_max_length }}" placeholder="如：浙江 杭州">
+                    <div class="acct-field-hint">自由填写，最多 {{ location_max_length }} 个字符。</div>
+                </div>
+                <div class="col-12">
+                    <label class="form-label small mb-1" for="acct-bio">个人简介</label>
+                    <textarea class="form-control" id="acct-bio" name="bio" rows="4"
+                              maxlength="{{ bio_max_length }}"
+                              placeholder="最多 {{ bio_max_length }} 个字符，简单介绍一下自己">{{ account.bio or '' }}</textarea>
+                    <div class="acct-field-hint">留空并保存即清除简介。</div>
+                </div>
+            </div>
+            <div class="d-flex flex-wrap align-items-center gap-2 mt-3">
+                <button class="btn btn-primary btn-sm" type="submit">保存资料</button>
+                <span class="form-text mb-0">性别、生日、所在地都可以留空。</span>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}

@@ -1,0 +1,260 @@
+{% extends "base_content.html" %}
+{# 账号设置 · 账号与安全：邮箱 / 手机的绑定状态与操作（绑定 · 更换 · 解绑）。
+   两条凭据的语义一致：绑定要证明「新凭据归你」，解绑要证明「旧凭据归你」。
+   - 邮箱走「发确认链接到新地址 + 当前密码」；手机走「6 位验证码」。
+   - 页面上只出现脱敏值（a***@domain / 138****8000），完整地址不落地到 HTML。
+   - 表单面板由 ?panel= 控制展开状态（换绑 / 解绑），便于 PRG 后回到同一个面板。 #}
+{% block title %}账号设置 · 账号与安全{% endblock %}
+
+{% block content %}
+<div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-3">
+    <div>
+        <h1 class="h3 mb-1 section-heading">账号设置</h1>
+        <p class="text-muted small mb-0">资料、邮箱与手机都在这里管理；这些内容只属于你本人，站内没有公开主页。</p>
+    </div>
+    <a class="btn btn-outline-secondary btn-sm" href="/me">个人空间 &rarr;</a>
+</div>
+
+{% include "_account_nav.html" %}
+
+{% if flash %}
+<div class="alert alert-{{ flash.level }} py-2">{{ flash.text }}</div>
+{% endif %}
+
+{% if dev_code %}
+<div class="alert alert-warning py-2">
+    当前未配置短信服务，验证码直接显示在这里：<strong class="acct-dev-code">{{ dev_code }}</strong>
+    <span class="d-block small mt-1">已发送至 {{ dev_phone }}，{{ code_ttl_minutes }} 分钟内有效（仅本地 / 测试环境使用）。</span>
+</div>
+{% endif %}
+
+<div class="card app-card">
+    <div class="card-header bg-white">
+        <span class="fw-semibold">登录凭据</span>
+    </div>
+    <div class="card-body acct-list">
+
+        {# ===== 邮箱 ===== #}
+        <div class="acct-item">
+            <div class="acct-row">
+                <span class="acct-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+                         stroke-linecap="round" stroke-linejoin="round" focusable="false">
+                        <rect x="3.2" y="5.4" width="17.6" height="13.2" rx="2.4"/>
+                        <path d="m3.9 7.1 7.1 5.2a1.7 1.7 0 0 0 2 0l7.1-5.2"/>
+                    </svg>
+                </span>
+                <div class="acct-main">
+                    <div class="acct-head">
+                        <span class="acct-title">邮箱</span>
+                        {% if account.email %}
+                        <span class="acct-status acct-status-on">已绑定</span>
+                        {% else %}
+                        <span class="acct-status">未绑定</span>
+                        {% endif %}
+                    </div>
+                    {% if account.email %}
+                    <p class="acct-value">{{ email_masked }}</p>
+                    <p class="acct-note">
+                        {% if account.email_verified_at %}绑定于 {{ account.email_verified_at.strftime('%Y-%m-%d') }} · {% endif %}
+                        用于登录验证与找回密码
+                    </p>
+                    {% else %}
+                    <p class="acct-value acct-value-empty">尚未绑定邮箱</p>
+                    <p class="acct-note">绑定后可通过邮箱找回密码；邮箱只在本页以脱敏形式显示。</p>
+                    {% endif %}
+                </div>
+                <div class="acct-actions">
+                    {% if account.email %}
+                    <a class="acct-btn" href="/settings/security?panel=email-change">更换</a>
+                    <a class="acct-btn acct-btn-danger" href="/settings/security?panel=email-unbind">解绑</a>
+                    {% else %}
+                    <a class="acct-btn" href="/settings/security?panel=email-change">绑定邮箱</a>
+                    {% endif %}
+                </div>
+            </div>
+
+            {# 待确认：这一层永远不改库，用户不点链接就等于什么都没发生 #}
+            {% if pending_email_masked %}
+            <div class="acct-notice">
+                <span>待确认：{{ pending_email_masked }}（点开邮件里的链接才会生效，当前绑定保持不变）</span>
+                <span class="acct-notice-actions">
+                    {% if not mail_configured %}
+                    <form method="post" action="/settings/security/email/confirm" class="m-0">
+                        <button class="btn btn-link btn-sm p-0" type="submit">直接确认</button>
+                    </form>
+                    {% endif %}
+                    <form method="post" action="/settings/security/email/cancel" class="m-0">
+                        <button class="btn btn-link btn-sm text-muted p-0" type="submit">取消</button>
+                    </form>
+                </span>
+            </div>
+            {% endif %}
+
+            {% if panel == 'email-change' %}
+            <div class="acct-panel">
+                <form method="post" action="/settings/security/email">
+                    <div class="row g-3">
+                        <div class="col-12 col-md-6">
+                            <label class="form-label small mb-1" for="acct-email">新邮箱</label>
+                            <input class="form-control form-control-sm" type="email" id="acct-email"
+                                   name="email" required autocomplete="email"
+                                   placeholder="you@example.com">
+                        </div>
+                        <div class="col-12 col-md-6">
+                            <label class="form-label small mb-1" for="acct-email-pwd">当前密码</label>
+                            <input class="form-control form-control-sm" type="password" id="acct-email-pwd"
+                                   name="password" required autocomplete="current-password"
+                                   placeholder="确认是你本人在操作">
+                        </div>
+                    </div>
+                    <div class="d-flex flex-wrap align-items-center gap-2 mt-3">
+                        <button class="btn btn-primary btn-sm" type="submit">发送确认邮件</button>
+                        <a class="btn btn-link btn-sm text-muted p-0" href="/settings/security">取消</a>
+                        <span class="form-text mb-0">确认链接会发到新邮箱，点开后才生效；原邮箱在此之前不受影响。</span>
+                    </div>
+                </form>
+            </div>
+            {% elif panel == 'email-unbind' %}
+            <div class="acct-panel">
+                <p class="acct-panel-warn">
+                    解绑后仍可用用户名 + 密码登录，但<strong>不能再通过邮箱找回密码</strong>；之后可以重新绑定。
+                </p>
+                <form method="post" action="/settings/security/email/unbind">
+                    <div class="row g-3 align-items-end">
+                        <div class="col-12 col-md-6">
+                            <label class="form-label small mb-1" for="acct-unbind-pwd">当前密码</label>
+                            <input class="form-control form-control-sm" type="password" id="acct-unbind-pwd"
+                                   name="password" required autocomplete="current-password">
+                        </div>
+                        <div class="col-12 col-md-6 acct-panel-actions">
+                            <button class="btn btn-outline-danger btn-sm" type="submit"
+                                    data-confirm="确定解绑 {{ email_masked }} 吗？解绑后将无法通过邮箱找回密码。"
+                                    data-confirm-title="解绑邮箱">确认解绑</button>
+                            <a class="btn btn-link btn-sm text-muted p-0" href="/settings/security">取消</a>
+                        </div>
+                    </div>
+                </form>
+            </div>
+            {% endif %}
+        </div>
+
+        {# ===== 手机 ===== #}
+        <div class="acct-item">
+            <div class="acct-row">
+                <span class="acct-icon" aria-hidden="true">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+                         stroke-linecap="round" stroke-linejoin="round" focusable="false">
+                        <rect x="6.4" y="2.8" width="11.2" height="18.4" rx="2.6"/>
+                        <path d="M10.6 5.9h2.8M12 18.4h.01"/>
+                    </svg>
+                </span>
+                <div class="acct-main">
+                    <div class="acct-head">
+                        <span class="acct-title">手机</span>
+                        {% if account.phone %}
+                        <span class="acct-status acct-status-on">已绑定</span>
+                        {% else %}
+                        <span class="acct-status">未绑定</span>
+                        {% endif %}
+                    </div>
+                    {% if account.phone %}
+                    <p class="acct-value">{{ phone_masked }}</p>
+                    <p class="acct-note">
+                        {% if account.phone_bound_at %}绑定于 {{ account.phone_bound_at.strftime('%Y-%m-%d') }} · {% endif %}
+                        用于短信验证码校验
+                    </p>
+                    {% else %}
+                    <p class="acct-value acct-value-empty">尚未绑定手机</p>
+                    <p class="acct-note">绑定需要短信验证码，号码仅在本页以脱敏形式显示。</p>
+                    {% endif %}
+                </div>
+                {# 待验证期间隐藏这三个入口：下面已经有「输码 / 重新发送 / 取消」，
+                   再摆一个「绑定手机」会让人以为要重新点一遍 #}
+                {% if not pending_phone_masked %}
+                <div class="acct-actions">
+                    {% if account.phone %}
+                    <a class="acct-btn" href="/settings/security?panel=phone-bind">更换</a>
+                    <a class="acct-btn acct-btn-danger" href="/settings/security?panel=phone-unbind">解绑</a>
+                    {% else %}
+                    <a class="acct-btn" href="/settings/security?panel=phone-bind">绑定手机</a>
+                    {% endif %}
+                </div>
+                {% endif %}
+            </div>
+
+            {# 待验证的号码：验证码输入框直接常驻（发码后不需要再点一次） #}
+            {% if pending_phone_masked %}
+            <div class="acct-panel">
+                <form method="post" action="/settings/security/phone/confirm">
+                    <p class="acct-panel-lead">
+                        验证码已发至 <strong>{{ pending_phone_masked }}</strong>，{{ code_ttl_minutes }} 分钟内有效。
+                        {% if pending_phone_purpose == 'unbind' %}验证通过后即解绑该号码。{% endif %}
+                    </p>
+                    <div class="row g-3 align-items-end">
+                        <div class="col-12 col-md-4">
+                            <label class="form-label small mb-1" for="acct-code">验证码</label>
+                            <input class="form-control form-control-sm acct-code-input" type="text"
+                                   id="acct-code" name="code" inputmode="numeric" pattern="[0-9]*"
+                                   maxlength="6" autocomplete="one-time-code" required placeholder="6 位数字">
+                        </div>
+                        <div class="col-12 col-md-8 acct-panel-actions">
+                            <button class="btn btn-primary btn-sm" type="submit">确认</button>
+                            {% if phone_cooldown %}
+                            <button class="btn btn-outline-secondary btn-sm" type="submit" disabled
+                                    title="发送冷却中（{{ phone_cooldown }} 秒）">重新发送</button>
+                            {% else %}
+                            <button class="btn btn-outline-secondary btn-sm" type="submit"
+                                    formaction="/settings/security/phone/code">重新发送</button>
+                            {% endif %}
+                            <button class="btn btn-link btn-sm text-muted p-0" type="submit"
+                                    formaction="/settings/security/phone/cancel">取消</button>
+                        </div>
+                    </div>
+                </form>
+            </div>
+            {% elif panel == 'phone-bind' %}
+            <div class="acct-panel">
+                <form method="post" action="/settings/security/phone/code">
+                    <input type="hidden" name="purpose" value="bind">
+                    <div class="row g-3 align-items-end">
+                        <div class="col-12 col-md-6">
+                            <label class="form-label small mb-1" for="acct-phone">
+                                {% if account.phone %}新手机号{% else %}手机号{% endif %}
+                            </label>
+                            <input class="form-control form-control-sm" type="tel" id="acct-phone"
+                                   name="phone" required inputmode="numeric"
+                                   maxlength="{{ phone_max_length }}" placeholder="11 位大陆手机号">
+                        </div>
+                        <div class="col-12 col-md-6 acct-panel-actions">
+                            <button class="btn btn-primary btn-sm" type="submit">发送验证码</button>
+                            <a class="btn btn-link btn-sm text-muted p-0" href="/settings/security">取消</a>
+                        </div>
+                    </div>
+                    <p class="acct-panel-hint mb-0">验证码会发到新号码，输对之后才会替换当前绑定。</p>
+                </form>
+            </div>
+            {% elif panel == 'phone-unbind' %}
+            <div class="acct-panel">
+                <p class="acct-panel-warn">
+                    解绑后该号码不再与账号关联；解绑前需要先确认手机在你手上（验证码发到当前绑定号码）。
+                </p>
+                <form method="post" action="/settings/security/phone/code">
+                    <input type="hidden" name="purpose" value="unbind">
+                    <input type="hidden" name="phone" value="{{ account.phone or '' }}">
+                    <div class="d-flex flex-wrap align-items-center gap-2">
+                        <button class="btn btn-outline-danger btn-sm" type="submit">发送验证码并解绑</button>
+                        <a class="btn btn-link btn-sm text-muted p-0" href="/settings/security">取消</a>
+                    </div>
+                </form>
+            </div>
+            {% endif %}
+        </div>
+
+    </div>
+</div>
+
+<p class="text-muted small mt-3 mb-0">
+    邮箱与手机只用于账号安全：不对外展示，也不用于其它营销通知。
+</p>
+{% endblock %}

@@ -1,5 +1,6 @@
 {% extends "base_content.html" %}
-{% block title %}首页 - ACGN 内容平台{% endblock %}
+{% from "_brand.html" import wordmark %}
+{% block title %}首页{% endblock %}
 {% block content %}
 {# 分类图标：统一内联 SVG（.svg-ic 描边助手），替代 emoji，保证跨平台渲染一致 #}
 {% set type_icons = {
@@ -10,138 +11,238 @@
 } %}
 {% set fallback_icon = "<svg class='svg-ic' viewBox='0 0 24 24' aria-hidden='true'><path d='M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z'/></svg>" %}
 
-{# ===== 顶部 hero：只放平台标识 + 价值主张 + 主 CTA。
+{# ===== 顶部 hero：品牌字标 + 价值主张 + 主 CTA + 真实数据行 + 海报拼贴。
    搜索不再占黄金位——已收编为导航栏全局搜索（base_content.html），/ 键聚焦 #nav-q；
-   全量筛选在 /contents 页。黄金位让给内容：hero 之下直接进「本日新番」。 ===== #}
-<section class="home-hero text-white rounded-3 p-4 p-md-5 mb-4">
-    <h1 class="h3 mb-1">ACGN 内容平台</h1>
-    <p class="home-hero-sub mb-3">动画 · 漫画 · 游戏 · 轻小说一站浏览，本日新番与高分推荐持续更新。</p>
-    <div class="d-flex flex-wrap gap-2">
-        <a class="btn btn-light" href="/contents">浏览全部作品</a>
-        <a class="btn btn-outline-light" href="{{ '/me/persona' if current_user else '/persona' }}">测测你的阿宅画像 &rarr;</a>
+   全量筛选在 /contents 页。背景图来自本地素材（static/img/home），
+   海报为当季动画主视觉图，前 3 张静态展示。
+   品牌只留字标（全站唯一来源 _brand.html）。首页不放宣传语：
+   黄金位只给字标，「这站是什么」由副标题和页脚承担。 ===== #}
+<section class="home-hero">
+    <div class="home-hero-bg" aria-hidden="true"></div>
+    <div class="home-hero-inner">
+        <div class="home-hero-copy">
+            {{ wordmark("brand-lockup-lg") }}
+            {# h1 只留给屏幕阅读器与搜索引擎：首页不放宣传语，视觉主体是字标本身。
+               原句「发现你的下一部本命」是营销口号而非站点信息，已按用户要求删除；
+               这里用既定的站名与性质占位，不新造文案。 #}
+            <h1 class="visually-hidden">{{ site_name }} · {{ site_tagline }}</h1>
+            <p class="home-hero-sub">动画 · 漫画 · 游戏 · 轻小说一站浏览，本日新番与高分推荐持续更新。</p>
+            <div class="home-hero-actions">
+                <a class="btn btn-light" href="/contents">浏览全部作品</a>
+                <a class="btn btn-outline-light" href="{{ '/me/persona' if current_user else '/persona' }}">测测你的御宅成分 &rarr;</a>
+            </div>
+            <dl class="home-hero-stats">
+                <div class="home-hero-stat">
+                    <dt>收录作品</dt>
+                    <dd>{{ stats.works }}</dd>
+                </div>
+                <div class="home-hero-stat">
+                    <dt>本日新番</dt>
+                    <dd>{{ stats.today }}</dd>
+                </div>
+                <div class="home-hero-stat">
+                    <dt>资讯动态</dt>
+                    <dd>{{ stats.articles }}</dd>
+                </div>
+            </dl>
+        </div>
+        <div class="home-hero-collage" aria-hidden="true">
+            <img class="home-poster home-poster-a" src="/static/img/home/poster-sakura.jpg" alt="" loading="eager">
+            <img class="home-poster home-poster-b" src="/static/img/home/poster-haruhi.jpg" alt="" loading="eager">
+            <img class="home-poster home-poster-c" src="/static/img/home/poster-bocchi.jpg" alt="" loading="eager">
+        </div>
     </div>
 </section>
 
-{# ===== 本日新番：只展示今天排播的作品，紧随 hero 进首屏（内容钩子优先于工具表单）；
-   卡片上的时间即该作更新时间（HH:MM，精确到分），按时间先后排列。 ===== #}
-{% if spotlight %}
-<section class="mb-4">
-    <div class="d-flex justify-content-between align-items-center mb-3">
-        <h2 class="h5 mb-0 section-heading">本日新番</h2>
-        <a class="small fw-semibold" href="/schedule">全部档期 &rarr;</a>
-    </div>
-    <div class="spotlight-wrap" data-spotlight>
-        <button class="spotlight-nav spotlight-nav-prev" type="button" data-spotlight-prev aria-label="向左滚动更多新番">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="15 5 8 12 15 19"/></svg>
-        </button>
-        <div class="spotlight-track" data-spotlight-track>
-            {% for item in spotlight %}
-            {# 卡片点击落到站内作品搜索（按标题），不出站 #}
-            <a class="spotlight-card" href="/contents?q={{ item.title_main|urlencode }}">
-                <span class="spotlight-cover" aria-hidden="true">{{ item.title_main[:1] }}</span>
-                {% if item.image_url %}
-                <img class="spotlight-cover" src="{{ item.image_url }}" referrerpolicy="no-referrer" loading="lazy" alt="{{ item.title_main }}封面" onerror="this.style.display='none'">
-                {% endif %}
-                <span class="spotlight-meta">
-                    {% if item.broadcast_time %}<span class="badge schedule-time-badge">{{ item.broadcast_time }} 更新</span>{% endif %}
-                    <span class="spotlight-title">{{ item.title_main }}</span>
-                </span>
-            </a>
-            {% endfor %}
-        </div>
-        <button class="spotlight-nav spotlight-nav-next" type="button" data-spotlight-next aria-label="向右滚动更多新番">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="9 5 16 12 9 19"/></svg>
-        </button>
-    </div>
-</section>
-{% endif %}
+{# ===== 门户双栏（方案 A）：主列 = 分类条 + 本日新番 + 推荐作品；侧栏 = 御宅卡 + 最新资讯。
+   双栏只在 lg(≥992) 生效：主列 9 列 / 侧栏 3 列（sticky 跟随）——
+   主列宽才能让推荐网格铺到 4~5 列，侧栏收窄成紧凑信息条，两侧都不留大片空白；
+   <lg 按源顺序塌回全宽单列流：分类条 → 新番横滑 → 推荐 → 御宅 → 资讯。
+   同一套 DOM 与业务逻辑，两态差异全部由 style.css 的断点完成。 ===== #}
+<div class="row g-4 home-portal">
+    <main class="col-12 col-lg-9">
+        {# --- 主列 0 · 分类浏览：横向类型条，铺满主列宽度。
+             它原先挤在 3 列侧栏里做 2×2 磁贴，光这一块就吃掉 330px，
+             还排在御宅卡与资讯之后 —— 与「类型是最常用的导航动作」不匹配。
+             上提到 hero 正下方压成一行 chip，侧栏只剩两块。 --- #}
+        <section class="home-type-bar mb-4">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h2 class="h5 mb-0 section-heading">分类浏览</h2>
+                <a class="small fw-semibold" href="/contents">全部作品 &rarr;</a>
+            </div>
+            <div class="home-type-strip">
+                {% for code, label in type_labels.items() %}
+                <a class="home-type-tile home-type-{{ code }}" href="/contents?type={{ code }}">
+                    <span class="home-type-icon" aria-hidden="true">{{ (type_icons.get(code) or fallback_icon) | safe }}</span>
+                    <span class="home-type-text">
+                        <span class="fw-semibold">{{ label }}</span>
+                        <span class="small text-muted">{{ type_counts.get(code, 0) }} 部作品</span>
+                    </span>
+                </a>
+                {% endfor %}
+            </div>
+        </section>
 
-{# ===== 分类浏览（数量来自库内真实统计；磁贴进入作品页并按类型筛选） ===== #}
-<section class="mb-4">
-    <div class="d-flex justify-content-between align-items-center mb-3">
-        <h2 class="h5 mb-0 section-heading">分类浏览</h2>
-        <a class="small fw-semibold" href="/contents">全部作品 &rarr;</a>
-    </div>
-    <div class="row g-3">
-        {% for code, label in type_labels.items() %}
-        <div class="col-6 col-md-3">
-            <a class="home-type-tile" href="/contents?type={{ code }}">
-                <span class="home-type-icon" aria-hidden="true">{{ (type_icons.get(code) or fallback_icon) | safe }}</span>
-                <span class="fw-semibold">{{ label }}</span>
-                <span class="small text-muted">{{ type_counts.get(code, 0) }} 部作品</span>
-            </a>
-        </div>
-        {% endfor %}
-    </div>
-</section>
+        {# --- 主列 1 · 本日新番：只展示今天排播的作品，紧随 hero 进首屏；
+             卡片上的时间即该作更新时间（HH:MM，精确到分），按时间先后排列。
+             <lg 横滑（移动端习惯），lg+ 转 3 列可见网格（见 style.css）。 --- #}
+        {% if spotlight %}
+        <section class="mb-4">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h2 class="h5 mb-0 section-heading">本日新番</h2>
+                <a class="small fw-semibold" href="/schedule">全部档期 &rarr;</a>
+            </div>
+            <div class="spotlight-wrap" data-spotlight>
+                <button class="spotlight-nav spotlight-nav-prev" type="button" data-spotlight-prev aria-label="向左滚动更多新番">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="15 5 8 12 15 19"/></svg>
+                </button>
+                <div class="spotlight-track" data-spotlight-track>
+                    {% for item in spotlight %}
+                    {# 卡片点击落到站内作品搜索（按标题），不出站 #}
+                    <a class="spotlight-card" href="/contents?q={{ item.title_main|urlencode }}">
+                        <span class="spotlight-cover">
+                            <span class="spotlight-letter" aria-hidden="true">{{ item.title_main[:1] }}</span>
+                            {% if item.image_url %}
+                            <img class="spotlight-img" src="{{ item.image_url }}" referrerpolicy="no-referrer" loading="lazy" alt="{{ item.title_main }}封面" onerror="this.style.display='none'">
+                            {% endif %}
+                            {% if item.broadcast_time %}
+                            <span class="spotlight-badge badge schedule-time-badge">{{ item.broadcast_time }} 更新</span>
+                            {% endif %}
+                        </span>
+                        <span class="spotlight-meta">
+                            <span class="spotlight-title" title="{{ item.title_main }}">{{ item.title_main }}</span>
+                            {% if not item.broadcast_time %}<span class="small text-muted">时间待定</span>{% endif %}
+                        </span>
+                    </a>
+                    {% endfor %}
+                </div>
+                <button class="spotlight-nav spotlight-nav-next" type="button" data-spotlight-next aria-label="向右滚动更多新番">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="9 5 16 12 9 19"/></svg>
+                </button>
+            </div>
+        </section>
+        {% endif %}
 
-{# ===== 推荐作品 + 最新资讯 ===== #}
-<div class="row g-4 mb-4">
-    <section class="col-12 col-lg-8">
-        <div class="d-flex justify-content-between align-items-center mb-3">
-            <h2 class="h5 mb-0 section-heading">推荐作品</h2>
-            <a class="small fw-semibold" href="/contents">更多作品 &rarr;</a>
-        </div>
-        {% if top_contents %}
-        <div class="row g-3">
-            {% for item in top_contents %}
-            {% set stars = (item.rating / 2) | int %}
-            <div class="col-12 col-sm-6 col-lg-4">
-                <a class="work-card" href="/contents/{{ item.id }}">
+        {# --- 主列 2 · 推荐作品：自适应网格，卡片铺满不留大空白。
+             <576 两列 / ≥576 三列 / ≥768 与 ≥992 按最小卡宽自动填充（见 style.css）。
+             初始铺前 home_rec_initial（=CONTENT_PAGE_SIZE=60，整除各列数、末行必满），
+             其余带 home-top-extra 收起，「展开更多推荐」点开（上限 100）。 --- #}
+        <section class="mb-4">
+            <div class="d-flex justify-content-between align-items-center mb-3">
+                <h2 class="h5 mb-0 section-heading">推荐作品</h2>
+                <a class="small fw-semibold" href="/contents">更多作品 &rarr;</a>
+            </div>
+            {% if top_contents %}
+            <div class="home-top-grid">
+                {% for item in top_contents %}
+                {% set stars = (item.rating / 2) | int %}
+                <a class="work-card{% if loop.index > home_rec_initial %} home-top-extra{% endif %}" href="/contents/{{ item.id }}">
                     <span class="work-cover-box">
+                        <span class="work-cover-rank {{ 'work-rank-top' if loop.index <= 3 else '' }}" aria-hidden="true">{{ loop.index }}</span>
                         <span class="work-cover" aria-hidden="true">{{ item.title[:1] }}</span>
                         {% if item.image_url %}
                         <img class="work-cover" src="{{ thumb_src(item.image_url) }}" alt="{{ item.title }}封面" loading="lazy" onerror="this.style.display='none'">
                         {% endif %}
                     </span>
                     <span class="work-card-body">
-                        <span class="d-flex justify-content-between align-items-center gap-2">
-                            <span class="fw-semibold text-truncate">{{ item.title }}</span>
+                        <span class="work-card-title">{{ item.title }}</span>
+                        <span class="work-card-rating">
                             <span class="badge detail-type-badge-sm">{{ type_labels.get(item.type, item.type) }}</span>
-                        </span>
-                        <span class="d-flex align-items-center gap-2 mt-1">
+                            {% if item.rating > 0 %}
                             <span class="detail-stars" aria-hidden="true">{% for i in range(1, 6) %}<span class="{{ 'star-on' if i <= stars else 'star-off' }}">★</span>{% endfor %}</span>
-                            <span class="small text-muted">{{ '%.1f' % item.rating }}</span>
+                            <span>{{ '%.1f' % item.rating }}</span>
+                            {% else %}
+                            <span class="text-muted small">暂无评分</span>
+                            {% endif %}
                         </span>
-                        <span class="small text-secondary mt-1 work-card-summary">{{ item.summary[:40] }}{% if item.summary|length > 40 %}…{% endif %}</span>
+                        <span class="text-secondary work-card-summary">{{ item.summary[:40] }}{% if item.summary|length > 40 %}…{% endif %}</span>
                     </span>
                 </a>
+                {% endfor %}
             </div>
-            {% endfor %}
-        </div>
-        {% else %}
-        <div class="detail-empty">暂无内容数据，暂时无法推荐。</div>
-        {% endif %}
-    </section>
+            {% if top_contents|length > home_rec_initial %}
+            <div class="text-center mt-3">
+                <button type="button" class="btn btn-outline-primary btn-sm" id="home-rec-expand">展开更多推荐（还有 {{ top_contents|length - home_rec_initial }} 部）</button>
+            </div>
+            <script>
+                /* 推荐模块「展开更多」：移除收起类即整批铺开，按钮随后退场。
+                   无 JS 时前 home_rec_initial 部照常可见（渐进增强）。 */
+                (function () {
+                    "use strict";
+                    var btn = document.getElementById("home-rec-expand");
+                    if (!btn) return;
+                    btn.addEventListener("click", function () {
+                        var extras = document.querySelectorAll(".home-top-grid .home-top-extra");
+                        for (var i = 0; i < extras.length; i++) {
+                            extras[i].classList.remove("home-top-extra");
+                        }
+                        btn.parentNode.removeChild(btn);
+                    });
+                })();
+            </script>
+            {% endif %}
+            {% else %}
+            <div class="detail-empty">暂无内容数据，暂时无法推荐。</div>
+            {% endif %}
+        </section>
+    </main>
 
-    <section class="col-12 col-lg-4">
-        {# ===== 阿宅画像引流卡：游客免登录试算，登录用户直达自己的画像 ===== #}
-        <a class="home-persona-card mb-4" href="{{ '/me/persona' if current_user else '/persona' }}">
-            <span class="home-persona-kicker">阿宅画像</span>
-            <span class="home-persona-title">测测你的阿宅画像</span>
-            <span class="home-persona-sub">基于收藏与浏览记录，生成你的专属画像</span>
-            <span class="home-persona-cta">{{ '查看我的画像 →' if current_user else '免登录试算 →' }}</span>
-        </a>
-        <div class="d-flex justify-content-between align-items-center mb-3">
-            <h2 class="h5 mb-0 section-heading">最新资讯</h2>
-            <a class="small" href="/articles">全部资讯 &rarr;</a>
+    <aside class="col-12 col-lg-3 home-side">
+        <div class="home-side-inner">
+            {# --- 侧栏 1 · 御宅成分检测引流卡：游客免登录试算，登录用户直达成分报告。 --- #}
+            <a class="home-persona-card mb-4" href="{{ '/me/persona' if current_user else '/persona' }}">
+                <span class="home-persona-kicker">御宅成分检测</span>
+                <span class="home-persona-title">测测你的御宅成分</span>
+                <span class="home-persona-sub">基于收藏与浏览记录，检测你的专属成分</span>
+                <span class="home-persona-cta">{{ '查看我的成分 →' if current_user else '免登录试算 →' }}</span>
+            </a>
+
+            {# --- 侧栏 2 · 最新资讯：lg+ 单列紧凑小卡（左小封面 + 右文字），<lg 2 列卡片。 --- #}
+            <section class="mb-4">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                    <h2 class="h5 mb-0 section-heading">最新资讯</h2>
+                    <a class="small" href="/articles">全部资讯 &rarr;</a>
+                </div>
+                {% if latest_articles %}
+                <div class="home-news-grid home-news-scroll">
+                    {% for art in latest_articles %}
+                    {% set adult_hidden = hide_adult and art.is_adult %}
+                    <a class="home-news-card" href="/articles/{{ art.id }}">
+                        <span class="home-news-thumb">
+                            {% if adult_hidden %}
+                            <span class="home-news-ph" aria-hidden="true">{{ art.title[:1] }}</span>
+                            {% else %}
+                            {% if art.image_url %}
+                            <img class="home-news-img" src="{{ art.image_url }}" alt="{{ art.title }}封面" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.display='none'">
+                            {% endif %}
+                            <span class="home-news-ph" aria-hidden="true">{{ art.title[:1] }}</span>
+                            {% endif %}
+                        </span>
+                        <span class="home-news-body">
+                            <span class="home-news-title">{{ art.title }}</span>
+                            <span class="home-news-meta">
+                                <span class="home-news-cat">{{ art.category }}</span>
+                                {% if art.event_type and art.event_type != '其他' %}<span class="home-news-cat">{{ art.event_type }}</span>{% endif %}
+                                {% if art.published_at %}<span class="home-news-date">{{ art.published_at.strftime('%m-%d') }}</span>{% endif %}
+                                {% if adult_hidden %}<span class="home-news-cat">成人内容已隐藏</span>{% endif %}
+                            </span>
+                            {% if adult_hidden %}
+                            <span class="home-news-summary">该资讯含成人向内容，已按站点设置隐藏图片与摘要。</span>
+                            {% else %}
+                            <span class="home-news-summary">{{ art.summary[:46] }}{% if art.summary|length > 46 %}…{% endif %}</span>
+                            {% endif %}
+                        </span>
+                    </a>
+                    {% endfor %}
+                </div>
+                {% else %}
+                <div class="detail-empty">
+                    暂无资讯。<br>
+                    <a class="small" href="/articles">去资讯频道看看</a>
+                </div>
+                {% endif %}
+            </section>
         </div>
-        {% if latest_articles %}
-        <ul class="list-unstyled mb-0">
-            {% for art in latest_articles %}
-            <li class="detail-article-item{% if not loop.last %} pb-2 mb-2 border-bottom{% endif %}">
-                <a class="fw-semibold" href="/articles/{{ art.id }}">{{ art.title }}</a>
-                <div class="small text-muted mt-1">{{ art.category }} · {{ art.published_at.strftime('%Y-%m-%d') }}</div>
-                <p class="small text-secondary mb-0 mt-1">{{ art.summary[:50] }}{% if art.summary|length > 50 %}…{% endif %}</p>
-            </li>
-            {% endfor %}
-        </ul>
-        {% else %}
-        <div class="detail-empty">
-            暂无资讯。<br>
-            <a class="small" href="/articles">去资讯频道看看</a>
-        </div>
-        {% endif %}
-    </section>
+    </aside>
 </div>
 {% endblock %}

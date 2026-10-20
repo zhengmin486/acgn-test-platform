@@ -1,8 +1,9 @@
 /* ==========================================================================
-   ACGN 内容服务与接口自动化测试平台 · 全局样式
+   Otaku · ACGN 内容平台 · 全局样式
    设计基调：天蓝(#66CCFF) 主色 + 青绿(#39C5BB) 辅助色 + 柔和卡片 + 细腻动效
    说明：页面结构由 Bootstrap 5 提供；本文件统一设计令牌与组件观感。
-   所有装饰性图形均为 CSS 渐变 / 内联 SVG data URI，不依赖外部图片素材。
+   装饰图形以 CSS 渐变 / 内联 SVG 为主；首页 hero / 御宅成分卡的背景与海报
+   为本地素材（app/static/img/home/，另有封面图走 /media 派生端点）。
    ========================================================================== */
 
 /* ---------- 设计令牌 ---------- */
@@ -467,6 +468,11 @@ hr {
     padding-block: 0.5rem;
 }
 
+/* 导航左右留白不写死：随视口在 0.6~1.25rem 间连续伸缩（模板 px-3 固定值已移除） */
+.site-navbar.content-navbar {
+    padding-inline: clamp(0.6rem, 1.6vw, 1.25rem);
+}
+
 .site-navbar .navbar-brand {
     font-weight: 700;
     letter-spacing: 0.02em;
@@ -478,7 +484,8 @@ hr {
 .site-navbar .nav-link {
     color: var(--on-bright-soft);
     border-radius: 999px;
-    padding: 0.4rem 0.9rem;
+    /* 左右内边距随视口伸缩（0.4~0.9rem），中等宽度下导航项先让位、不挤爆整行 */
+    padding: 0.4rem clamp(0.4rem, 0.9vw, 0.9rem);
     font-weight: 600;
     transition: background-color 0.15s var(--ease), color 0.15s var(--ease);
 }
@@ -510,6 +517,9 @@ hr {
     background: rgba(255, 255, 255, 0.34);
     border: 1px solid rgba(10, 45, 66, 0.18);
     color: var(--on-bright);
+    /* 允许整颗胶囊作为 flex 项收缩，不把同行用户区挤出去 */
+    flex: 0 1 auto;
+    min-width: 0;
     transition: background-color 0.15s var(--ease), border-color 0.15s var(--ease);
 }
 
@@ -526,7 +536,9 @@ hr {
 }
 
 .nav-search input {
-    width: 9.5rem;
+    /* 输入框宽度随视口伸缩（≈9% 视口宽，5.5~13rem 封顶），中等宽度不再挤爆导航 */
+    width: clamp(5.5rem, 9vw, 13rem);
+    min-width: 0;
     border: 0;
     background: transparent;
     padding: 0;
@@ -583,6 +595,60 @@ hr {
     }
 }
 
+/* 移动端搜索：汉堡旁常驻图标按钮 + 点击展开的搜索面板（<lg 生效，桌面端不出现）。
+   图标按钮在 .navbar-top-actions d-lg-none 内，桌面隐藏；桌面搜索仍是 #content-nav 内胶囊。 */
+.navbar-top-actions { margin-left: auto; }
+.nav-search-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 38px;
+    height: 38px;
+    padding: 0;
+    border-radius: 999px;
+    border: 1px solid rgba(255, 255, 255, 0.28);
+    background: transparent;
+    color: #fff;
+    cursor: pointer;
+    transition: background-color 0.15s var(--ease), border-color 0.15s var(--ease);
+}
+.nav-search-toggle:hover,
+.nav-search-toggle:focus-visible {
+    background: rgba(255, 255, 255, 0.16);
+    border-color: rgba(255, 255, 255, 0.55);
+    outline: none;
+}
+.nav-search-toggle .svg-ic {
+    width: 1.05rem;
+    height: 1.05rem;
+}
+.nav-search-panel {
+    background: #0a2d42;
+    border-top: 1px solid rgba(255, 255, 255, 0.12);
+    padding: 0.6rem 1rem;
+}
+.nav-search-panel .nav-search {
+    width: 100%;
+    display: flex;
+}
+.nav-search-panel .nav-search input {
+    width: 100%;
+    flex: 1 1 auto;
+}
+
+/* 极窄屏（手机）导航顶行让位：减小左右内边距、收紧操作区间距、字标可收缩，
+   避免字标与搜索图标/汉堡在 <400px 互相挤压。 */
+@media (max-width: 575.98px) {
+    .navbar-top-actions { gap: 0.4rem; }
+    /* 字标上限取 min(150px, 42vw)：极窄屏按视口百分比收缩，不再定死像素 */
+    .navbar-brand.brand-wordmark { max-width: min(150px, 42vw); min-width: 0; flex-shrink: 1; }
+    .brand-wordmark svg { max-width: 100%; height: auto; }
+}
+@media (max-width: 380px) {
+    .nav-search-toggle { width: 34px; height: 34px; }
+    .navbar-toggler { padding: 0.25rem; }
+}
+
 /* 亮底导航的移动端汉堡按钮：改用深色图标，避免白色图标在亮底上看不见 */
 .site-navbar .navbar-toggler,
 .admin-navbar .navbar-toggler {
@@ -594,31 +660,128 @@ hr {
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 30 30'%3E%3Cpath stroke='rgba(10,45,66,0.85)' stroke-linecap='round' stroke-miterlimit='10' stroke-width='2' d='M4 7h22M4 15h22M4 23h22'/%3E%3C/svg%3E");
 }
 
-/* 品牌标识：深色圆角方块 + 双色「屏幕 + 播放键」——
-   蓝屏框（洛天依 #66CCFF）+ 青绿播放键（初音 #39C5BB）：语义落在「内容浏览 / 界面」
-   而非某个具体品类，两主题色收束其中，不出现具象人物、不喧宾夺主。 */
-.brand-mark {
-    display: inline-grid;
-    place-items: center;
-    width: 2rem;
-    height: 2rem;
-    margin-right: 0.55rem;
-    border-radius: 0.62rem;
-    border: 1.5px solid rgba(255, 255, 255, 0.8);
-    background-color: var(--deep-800);
-    box-shadow: 0 4px 12px -6px rgba(10, 45, 66, 0.65);
-    vertical-align: -0.45em;
+/* 站点字标（2026-10-19 改名 Otaku）：拉丁字母为主体 + 竖排片假名注音
+   --------------------------------------------------------------------------
+   旧标识是「深色方块 + 屏幕 / 播放键」，把这里当成了视频站。这站的实际形态是
+   编目站（作品库、作者 / 公司关系、系列、档期、资讯识别），全站最重的视觉语言
+   是 2:3 海报卡——播放键从语义上就是错的，这里连同 favicon 一起换掉。
+
+   主次（2026-10-19 定稿）：**罗马字 Otaku 为主体**，片假名竖排在右侧做注音。
+   - 主体用罗马字：站名要能被直接读出来。早先让片假名当主体，不认假名的人
+     看到的是一块没有信息量的深色方块。
+   - 片假名竖排 + 1px 竖线做辅证：它是语言层的二次元信号（不像具体符号那样
+     三个月就看腻），但压到 9px、退到右侧，不与主体争重量——这也顺手解决了
+     「竖排三字单看太轻、要加实心竖牌才撑得住」的老问题。
+   - 不用「方框图标 + 文字」的通用组合，也不用播放键 / 屏幕。
+   ========================================================================== */
+.brand-wordmark {
+    padding: 0.1rem 0.55rem 0.1rem 0.2rem;
+    margin-left: -0.2rem;
+    border-radius: 0.7rem;
+    transition: background-color 0.16s var(--ease);
+}
+
+.brand-wordmark:hover,
+.brand-wordmark:focus-visible {
+    background-color: rgba(255, 255, 255, 0.34);
+    color: var(--on-bright);
+}
+
+.wm-lockup {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.42rem;
+}
+
+/* 主体：罗马字。字距收到 -0.018em，让 O 与 taku 咬成一个词而不是五个字母 */
+.wm-latin {
+    font-size: 1.18rem;
+    font-weight: 800;
+    line-height: 1;
+    letter-spacing: -0.018em;
+    color: var(--on-bright);
     flex: 0 0 auto;
 }
 
-.brand-mark::before {
-    content: "";
-    width: 80%;
-    height: 80%;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'%3E%3Crect x='2.8' y='4.6' width='18.4' height='12.8' rx='2.6' stroke='%2366ccff'/%3E%3Cpath d='M8.4 21h7.2' stroke='%2366ccff'/%3E%3Cpath d='M12 17.4V21' stroke='%2366ccff'/%3E%3Cpath d='M10.2 8.3l4.9 2.7-4.9 2.7z' fill='%2339c5bb'/%3E%3C/svg%3E");
-    background-repeat: no-repeat;
-    background-position: center;
-    background-size: contain;
+
+/* 首字母 O：矢量圆环 + 环内星芒（结构见 _brand.html 的宏）。
+   环宽 3.5/24 ≈ 0.146 倍字身，与 800 字重的笔画重量对齐；星芒半径 6.8/24，
+   离环内壁留 1 个单位空隙，缩小后星芒会退成一个亮点而不糊成一坨。 */
+.wm-o {
+    display: inline-block;
+    width: 0.72em;
+    height: 0.72em;
+    margin-right: 0.015em;
+    vertical-align: -0.055em;
+}
+
+.wm-o svg {
+    display: block;
+    width: 100%;
+    height: 100%;
+}
+
+/* 注音：竖排三字 + 左侧细分隔线。
+   9px 是刻意压到这个尺度的——它承担的是「这是日文写法」的形态信息，不指望逐字
+   阅读；放大到能逐字读的尺寸就会反过来跟主体抢重量（第一版就是这个问题）。 */
+.wm-kana {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding-left: 0.4rem;
+    border-left: 1px solid rgba(10, 45, 66, 0.3);
+    font-size: 0.56rem;
+    line-height: 1.04;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    color: var(--on-bright-soft);
+    font-feature-settings: "palt" 1;
+    flex: 0 0 auto;
+}
+
+.wm-kana > span {
+    display: block;
+    line-height: 1.04;
+}
+
+/* 测试平台导航：字标收小一档，给右侧「测试」角标与平台名留出宽度 */
+.brand-wordmark-sm .wm-latin {
+    font-size: 1.02rem;
+}
+
+.brand-wordmark-sm .wm-kana {
+    font-size: 0.5rem;
+    padding-left: 0.32rem;
+}
+
+.brand-wordmark-sm .wm-lockup {
+    gap: 0.34rem;
+}
+
+/* 「测试」角标与字标之间留一口气，避免两个实色块贴成一坨 */
+.brand-wordmark-sm .admin-brand-badge {
+    margin-left: 0.55rem;
+}
+
+.admin-navbar .admin-brand-name {
+    margin-left: 0.1rem;
+}
+
+/* 认证页品牌带：字标放大成卡片头部的视觉主体 */
+.auth-band .brand-lockup-lg {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.62rem;
+    margin-bottom: 0.95rem;
+}
+
+.auth-band .brand-lockup-lg .wm-latin {
+    font-size: 2.4rem;
+}
+
+.auth-band .brand-lockup-lg .wm-kana {
+    font-size: 1rem;
+    padding-left: 0.55rem;
 }
 
 /* 页脚：半透明玻璃质感，短页面时贴合视口底部 */
@@ -630,10 +793,43 @@ hr {
     backdrop-filter: blur(6px);
 }
 
+/* 页脚品牌行：Otaku · ACGN 内容平台 | 动画 / 漫画 / 游戏 / 轻小说信息浏览。
+   导航与首屏只留字标之后，这里是「这站是什么」唯一的静态说明位——
+   放在最底部，需要的人能看到，不抢首屏注意力。 */
+.footer-brandline {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.28rem;
+}
+
+.footer-wordmark {
+    font-weight: 800;
+    letter-spacing: 0.01em;
+    color: var(--on-bright);
+}
+
+.footer-dot {
+    opacity: 0.45;
+}
+
+.footer-tagline {
+    color: var(--on-bright-soft);
+}
+
+/* 内容范围与站名之间加一道细分隔线：两者层级不同（品牌 / 内容域），
+   只用间距分不开，容易读成一串。 */
+.footer-scope {
+    padding-left: 0.6rem;
+    margin-left: 0.1rem;
+    border-left: 1px solid var(--on-bright-line);
+    color: var(--on-bright-soft);
+}
+
 /* 数据口径说明：比主行再退一档，低调存在但不伪装成没有 */
 .site-footer .footer-source {
     margin-top: 0.25rem;
-    opacity: 0.72;
+    opacity: 1;
 }
 
 /* ---------- 回到顶部 ---------- */
@@ -679,8 +875,7 @@ hr {
 }
 
 .app-card,
-.detail-section,
-.schedule-card {
+.detail-section {
     border: 0;
     border-radius: var(--radius-lg);
     box-shadow: var(--shadow-sm);
@@ -767,130 +962,297 @@ hr {
 
 /* 顶部 Hero：纯白天蓝 #66CCFF 实底 + 深色文字。
    右上角叠一块纯青绿几何形，靠硬边形成双色对比，不做色彩过渡。 */
+/* ---------- 首页 hero：背景图 + 渐变压暗 + 左文右海报拼贴 ---------- */
 .home-hero {
     position: relative;
     overflow: hidden;
-    background: var(--brand-400);
+    isolation: isolate;
     border-radius: var(--radius-xl);
+    background: linear-gradient(120deg, var(--brand-800) 0%, var(--brand-600) 58%, var(--accent-600) 130%);
     box-shadow: 0 18px 40px -22px rgba(10, 45, 66, 0.55);
+    margin-bottom: var(--space-4);
 }
 
-.home-hero::before,
+/* 背景素材层：本地图（static/img/home/hero-bg.jpg），渐变蒙层保证白字可读 */
+.home-hero-bg {
+    position: absolute;
+    inset: 0;
+    z-index: -2;
+    background: url("/static/img/home/hero-bg.jpg") center 68% / cover no-repeat;
+    opacity: 0.9;
+}
+
 .home-hero::after {
     content: "";
     position: absolute;
-    border-radius: 50%;
+    inset: 0;
+    z-index: -1;
+    background: linear-gradient(100deg,
+        rgba(17, 71, 112, 0.94) 0%,
+        rgba(17, 71, 112, 0.82) 38%,
+        rgba(28, 115, 176, 0.45) 68%,
+        rgba(57, 197, 187, 0.28) 100%);
     pointer-events: none;
 }
 
-.home-hero::before {
-    width: 20rem;
-    height: 20rem;
-    bottom: -9rem;
-    left: -5rem;
-    background: radial-gradient(circle, rgba(255, 255, 255, 0.3), transparent 68%);
-}
-
-/* 纯青绿硬边色块（几何形）：双色同场但不相互渐变融合 */
-.home-hero::after {
-    width: 19rem;
-    height: 19rem;
-    top: -7.5rem;
-    right: -6rem;
-    background: var(--accent-500);
-    border-radius: 46% 54% 58% 42% / 52% 44% 56% 48%;
-}
-
-/* 窄屏收小青绿色块，避免压住标题 */
-@media (max-width: 575.98px) {
-    .home-hero::after {
-        width: 13rem;
-        height: 13rem;
-        top: -5.5rem;
-        right: -4.5rem;
-    }
-}
-
-.home-hero > * {
+.home-hero-inner {
     position: relative;
-    z-index: 1;
-}
-
-.home-hero h1 {
-    font-weight: 800;
-    letter-spacing: 0.02em;
-    color: var(--on-bright);
-    text-shadow: 0 1px 0 rgba(255, 255, 255, 0.4);
-}
-
-.home-hero-sub {
-    color: var(--on-bright-soft);
-}
-
-.home-hero .form-label {
-    color: var(--on-bright);
-}
-
-.home-hero .form-control,
-.home-hero .form-select {
-    border: 1px solid rgba(10, 45, 66, 0.1);
-    border-radius: 0.6rem;
-    box-shadow: 0 4px 12px -6px rgba(10, 45, 66, 0.4);
-}
-
-.home-hero .form-control:focus,
-.home-hero .form-select:focus {
-    border-color: var(--brand-600);
-    box-shadow: 0 0 0 3px rgba(10, 45, 66, 0.22);
-}
-
-.home-hero .btn-outline-light {
-    border-color: rgba(10, 45, 66, 0.45);
-    color: var(--on-bright);
-    border-radius: 0.6rem;
-    font-weight: 600;
-}
-
-.home-hero .btn-outline-light:hover {
-    background-color: var(--deep-800);
-    border-color: var(--deep-800);
+    display: grid;
+    grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr);
+    gap: var(--space-4);
+    align-items: center;
+    padding: clamp(1.75rem, 4.5vw, 3.25rem) clamp(1.25rem, 4vw, 3rem);
     color: #fff;
 }
 
-/* 分类浏览磁贴 */
-.home-type-tile {
+.home-hero-copy {
+    min-width: 0;
+}
+
+/* hero 上的字标是这一屏唯一的视觉主体（宣传语已删）：
+   深色底 → 整体反相，字母放白、注音线放半透明白。
+   同一个标识在明暗两种底上换极性，而不是换一套图形。 */
+.home-hero-copy .wm-lockup.brand-lockup-lg {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.72rem;
+    margin-bottom: var(--space-3);
+}
+
+.home-hero-copy .brand-lockup-lg .wm-latin {
+    font-size: clamp(2.15rem, 4vw, 2.9rem);
+    color: #fff;
+    text-shadow: 0 3px 18px rgba(8, 35, 56, 0.45);
+}
+
+.home-hero-copy .brand-lockup-lg .wm-kana {
+    font-size: 0.95rem;
+    padding-left: 0.62rem;
+    border-left-color: rgba(255, 255, 255, 0.45);
+    color: rgba(255, 255, 255, 0.8);
+}
+
+.home-hero-title {
+    font-size: clamp(1.65rem, 3.4vw, 2.5rem);
+    font-weight: 800;
+    line-height: 1.15;
+    letter-spacing: 0.01em;
+    margin-bottom: var(--space-3);
+    text-shadow: 0 2px 14px rgba(10, 45, 66, 0.35);
+}
+
+.home-hero-sub {
+    max-width: 34em;
+    font-size: 0.95rem;
+    line-height: 1.7;
+    color: rgba(255, 255, 255, 0.88);
+    margin-bottom: var(--space-4);
+}
+
+.home-hero-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    margin-bottom: var(--space-4);
+}
+
+.home-hero-actions .btn-outline-light {
+    border-color: rgba(255, 255, 255, 0.65);
+}
+
+.home-hero-actions .btn-outline-light:hover {
+    background: rgba(255, 255, 255, 0.14);
+    border-color: #fff;
+}
+
+/* 数据行：真实统计（收录作品 / 本日新番 / 资讯动态） */
+.home-hero-stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2) var(--space-4);
+    margin: 0;
+    padding-top: var(--space-3);
+    border-top: 1px solid rgba(255, 255, 255, 0.22);
+}
+
+.home-hero-stat {
     display: flex;
     flex-direction: column;
+    gap: 0.1rem;
+}
+
+.home-hero-stat dt {
+    font-size: 0.72rem;
+    letter-spacing: 0.08em;
+    color: rgba(255, 255, 255, 0.75);
+}
+
+.home-hero-stat dd {
+    margin: 0;
+    font-size: 1.35rem;
+    font-weight: 800;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.1;
+}
+
+/* 右侧海报拼贴：三张竖版主视觉错落排布，缓慢浮动 */
+.home-hero-collage {
+    position: relative;
+    height: clamp(220px, 26vw, 320px);
+}
+
+.home-poster {
+    position: absolute;
+    width: clamp(104px, 12.5vw, 148px);
+    aspect-ratio: 2 / 3;
+    object-fit: cover;
+    border-radius: var(--radius-md);
+    border: 3px solid rgba(255, 255, 255, 0.92);
+    box-shadow: 0 18px 34px -12px rgba(8, 35, 56, 0.55);
+    transition: transform 0.35s var(--ease);
+}
+
+.home-poster-a {
+    left: 4%;
+    top: 8%;
+    transform: rotate(-7deg);
+    z-index: 2;
+}
+
+.home-poster-b {
+    left: 33%;
+    top: 0;
+    transform: rotate(2.5deg);
+    z-index: 3;
+    width: clamp(118px, 14.5vw, 168px);
+}
+
+.home-poster-c {
+    right: 2%;
+    top: 14%;
+    transform: rotate(8deg);
+    z-index: 1;
+}
+
+.home-hero:hover .home-poster-a { transform: rotate(-7deg) translateY(-6px); }
+.home-hero:hover .home-poster-b { transform: rotate(2.5deg) translateY(-10px); }
+.home-hero:hover .home-poster-c { transform: rotate(8deg) translateY(-6px); }
+
+/* 窄屏：hero 回到单列，海报拼贴降级成一条「探出底边的相册带」——
+   三张海报并排落进文案下方，下缘被 hero 圆角裁掉一截。
+   这样手机上也能看到主视觉素材，而不像整块隐藏那样只剩色块。
+   全部规则都关在这个断点内，lg 及以上（PC 双列拼贴）完全不受影响。 */
+@media (max-width: 767.98px) {
+    .home-hero-inner {
+        grid-template-columns: 1fr;
+        gap: 0.85rem;
+    }
+
+    .home-hero-collage {
+        display: flex;
+        height: auto;
+        gap: 0.45rem;
+        justify-content: center;
+        align-items: flex-start;
+        /* 负底边距把海报下缘推出 hero 边框，由 .home-hero 的 overflow:hidden 裁切 */
+        margin-bottom: -84px;
+    }
+
+    .home-poster {
+        position: static;
+        left: auto;
+        right: auto;
+        top: auto;
+        width: 27%;
+        border-width: 2px;
+        box-shadow: 0 10px 22px -10px rgba(8, 35, 56, 0.65);
+    }
+
+    .home-poster-a {
+        transform: rotate(-7deg);
+        margin-top: 10px;
+    }
+
+    .home-poster-b {
+        transform: rotate(0deg);
+        width: 31%;
+        z-index: 3;
+    }
+
+    .home-poster-c {
+        transform: rotate(7deg);
+        margin-top: 10px;
+    }
+
+    /* 触屏上 :hover 会粘住，这里把浮动幅度锁回原始角度，避免海报「跳一下」 */
+    .home-hero:hover .home-poster-a { transform: rotate(-7deg); }
+    .home-hero:hover .home-poster-b { transform: rotate(0deg); }
+    .home-hero:hover .home-poster-c { transform: rotate(7deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .home-poster,
+    .home-hero:hover .home-poster-a,
+    .home-hero:hover .home-poster-b,
+    .home-hero:hover .home-poster-c {
+        transition: none;
+    }
+}
+
+/* 分类浏览 · 类型条 chip（2026-10-20 从侧栏 2×2 磁贴改为 hero 下方横向一条）：
+   横向排布 = 图标在左、名称/数量两行在右，一条读下来不再占 330px 竖向空间。
+   类型色不再靠顶部色条，全部由图标渐变承担，去掉一层装饰降低密度。 */
+.home-type-tile {
+    position: relative;
+    display: flex;
+    flex-direction: row;
     align-items: center;
-    gap: 0.3rem;
-    padding: 1.25rem 0.75rem;
+    justify-content: center;
+    gap: 0.6rem;
+    padding: 0.55rem 0.75rem;
     background-color: #fff;
     border: 1px solid #dfe9f4;
     border-radius: var(--radius-lg);
     color: var(--ink-800);
     text-decoration: none;
     box-shadow: var(--shadow-sm);
+    overflow: hidden;
     transition: transform 0.2s var(--ease), box-shadow 0.2s var(--ease),
         border-color 0.2s var(--ease), color 0.2s var(--ease);
 }
+
+/* 类型色令牌：只供图标渐变使用 */
+.home-type-anime { --type-a: var(--brand-300); --type-b: var(--brand-600); }
+.home-type-comic { --type-a: #ffb3c7; --type-b: #e8557d; }
+.home-type-game  { --type-a: var(--accent-300); --type-b: var(--accent-600); }
+.home-type-novel { --type-a: #cdb4f6; --type-b: #7c5cd6; }
 
 .home-type-tile:hover {
     transform: translateY(-3px);
     border-color: var(--brand-300);
     box-shadow: var(--shadow-md);
-    color: var(--brand-700);
+    color: var(--ink-900);
+}
+
+.home-type-text {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    line-height: 1.25;
 }
 
 .home-type-icon {
     display: grid;
     place-items: center;
-    width: 2.75rem;
-    height: 2.75rem;
-    border-radius: 1rem;
-    background: linear-gradient(135deg, var(--brand-100), var(--brand-200));
-    color: var(--brand-700);
-    font-size: 1.35rem;
+    flex: 0 0 auto;
+    width: 2.15rem;
+    height: 2.15rem;
+    border-radius: 0.8rem;
+    background: linear-gradient(135deg, var(--type-a, var(--brand-100)), var(--type-b, var(--brand-200)));
+    color: #fff;
+    font-size: 1.1rem;
     line-height: 1;
+    box-shadow: 0 4px 10px -4px rgba(20, 54, 82, 0.35);
     transition: transform 0.2s var(--ease);
 }
 
@@ -900,24 +1262,46 @@ hr {
 
 /* 首页「阿宅画像」引流卡：品牌蓝浅底 + 深字，整卡可点。
    游客免登录试算（/persona），登录用户直达自己的画像（/me/persona）。 */
+/* 御宅成分引流卡：本地素材背景 + 品牌色蒙层，白字（与 hero 同语言的深色卡） */
 .home-persona-card {
+    position: relative;
     display: block;
+    overflow: hidden;
+    isolation: isolate;
     padding: var(--space-5);
     border: 1px solid var(--brand-200);
     border-radius: var(--radius-lg);
-    background-color: var(--brand-50);
-    color: var(--brand-900);
+    background: linear-gradient(135deg, var(--brand-700), var(--accent-700));
+    color: #fff;
     text-decoration: none;
+    box-shadow: var(--shadow-md);
     transition: transform 0.15s var(--ease), box-shadow 0.15s var(--ease),
         border-color 0.15s var(--ease);
+}
+
+.home-persona-card::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -2;
+    background: url("/static/img/home/persona-bg.jpg") center 26% / cover no-repeat;
+    opacity: 0.72;
+}
+
+.home-persona-card::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    background: linear-gradient(100deg, rgba(18, 74, 112, 0.94) 0%, rgba(20, 92, 124, 0.62) 42%, rgba(23, 112, 116, 0.34) 100%);
 }
 
 .home-persona-card:hover,
 .home-persona-card:focus {
     transform: translateY(-2px);
     border-color: var(--brand-300);
-    box-shadow: var(--shadow-md);
-    color: var(--brand-900);
+    box-shadow: var(--shadow-lg);
+    color: #fff;
 }
 
 .home-persona-kicker {
@@ -925,8 +1309,9 @@ hr {
     margin-bottom: 0.4rem;
     padding: 0.08rem 0.55rem;
     border-radius: 999px;
-    background-color: var(--brand-400);
-    color: var(--on-bright);
+    background: rgba(255, 255, 255, 0.2);
+    border: 1px solid rgba(255, 255, 255, 0.4);
+    color: #fff;
     font-size: var(--text-xs);
     font-weight: 700;
     line-height: 1.7;
@@ -935,7 +1320,7 @@ hr {
 .home-persona-title {
     display: block;
     font-size: var(--text-lg);
-    font-weight: 700;
+    font-weight: 800;
     line-height: 1.4;
 }
 
@@ -944,7 +1329,7 @@ hr {
     margin-top: 0.2rem;
     font-size: var(--text-sm);
     line-height: 1.6;
-    color: var(--brand-800);
+    color: rgba(255, 255, 255, 0.85);
 }
 
 .home-persona-cta {
@@ -952,17 +1337,270 @@ hr {
     margin-top: 0.55rem;
     font-size: var(--text-sm);
     font-weight: 700;
+    color: #fff;
+}
+
+/* ==========================================================================
+   首页模块重组（2026-10-19 · 方案 C 全宽重组）
+   - 分类浏览 2026-10-20 移出侧栏，改为主列顶部横向类型条（.home-type-strip）
+   - 最新资讯改 2 列卡片网格 + 小封面（2:3 竖版），不再挤在窄侧栏
+   ========================================================================== */
+
+/* 最新资讯 2 列卡片网格：手机 1 列，≥576 两列；卡片左小封面 + 右文字 */
+.home-news-grid {
+    display: grid;
+    gap: var(--space-3);
+    grid-template-columns: 1fr;
+}
+
+@media (min-width: 576px) {
+    .home-news-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+/* 首页侧栏资讯是 30 条软配额，给可视高度上限并内滚，避免撑爆侧栏列高 */
+.home-news-scroll {
+    max-height: 620px;
+    overflow-y: auto;
+    padding-right: 2px;
+}
+
+.home-news-card {
+    display: flex;
+    gap: 0.75rem;
+    align-items: stretch;
+    padding: 0.6rem;
+    background-color: #fff;
+    border: 1px solid #dfe9f4;
+    border-radius: var(--radius-md);
+    color: inherit;
+    text-decoration: none;
+    box-shadow: var(--shadow-sm);
+    transition: transform 0.18s var(--ease), box-shadow 0.18s var(--ease),
+        border-color 0.18s var(--ease);
+}
+
+.home-news-card:hover {
+    transform: translateY(-2px);
+    border-color: var(--brand-300);
+    box-shadow: var(--shadow-md);
+    color: inherit;
+}
+
+/* 封面区：固定 2:3 小图位，占位层在下、图片层在上叠放 */
+.home-news-thumb {
+    position: relative;
+    flex: 0 0 64px;
+    width: 64px;
+    aspect-ratio: 2 / 3;
+    overflow: hidden;
+    border-radius: var(--radius-sm);
+    background: linear-gradient(155deg, var(--brand-100) 0%, var(--brand-300) 58%, var(--accent-200) 100%);
+    display: grid;
+    place-items: center;
+}
+
+.home-news-img {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.home-news-ph {
+    font-size: 1.3rem;
+    font-weight: 800;
+    color: var(--on-bright-soft);
+    user-select: none;
+}
+
+.home-news-body {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    min-width: 0;
+}
+
+.home-news-title {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+    font-weight: 600;
+    font-size: var(--text-base);
+    line-height: 1.4;
+    color: var(--ink-900);
+}
+
+.home-news-card:hover .home-news-title {
     color: var(--brand-700);
+}
+
+.home-news-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: var(--text-xs);
+    color: var(--ink-500);
+}
+
+.home-news-cat {
+    padding: 0.05rem 0.45rem;
+    border-radius: 999px;
+    background-color: var(--accent-50);
+    color: var(--accent-700);
+    border: 1px solid var(--accent-100);
+    font-weight: 600;
+}
+
+.home-news-summary {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+    font-size: var(--text-xs);
+    line-height: 1.5;
+    color: var(--ink-500);
 }
 
 /* ==========================================================================
    内容平台 · 详情页
    ========================================================================== */
 
+/* 详情页首屏：封面固定 2:3 列 + 右侧主信息；窄屏转单栏（见文末响应式段）。
+   整块用极浅品牌底 + 1px 品牌描边，与下方模块卡片保持同一语言。 */
 .detail-hero {
     border: 0;
     border-radius: var(--radius-lg);
+    background-color: #fbfdff;
     box-shadow: var(--shadow-sm);
+}
+
+.detail-back a {
+    color: var(--ink-500);
+    text-decoration: none;
+}
+
+.detail-back a:hover {
+    color: var(--brand-700);
+}
+
+.detail-hero-grid {
+    display: grid;
+    gap: var(--space-5);
+    grid-template-columns: var(--detail-cover-w) minmax(0, 1fr);
+    align-items: start;
+}
+
+.detail-hero-main {
+    min-width: 0;
+}
+
+/* 标题行：标题可换行，类型徽标紧贴其后不挤压 */
+.detail-title-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: var(--space-2) var(--space-3);
+}
+
+.detail-title {
+    font-size: var(--text-3xl);
+    line-height: 1.25;
+    font-weight: 800;
+    color: var(--ink-900);
+    overflow-wrap: anywhere;
+}
+
+/* 评分是首屏第二视觉锚点：大号数字 + 星级 + 单位，独立成块 */
+.detail-stat-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-3) var(--space-4);
+    margin-top: var(--space-4);
+}
+
+.detail-score-box {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-4);
+    border-radius: var(--radius-md);
+    background-color: var(--brand-50);
+    border: 1px solid var(--brand-100);
+}
+
+.detail-score-box--empty {
+    background-color: var(--surface);
+    border-color: #e3ecf6;
+}
+
+.detail-score {
+    font-size: 1.75rem;
+    font-weight: 800;
+    line-height: 1;
+    color: var(--brand-800);
+    font-variant-numeric: tabular-nums;
+}
+
+.detail-score-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.detail-score-unit {
+    font-size: var(--text-xs);
+    color: var(--ink-500);
+}
+
+.detail-quick-facts {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+}
+
+/* 常用操作：收藏 / 标注 / 我的收藏，与评分同屏 */
+.detail-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-3);
+    margin-top: var(--space-4);
+    padding: var(--space-3);
+    border-radius: var(--radius-md);
+    background-color: #fff;
+    border: 1px solid #e3ecf6;
+}
+
+.detail-status-group {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+}
+
+.detail-status-label {
+    font-size: var(--text-xs);
+    font-weight: 700;
+    color: var(--ink-500);
+}
+
+.detail-actions-link {
+    color: var(--brand-700);
+    text-decoration: none;
+}
+
+.detail-actions-link:hover {
+    text-decoration: underline;
+}
+
+.detail-ops .btn {
+    text-decoration: none;
 }
 
 /* 封面占位：品牌渐变 + 首字，无图片素材也能有"条目感" */
@@ -992,16 +1630,19 @@ img.detail-cover {
 }
 
 /* 详情页封面盒：占位层与图片层同位置叠放；图片走 /media/full/ 压缩端点，
-   加载失败时前端 onerror 隐藏图片，露出占位层（见 detail.html）。 */
+   加载失败时前端 onerror 隐藏图片，露出占位层（见 detail.html）。
+   尺寸用 clamp + 2:3 锁定：手机 112px、桌面随视口长到 168px——再大就把标题挤窄了。 */
 .detail-cover-box {
     position: relative;
-    width: 108px;
-    height: 148px;
+    width: clamp(112px, 12vw, 168px);
+    aspect-ratio: 2 / 3;
     flex: 0 0 auto;
 }
 .detail-cover-box > .detail-cover {
     position: absolute;
     inset: 0;
+    width: 100%;
+    height: 100%;
 }
 
 /* 白字小徽标：渐变用 brand-700 起步（brand-500/600 上白字不达标，深一档青绿保障 AA） */
@@ -1019,6 +1660,17 @@ img.detail-cover {
     color: var(--brand-700);
     border: 1px solid var(--brand-100);
     font-weight: 600;
+    flex-shrink: 0;
+}
+
+/* 书籍细分标注「文学」：与类型徽标同排但走辅助色，一眼看出「这不是文库轻小说」
+   又不会被读成第五种类型。 */
+.detail-kind-badge {
+    background-color: var(--accent-50);
+    color: var(--accent-700);
+    border: 1px solid var(--accent-200);
+    font-weight: 600;
+    border-radius: 999px;
     flex-shrink: 0;
 }
 
@@ -1073,11 +1725,14 @@ img.detail-cover {
     border-radius: var(--radius-lg) var(--radius-lg) 0 0 !important;
 }
 
-/* 相关内容推荐卡片 */
+/* 相关内容推荐卡片：左侧 2:3 小海报 + 右侧文字，与列表页的封面语言一致
+   （纯文字行在整套海报化列表里会显得像「另一个站点」） */
 .detail-related-item {
-    display: block;
+    display: flex;
+    gap: 0.75rem;
+    align-items: flex-start;
     height: 100%;
-    padding: 0.85rem 1rem;
+    padding: 0.7rem 0.85rem;
     border: 1px solid #dfe9f4;
     border-radius: var(--radius-md);
     color: inherit;
@@ -1094,6 +1749,69 @@ img.detail-cover {
     color: inherit;
 }
 
+.detail-related-thumb {
+    position: relative;
+    display: block;
+    flex: 0 0 52px;
+    width: 52px;
+    aspect-ratio: 2 / 3;
+    overflow: hidden;
+    border-radius: var(--radius-sm);
+    background: linear-gradient(155deg, var(--brand-100) 0%, var(--brand-300) 58%, var(--accent-200) 100%);
+}
+
+.detail-related-ph {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    color: var(--on-bright-soft);
+    font-size: 1.15rem;
+    font-weight: 800;
+}
+
+.detail-related-thumb img {
+    position: absolute;
+    inset: 0;
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.detail-related-body {
+    min-width: 0;
+    flex: 1 1 auto;
+}
+
+/* 首页「最新资讯」日期片：月-日大号 + 年份小号，替代纯文本日期 */
+.home-article-date {
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.05rem;
+    width: 2.75rem;
+    padding: 0.35rem 0;
+    border-radius: var(--radius-sm);
+    background: var(--brand-50);
+    border: 1px solid var(--brand-100);
+    line-height: 1.1;
+}
+
+.home-article-md {
+    font-size: 0.85rem;
+    font-weight: 800;
+    font-variant-numeric: tabular-nums;
+    color: var(--brand-800);
+}
+
+.home-article-y {
+    font-size: 0.62rem;
+    color: var(--ink-500);
+}
+
 /* 相关资讯列表 */
 .detail-article-item a {
     color: var(--ink-900);
@@ -1107,10 +1825,819 @@ img.detail-cover {
 }
 
 /* ==========================================================================
+   内容平台 · 详情页改版（一套组件 + 设计令牌适配两端）
+   结构：首屏（判断）→ 系列关系条（续接）→ 资料 → 维护折叠区
+        → 相关资讯（跟进）→ 相关内容推荐（发现）
+   两端差异只落在「令牌」与「装配」两层：
+   - 令牌：--detail-cover-w / -title-size / -card-min / -gap / -meta-col，按断点整组换值；
+   - 装配：首屏列宽、系列条是否换行、内边距密度。
+   卡片与资讯行本身只有一份 DOM，尺寸全部读令牌，不写死像素。
+   ========================================================================== */
+
+:root {
+    /* 手机优先：紧凑密度 */
+    --detail-cover-w: 104px;
+    --detail-title-size: 1.25rem; /* 20px 起，长标题换行不截断 */
+    --detail-card-min: 112px;
+    --detail-gap: 10px;
+    --detail-meta-col: 3.75rem;
+}
+
+@media (min-width: 768px) {
+    :root {
+        --detail-cover-w: 132px;
+        --detail-title-size: 1.6rem;
+        --detail-card-min: 132px;
+        --detail-gap: 12px;
+        --detail-meta-col: 4.5rem;
+    }
+}
+
+@media (min-width: 992px) {
+    :root {
+        --detail-cover-w: 168px;
+        --detail-title-size: 2rem;
+        --detail-card-min: 150px;
+        --detail-gap: 14px;
+    }
+}
+
+/* ---------- 首屏：令牌覆盖 ---------- */
+
+.detail-cover-box {
+    width: var(--detail-cover-w);
+}
+
+.detail-title {
+    font-size: var(--detail-title-size);
+    line-height: 1.28;
+}
+
+.detail-hero-grid {
+    gap: var(--space-3);
+}
+
+@media (min-width: 768px) {
+    .detail-hero-grid {
+        gap: var(--space-5);
+    }
+}
+
+/* ---------- 通用区块：除首屏外不再套卡片外壳 ---------- */
+
+/* 拆掉卡片墙：系列作品 / 相关资讯 / 相关内容推荐 / 资料区全部平铺在页面底色上，
+   层级由「区块标题 + 上分隔细线 + 留白」建立。
+   手机端靠间距压缩降低滚动疲劳，桌面端靠更大留白拉开节奏（断点只改间距令牌）。 */
+.detail-series,
+.detail-block,
+.detail-meta {
+    margin-top: var(--space-8);
+    padding-top: var(--space-4);
+    border-top: 1px solid #dfe9f4;
+    background-color: transparent;
+    border-radius: 0;
+    box-shadow: none;
+}
+
+@media (min-width: 768px) {
+    .detail-series,
+    .detail-block,
+    .detail-meta {
+        margin-top: var(--space-10);
+        padding-top: var(--space-5);
+    }
+}
+
+.detail-block-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--space-1) var(--space-3);
+    margin-bottom: var(--space-3);
+}
+
+.detail-block-title {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin: 0;
+    font-size: var(--text-base);
+    font-weight: 700;
+    color: var(--ink-800);
+}
+
+@media (min-width: 768px) {
+    .detail-block-title {
+        font-size: var(--text-lg);
+    }
+}
+
+/* 标题前缀竖条：三个模块统一的一级标识 */
+.detail-block-title::before,
+.detail-series-title::before {
+    content: "";
+    flex: 0 0 auto;
+    width: 3px;
+    height: 0.95em;
+    border-radius: 2px;
+    background-color: var(--brand-400);
+}
+
+.detail-block-link {
+    font-size: var(--text-xs);
+    color: var(--brand-700);
+    text-decoration: none;
+}
+
+.detail-block-link:hover {
+    text-decoration: underline;
+}
+
+.detail-block-note {
+    font-size: var(--text-xs);
+    color: var(--ink-500);
+}
+
+/* ---------- 系列作品：紧凑横向关系条 ---------- */
+
+.detail-series-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--space-2);
+    margin-bottom: var(--space-2);
+}
+
+.detail-series-title {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin: 0;
+    font-size: var(--text-sm);
+    font-weight: 700;
+    color: var(--ink-800);
+}
+
+.detail-series-more {
+    flex-shrink: 0;
+    font-size: var(--text-xs);
+    color: var(--brand-700);
+    text-decoration: none;
+}
+
+.detail-series-more:hover {
+    text-decoration: underline;
+}
+
+/* 溢出暗示：只有真能横向滚动时脚本才加 .is-scrollable，右侧出现渐隐 */
+.detail-series-wrap {
+    position: relative;
+}
+
+/* 溢出暗示：区块已平铺在页面底色上，渐隐必须落到同一个底色才读得出「还没滑完」 */
+.detail-series-wrap.is-scrollable::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 46px;
+    pointer-events: none;
+    background: linear-gradient(
+        90deg,
+        rgba(241, 246, 252, 0) 0%,
+        rgba(241, 246, 252, 0.78) 52%,
+        var(--surface) 96%
+    );
+}
+
+.detail-series-rail {
+    display: flex;
+    gap: var(--space-2);
+    margin: 0;
+    padding: 2px var(--space-3) var(--space-1) 0;
+    list-style: none;
+    overflow-x: auto;
+    scroll-padding-right: var(--space-3);
+    scroll-snap-type: x proximity;
+    scrollbar-width: thin;
+    -webkit-overflow-scrolling: touch;
+}
+
+.detail-series-rail::-webkit-scrollbar {
+    height: 6px;
+}
+
+.detail-series-rail::-webkit-scrollbar-thumb {
+    background-color: var(--brand-100);
+    border-radius: 3px;
+}
+
+.detail-series-item {
+    flex: 0 0 auto;
+    scroll-snap-align: start;
+}
+
+.detail-series-chip {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    padding: 0.28rem 0.8rem 0.28rem 0.28rem;
+    border: 1px solid #dfe9f4;
+    border-radius: 999px;
+    background-color: #fff;
+    color: inherit;
+    text-decoration: none;
+    transition: border-color 0.18s var(--ease), box-shadow 0.18s var(--ease);
+}
+
+.detail-series-chip:hover {
+    border-color: var(--brand-300);
+    box-shadow: var(--shadow-sm);
+    color: inherit;
+}
+
+.detail-series-chip:focus-visible {
+    outline: 2px solid var(--brand-500);
+    outline-offset: 2px;
+}
+
+.detail-series-thumb {
+    position: relative;
+    display: block;
+    flex: 0 0 26px;
+    width: 26px;
+    aspect-ratio: 2 / 3;
+    border-radius: 5px;
+    overflow: hidden;
+    background: linear-gradient(155deg, var(--brand-100) 0%, var(--brand-300) 58%, var(--accent-200) 100%);
+}
+
+.detail-series-thumb img {
+    position: absolute;
+    inset: 0;
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.detail-series-ph {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    font-size: 11px;
+    font-weight: 800;
+    color: var(--on-bright-soft);
+}
+
+.detail-series-body {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+    max-width: 11rem;
+}
+
+/* 系列名不省略到看不出「第几季」：允许换行两行，超长域名级名称才折叠 */
+.detail-series-name {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+    font-size: var(--text-sm);
+    font-weight: 600;
+    line-height: 1.35;
+    color: var(--ink-900);
+}
+
+@media (min-width: 768px) {
+    .detail-series-body {
+        max-width: 13rem;
+    }
+}
+
+.detail-series-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    font-size: 11px;
+    color: var(--ink-500);
+}
+
+/* 关系徽标（前作 / 续作 / 衍生作 / 同系列）：青绿以区别于作品类型 */
+.detail-badge-rel {
+    display: inline-block;
+    padding: 0 6px;
+    border-radius: 999px;
+    background-color: var(--accent-50);
+    border: 1px solid var(--accent-200);
+    color: var(--accent-700);
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 1.5;
+}
+
+/* 桌面端：系列条换行铺开，全部可见，不需要滚动也就不需要渐隐 */
+@media (min-width: 992px) {
+    .detail-series-rail {
+        flex-wrap: wrap;
+        overflow: visible;
+    }
+
+    .detail-series-wrap.is-scrollable::after {
+        display: none;
+    }
+}
+
+/* ---------- 资料区：标签 / 基本信息 / 制作 / 关系 / 演员与职员 ---------- */
+
+.detail-meta-list {
+    margin: 0;
+}
+
+.detail-meta .detail-block-title {
+    margin-bottom: var(--space-3);
+}
+
+.detail-meta-item {
+    display: grid;
+    grid-template-columns: var(--detail-meta-col) minmax(0, 1fr);
+    gap: var(--space-3);
+    padding: 0.55rem 0;
+    border-top: 1px solid #eef4fb;
+}
+
+.detail-meta-item:first-child {
+    padding-top: 0;
+    border-top: 0;
+}
+
+.detail-meta-item dt {
+    padding-top: 3px;
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--ink-500);
+}
+
+.detail-meta-item dd {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.35rem 0.45rem;
+    min-width: 0;
+    margin: 0;
+}
+
+.detail-fact {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.2rem;
+    font-size: var(--text-sm);
+    color: var(--ink-700);
+    overflow-wrap: anywhere;
+}
+
+.detail-fact-key {
+    font-size: var(--text-xs);
+    color: var(--ink-500);
+}
+
+.detail-fact-key::after {
+    content: "：";
+}
+
+.detail-role-group {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+}
+
+.detail-role-name {
+    font-size: var(--text-xs);
+    color: var(--ink-500);
+}
+
+.detail-role-block {
+    display: flex;
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.35rem 0.45rem;
+}
+
+.detail-cast-list,
+.detail-credit-list {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.35rem 0.45rem;
+}
+
+.detail-cast-pair {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+}
+
+.detail-cast-role {
+    font-size: var(--text-xs);
+    color: var(--ink-500);
+}
+
+.detail-credit-more {
+    flex: 1 1 100%;
+    margin-top: 0.15rem;
+    font-size: var(--text-xs);
+}
+
+.detail-credit-more summary {
+    cursor: pointer;
+    color: var(--brand-700);
+    list-style: none;
+}
+
+.detail-credit-more summary::-webkit-details-marker {
+    display: none;
+}
+
+.detail-credit-more summary::after {
+    content: " +";
+    font-weight: 700;
+}
+
+.detail-credit-more[open] summary::after {
+    content: " −";
+}
+
+/* ---------- 维护操作：折叠为次级入口，功能不变 ---------- */
+
+.detail-ops {
+    margin-top: var(--space-5);
+    padding-top: var(--space-3);
+    border-top: 1px solid #dfe9f4;
+    background-color: transparent;
+}
+
+.detail-ops-body {
+    padding-bottom: var(--space-2);
+}
+
+.detail-ops-summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.4rem 0;
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--ink-500);
+    cursor: pointer;
+    list-style: none;
+}
+
+.detail-ops-summary::-webkit-details-marker {
+    display: none;
+}
+
+.detail-ops-summary::after {
+    content: "+";
+    font-weight: 700;
+}
+
+.detail-ops[open] .detail-ops-summary::after {
+    content: "−";
+}
+
+.detail-ops-block {
+    margin-top: var(--space-3);
+}
+
+.detail-upload {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    gap: var(--space-2);
+}
+
+.detail-upload-field {
+    flex: 1 1 260px;
+    min-width: 0;
+}
+
+/* ---------- 相关资讯：紧凑列表，摘要按需展开 ---------- */
+
+.detail-news {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.detail-news-item {
+    display: flex;
+    gap: var(--space-3);
+    padding: 0.7rem 0;
+    border-top: 1px solid #eef4fb;
+}
+
+.detail-news-item:first-child {
+    padding-top: 0;
+    border-top: 0;
+}
+
+.detail-news-date {
+    display: flex;
+    flex: 0 0 auto;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    width: 2.6rem;
+    padding: 0.3rem 0;
+    border: 1px solid var(--brand-100);
+    border-radius: var(--radius-sm);
+    background-color: var(--brand-50);
+    line-height: 1.1;
+}
+
+.detail-news-md {
+    font-size: 0.82rem;
+    font-weight: 800;
+    color: var(--brand-800);
+    font-variant-numeric: tabular-nums;
+}
+
+.detail-news-y {
+    font-size: 0.62rem;
+    color: var(--ink-500);
+}
+
+.detail-news-main {
+    min-width: 0;
+    flex: 1 1 auto;
+}
+
+.detail-news-title {
+    display: block;
+    font-size: var(--text-sm);
+    font-weight: 600;
+    line-height: 1.5;
+    color: var(--ink-900);
+    text-decoration: none;
+    overflow-wrap: anywhere;
+    transition: color 0.15s var(--ease);
+}
+
+.detail-news-title:hover {
+    color: var(--brand-700);
+}
+
+.detail-news-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem;
+    margin-top: 0.2rem;
+    font-size: var(--text-xs);
+    color: var(--ink-500);
+}
+
+.detail-badge-cat {
+    display: inline-block;
+    padding: 0 7px;
+    border: 1px solid #e3ecf6;
+    border-radius: 999px;
+    background-color: var(--surface);
+    color: var(--ink-700);
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 1.6;
+}
+
+.detail-news-source::before {
+    content: "·";
+    margin-right: 0.4rem;
+    color: #c3d0de;
+}
+
+.detail-news-more {
+    margin-top: 0.15rem;
+    font-size: var(--text-xs);
+}
+
+.detail-news-more summary {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.2rem;
+    color: var(--brand-700);
+    cursor: pointer;
+    list-style: none;
+}
+
+.detail-news-more summary::-webkit-details-marker {
+    display: none;
+}
+
+.detail-news-more summary::after {
+    content: "+";
+    font-weight: 700;
+}
+
+.detail-news-more[open] summary::after {
+    content: "−";
+}
+
+.detail-news-summary {
+    margin: 0.3rem 0 0;
+    font-size: var(--text-xs);
+    line-height: 1.7;
+    color: var(--ink-500);
+}
+
+/* ---------- 相关内容推荐：海报网格，优先封面 ---------- */
+
+.detail-poster-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(var(--detail-card-min), 1fr));
+    gap: var(--detail-gap);
+}
+
+.detail-poster {
+    display: block;
+    min-width: 0;
+    color: inherit;
+    text-decoration: none;
+}
+
+.detail-poster:hover {
+    color: inherit;
+}
+
+.detail-poster-cover {
+    position: relative;
+    display: block;
+    aspect-ratio: 2 / 3;
+    border-radius: var(--radius-md);
+    overflow: hidden;
+    box-shadow: var(--shadow-sm);
+    background: linear-gradient(155deg, var(--brand-100) 0%, var(--brand-300) 58%, var(--accent-200) 100%);
+    transition: transform 0.18s var(--ease), box-shadow 0.18s var(--ease);
+}
+
+.detail-poster:hover .detail-poster-cover {
+    transform: translateY(-3px);
+    box-shadow: var(--shadow-md);
+}
+
+.detail-poster:focus-visible .detail-poster-cover {
+    outline: 2px solid var(--brand-500);
+    outline-offset: 2px;
+}
+
+.detail-poster-cover img {
+    position: absolute;
+    inset: 0;
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    animation: media-fade-in 260ms var(--ease) both;
+}
+
+.detail-poster-ph {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    font-size: 1.6rem;
+    font-weight: 800;
+    color: var(--on-bright-soft);
+}
+
+.detail-poster-title {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+    margin-top: var(--space-2);
+    font-size: var(--text-sm);
+    font-weight: 700;
+    line-height: 1.4;
+    color: var(--ink-900);
+}
+
+.detail-poster-meta {
+    display: block;
+    margin-top: 2px;
+    font-size: var(--text-xs);
+    color: var(--ink-500);
+}
+
+.detail-poster-why {
+    display: inline-block;
+    margin-top: 0.35rem;
+    padding: 2px 7px;
+    border: 1px solid var(--brand-100);
+    border-radius: 6px;
+    background-color: var(--brand-50);
+    color: var(--brand-800);
+    font-size: 11px;
+    line-height: 1.45;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .detail-poster-cover img {
+        animation: none;
+    }
+}
+
+/* ==========================================================================
    内容平台 · 全部作品页（/contents）
    ========================================================================== */
 
-/* 作品卡片：整卡可点；顶部纯色封面占位（标题首字，无外部图片素材） */
+/* 筛选栏面板：把「类型 / 关键词 / 作者」收进一张与列表同语言的卡片，
+   避免裸控件直接浮在页面上（作品页与资讯页共用） */
+.filter-panel {
+    padding: var(--space-3) var(--space-4);
+    background-color: #fff;
+    border: 1px solid #dfe9f4;
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-sm);
+}
+
+.filter-panel .form-label {
+    color: var(--ink-500);
+    font-weight: 600;
+}
+
+/* 页头动作按钮组：窄屏挤成一排横向滚动，避免三个按钮各占一整行把列表推到首屏之外 */
+@media (max-width: 575.98px) {
+    .page-actions {
+        flex-wrap: nowrap !important;
+        overflow-x: auto;
+        padding-bottom: 2px;
+        scrollbar-width: none;
+    }
+
+    .page-actions::-webkit-scrollbar {
+        display: none;
+    }
+
+    .page-actions > * {
+        flex: 0 0 auto;
+    }
+}
+
+/* 作品卡片（竖版海报卡）—— 全部作品 / 首页推荐 / 花名册 / 个人空间收藏共用。
+   封面盒锁定 2:3：Bangumi 封面实测宽高比中位 0.70，与 2:3(0.667) 几乎零裁切。
+   旧版封面盒为「卡宽 × 104px」的横条（lg 三栏下 4:1），竖版封面被裁到只剩
+   纵向 35.7% 的中间一条，人物与标题 logo 全部切掉——这是「封面不适配」的根因。 */
+/* 封面图淡入：解码完成前不闪一下白块，落地时柔和出现（尊重减少动效偏好） */
+@keyframes media-fade-in {
+    from {
+        opacity: 0;
+    }
+    to {
+        opacity: 1;
+    }
+}
+
+img.work-cover,
+img.detail-cover,
+.article-card-thumb img,
+.detail-related-thumb img {
+    animation: media-fade-in 260ms var(--ease) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    img.work-cover,
+    img.detail-cover,
+    .article-card-thumb img,
+    .detail-related-thumb img {
+        animation: none;
+    }
+}
+
+/* 作品网格：列数不写死，只给每列一个「最小可读宽度」，塞得下几列就排几列。
+   手机端 150px（360 宽的小屏也保得住两列），≥768 抬到 190px。
+   容器上限 1296px，190px 下限时正好 6 列 —— 列数只可能落在 2~6 之间，
+   而每页条数 60 是 2/3/4/5/6 的公倍数，任何窗口宽度下末行都不会缺格。
+   注意：最小列宽必须用固定 px，不能用 vw —— Bootstrap 的容器在断点内是定宽的，
+   拿 vw 算最小列宽会出现「窗口变宽、列数反而变少」的倒挂（实测 1100px 排 5 列、
+   1199px 掉回 4 列）。 */
+.works-grid {
+    display: grid;
+    gap: var(--space-3);
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+}
+
+@media (min-width: 768px) {
+    .works-grid {
+        grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+    }
+}
+
 .work-card {
     display: flex;
     flex-direction: column;
@@ -1122,43 +2649,50 @@ img.detail-cover {
     text-decoration: none;
     box-shadow: var(--shadow-sm);
     overflow: hidden;
-    transition: transform 0.18s var(--ease), box-shadow 0.18s var(--ease),
-        border-color 0.18s var(--ease);
+    transition: transform 0.2s var(--ease), box-shadow 0.2s var(--ease),
+        border-color 0.2s var(--ease);
 }
 
 .work-card:hover {
-    transform: translateY(-3px);
+    transform: translateY(-4px);
     border-color: var(--brand-300);
-    box-shadow: var(--shadow-md);
+    box-shadow: var(--shadow-lg);
     color: inherit;
 }
 
+/* 封面占位层：无封面（或图片加载失败）时的渐变底 + 标题首字。
+   叠一层极淡的斜纹，避免大面积纯渐变显得像加载失败的空白块。 */
 .work-cover {
     display: grid;
     place-items: center;
-    height: 104px;
-    background: var(--brand-400);
-    color: var(--on-bright);
-    font-size: 2.6rem;
+    background-color: var(--brand-200);
+    background-image:
+        repeating-linear-gradient(135deg, rgba(255, 255, 255, 0.34) 0 10px, transparent 10px 20px),
+        linear-gradient(155deg, var(--brand-100) 0%, var(--brand-300) 58%, var(--accent-200) 100%);
+    color: var(--on-bright-soft);
+    font-size: 3.2rem;
     font-weight: 800;
-    text-shadow: 0 1px 0 rgba(255, 255, 255, 0.35);
+    line-height: 1;
     user-select: none;
 }
 
-/* 列表封面盒：占位层与图片层同位置叠放；图片走 /media/thumb/ 缩略图端点，
-   加载失败时前端 onerror 隐藏图片，露出占位层（contents / index / space）。 */
+/* 列表封面盒：2:3 竖版海报位；占位层在下、图片层在上叠放。
+   图片走 /media/thumb/ 缩略图端点，加载失败由 onerror 隐藏，露出占位层。 */
 .work-cover-box {
     position: relative;
     display: block;
-    height: 104px;
+    aspect-ratio: 2 / 3;
+    overflow: hidden;
+    background: linear-gradient(155deg, var(--brand-100) 0%, var(--brand-300) 58%, var(--accent-200) 100%);
 }
 .work-cover-box > .work-cover {
     position: absolute;
     inset: 0;
     width: 100%;
+    height: 100%;
 }
 
-/* 本地封面图版本：撑满卡片头部、裁切不变形（见 contents.html / index.html / space.html） */
+/* 封面图：撑满海报位，居中裁切不变形；悬停轻微放大制造纵深 */
 img.work-cover {
     position: absolute;
     inset: 0;
@@ -1166,12 +2700,155 @@ img.work-cover {
     width: 100%;
     height: 100%;
     object-fit: cover;
+    object-position: center;
+    transition: transform 0.35s var(--ease);
+}
+
+/* 推荐排名角标：前三名金色渐变，其余半透明深底 */
+.work-cover-rank {
+    position: absolute;
+    top: var(--space-2);
+    left: var(--space-2);
+    z-index: 2;
+    display: grid;
+    place-items: center;
+    width: 1.7rem;
+    height: 1.7rem;
+    border-radius: 0.6rem;
+    background: rgba(23, 20, 43, 0.55);
+    color: #fff;
+    font-size: 0.8rem;
+    font-weight: 800;
+    font-variant-numeric: tabular-nums;
+    line-height: 1;
+    backdrop-filter: blur(2px);
+}
+
+.work-cover-rank.work-rank-top {
+    background: linear-gradient(135deg, #ffb020, #ff7a45);
+    box-shadow: 0 4px 10px -4px rgba(255, 122, 69, 0.75);
+}
+
+.work-card:hover img.work-cover {
+    transform: scale(1.045);
+}
+
+/* ==========================================================================
+   首页门户双栏（方案 A，2026-10-19）：lg+ 主列 8 / 侧栏 4（sticky 跟随）；
+   <lg 整体塌回全宽单列流，DOM 一套、两态全由这里的断点完成。
+   ========================================================================== */
+
+/* 主列 · 推荐作品：自适应网格铺满主列，卡片不再封顶居中留白。
+   <576 两列 / ≥576 三列 / ≥768 与 ≥992 按最小卡宽自动填充（宽屏自然到 4~5 列） */
+.home-top-grid {
+    display: grid;
+    gap: 0.75rem;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+@media (min-width: 576px) {
+    .home-top-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (min-width: 768px) {
+    .home-top-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+}
+@media (min-width: 992px) {
+    .home-top-grid { grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); }
+    .home-top-grid .work-cover { font-size: 2.2rem; }
+}
+/* 首页推荐模块：超出初始条数（business_pages.HOME_RECOMMEND_INITIAL=60，
+   与网格列数整除契约同源）的卡片默认收起；点「展开更多推荐」由内联脚本
+   移除本类即整批铺开，无 JS 时前 60 部照常可见。 */
+.home-top-grid .home-top-extra { display: none; }
+
+/* 侧栏：lg+ sticky 跟随滚动（top 让过 sticky 导航的高度） */
+@media (min-width: 992px) {
+    .home-side-inner { position: sticky; top: 84px; }
+}
+
+/* 主列 · 分类类型条：手机 2 列 × 2 行（一行四块会挤成 80px 宽读不清），
+   ≥768 起四列一行铺满主列宽度；名称与数量同一行内两行排，条高约 60px。 */
+.home-type-strip {
+    display: grid;
+    gap: 0.6rem;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+@media (min-width: 768px) {
+    .home-type-strip { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+}
+
+/* 侧栏 · 最新资讯：lg+ 单列紧凑，摘要收到 1 行（卡片本身左图右文，窄栏正合适） */
+@media (min-width: 992px) {
+    .home-news-grid { grid-template-columns: 1fr; }
+    .home-news-summary {
+        display: -webkit-box;
+        -webkit-box-orient: vertical;
+        -webkit-line-clamp: 1;
+        overflow: hidden;
+    }
+}
+
+/* 主列 · 本日新番：lg+ 横滑转 3 列可见网格（不再截断翻页），箭头退场。
+   选择器加 .spotlight-wrap 前缀提高特异性：基础横滑规则（display:flex /
+   卡宽 220px）写在文件更靠后位置，靠特异性而非顺序取胜，避免级联被覆盖。 */
+@media (min-width: 992px) {
+    .spotlight-wrap .spotlight-track {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 0.75rem;
+        overflow: visible;
+        padding: 0;
+        margin: 0;
+    }
+    .spotlight-wrap .spotlight-card { width: auto; flex: 1 1 auto; }
+    .spotlight-wrap .spotlight-nav { display: none; }
 }
 
 .work-card-body {
     display: flex;
+    flex: 1 1 auto;
     flex-direction: column;
-    padding: 0.85rem 1rem 1rem;
+    gap: 0.3rem;
+    padding: 0.7rem 0.8rem 0.85rem;
+}
+
+/* 标题固定两行位（min-height），一行标题的卡片不会比两行的矮一截 */
+.work-card-title {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    min-height: 2.9em;
+    overflow: hidden;
+    color: var(--ink-900);
+    font-size: var(--text-base);
+    font-weight: 600;
+    line-height: 1.45;
+    transition: color 0.15s var(--ease);
+}
+
+.work-card:hover .work-card-title {
+    color: var(--brand-700);
+}
+
+/* 元信息行：类型胶囊 + 星级 + 分数。类型放在正文里而不是压在封面上——
+   海报左上角常是作品标题 logo，压上去会挡住标题。 */
+.work-card-rating {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.35rem;
+    color: var(--ink-500);
+    font-size: var(--text-xs);
+}
+
+.work-card-rating .badge {
+    flex-shrink: 0;
+    padding: 0.12rem 0.45rem;
+    font-size: var(--text-xs);
+    font-weight: 600;
+}
+
+.work-card-rating .detail-stars {
+    font-size: 0.72rem;
 }
 
 /* 摘要最多两行，超出省略，保证卡片高度整齐 */
@@ -1180,6 +2857,29 @@ img.work-cover {
     -webkit-box-orient: vertical;
     -webkit-line-clamp: 2;
     overflow: hidden;
+    font-size: var(--text-xs);
+    line-height: 1.5;
+}
+
+/* 卡片题材 chip：标题下方、摘要上方，让题材在列表页可见（不必点进详情）。
+   静态 span 不做链接——整张卡已是跳转详情的大锚点，嵌套链接不合法。 */
+.work-card-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+}
+
+.work-card-tag {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.1rem 0.45rem;
+    border-radius: 999px;
+    border: 1px solid var(--brand-100);
+    background-color: var(--brand-50);
+    color: var(--brand-700);
+    font-size: 0.6875rem;
+    font-weight: 600;
+    line-height: 1.5;
 }
 
 /* 首页「本周新番」横滑条：轻量卡片，16:9 封面 + 标题，与 work-card 观感协调 */
@@ -1290,24 +2990,45 @@ img.work-cover {
     color: inherit;
 }
 
+/* 封面区：独立相对定位容器，占位字 / 封面图 / 时间徽标都在它内部，
+   图片只铺满封面区不再盖住下方的标题（曾经 img 以整卡为定位基准，
+   导致有封面图时标题和时间被压在图片底下、卡片看起来「没有名字」）。 */
 .spotlight-cover {
+    position: relative;
     display: grid;
     place-items: center;
     aspect-ratio: 16 / 9;
+    overflow: hidden;
     background: linear-gradient(135deg, var(--brand-100), var(--brand-200));
     color: var(--brand-700);
-    font-size: 2.2rem;
-    font-weight: 800;
-    text-shadow: 0 1px 0 rgba(255, 255, 255, 0.35);
     user-select: none;
 }
 
-img.spotlight-cover {
+.spotlight-letter {
+    font-size: 2.2rem;
+    font-weight: 800;
+    text-shadow: 0 1px 0 rgba(255, 255, 255, 0.35);
+}
+
+/* 有封面图时铺满封面区；加载失败时 onerror 隐藏、露出底层占位字 */
+img.spotlight-img {
     position: absolute;
     inset: 0;
     width: 100%;
     height: 100%;
     object-fit: cover;
+}
+
+/* 更新时间徽标：浮在封面左上角，不占封面外的区域 */
+.spotlight-badge {
+    position: absolute;
+    top: var(--space-2);
+    left: var(--space-2);
+    z-index: 2;
+    background-color: rgba(255, 255, 255, 0.92);
+    color: var(--brand-800);
+    font-weight: 600;
+    box-shadow: var(--shadow-sm);
 }
 
 .spotlight-meta {
@@ -1331,36 +3052,145 @@ img.spotlight-cover {
    内容平台 · 资讯频道
    ========================================================================== */
 
-.article-card {
-    padding: 1.1rem 1.35rem;
+/* 资讯频道版式：头条卡（左大图 / 右文字）+ 卡片网格。
+   旧版是单栏通栏列表 + 132px 小图：正文行长超过 90 字符，阅读吃力；有图卡与
+   无图卡的左边缘不在同一条线上（2 栏 / 1 栏混排），整页像 RSS 阅读器。 */
+
+/* 头条：最新一篇，三倍视觉重量，明确「今天的重点」 */
+.article-feature {
+    display: grid;
+    grid-template-columns: minmax(0, 1.08fr) minmax(0, 1fr);
+    margin-bottom: var(--space-5);
     background-color: #fff;
     border: 1px solid #dfe9f4;
-    border-left: 3px solid transparent;
+    border-radius: var(--radius-xl);
+    box-shadow: var(--shadow-sm);
+    overflow: hidden;
+    transition: transform 0.2s var(--ease), box-shadow 0.2s var(--ease),
+        border-color 0.2s var(--ease);
+}
+
+.article-feature:hover {
+    transform: translateY(-2px);
+    border-color: var(--brand-200);
+    box-shadow: var(--shadow-md);
+}
+
+.article-feature .article-card-thumb {
+    height: 100%;
+    border-radius: 0;
+}
+
+.article-feature-body {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 0.5rem;
+    min-width: 0;
+    padding: var(--space-5) var(--space-6);
+}
+
+.article-feature-title {
+    margin: 0;
+    font-size: var(--text-2xl);
+    font-weight: 700;
+    line-height: 1.35;
+}
+
+.article-feature-title a {
+    color: var(--ink-900);
+    text-decoration: none;
+    transition: color 0.15s var(--ease);
+}
+
+.article-feature-title a:hover {
+    color: var(--brand-700);
+}
+
+.article-feature-summary {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    margin: 0;
+    overflow: hidden;
+    color: var(--ink-700);
+    font-size: var(--text-base);
+    line-height: 1.7;
+}
+
+/* 资讯元信息行：分类 / 时间 / 「最新」标记 */
+.article-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    color: var(--ink-500);
+    font-size: var(--text-xs);
+}
+
+.article-flag {
+    padding: 0.05rem 0.5rem;
+    border-radius: 999px;
+    background-color: var(--accent-100);
+    color: var(--accent-800);
+    font-weight: 700;
+}
+
+/* 卡片网格：自适应列宽，手机 1 栏 / 平板 2 栏 / 桌面 3 栏 */
+.article-grid {
+    display: grid;
+    gap: var(--space-4);
+    grid-template-columns: repeat(auto-fill, minmax(255px, 1fr));
+}
+
+.article-card {
+    display: flex;
+    flex-direction: column;
+    background-color: #fff;
+    border: 1px solid #dfe9f4;
     border-radius: var(--radius-lg);
     box-shadow: var(--shadow-sm);
+    overflow: hidden;
     transition: transform 0.18s var(--ease), box-shadow 0.18s var(--ease),
         border-color 0.18s var(--ease);
 }
 
 .article-card:hover {
-    transform: translateY(-2px);
+    transform: translateY(-3px);
     border-color: var(--brand-200);
-    border-left-color: var(--brand-500);
     box-shadow: var(--shadow-md);
 }
 
-.article-list .article-card + .article-card {
-    margin-top: 0.85rem;
+.article-card-heading {
+    margin: 0;
+    font-size: var(--text-md);
+    line-height: 1.45;
 }
 
 .article-card-title {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
     color: var(--ink-900);
+    font-weight: 600;
     text-decoration: none;
     transition: color 0.15s var(--ease);
 }
 
 .article-card-title:hover {
     color: var(--brand-600);
+}
+
+.article-card-summary {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    margin: 0;
+    overflow: hidden;
+    color: var(--ink-500);
+    font-size: var(--text-sm);
+    line-height: 1.6;
 }
 
 /* 资讯详情：摘要引导块 */
@@ -1382,6 +3212,89 @@ img.spotlight-cover {
     word-break: break-word;
 }
 
+.article-body p {
+    margin-bottom: 0.9rem;
+}
+
+/* 资讯图片：头图（详情页顶部）与正文内嵌图 */
+.article-hero,
+.article-figure {
+    margin: 0 0 1.1rem;
+}
+
+.article-hero img,
+.article-figure img {
+    display: block;
+    width: 100%;
+    height: auto;
+    border-radius: var(--radius-md);
+    border: 1px solid #dfe9f4;
+    background-color: var(--brand-50);
+}
+
+.article-media-line {
+    font-size: 0.9rem;
+    word-break: break-all;
+}
+
+/* 资讯卡片封面：16:9 通栏头图（网格卡） / 头条卡左侧整列（.article-feature 修饰） */
+.article-card-thumb {
+    position: relative;
+    display: block;
+    flex: none;
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    overflow: hidden;
+    background: linear-gradient(150deg, var(--brand-100) 0%, var(--brand-300) 62%, var(--accent-200) 100%);
+}
+
+.article-card-thumb img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transition: transform 0.35s var(--ease);
+}
+
+.article-card:hover .article-card-thumb img {
+    transform: scale(1.05);
+}
+
+/* 无头图占位：分类首字 + 渐变底，让「有图 / 无图」的卡片在网格里重量一致 */
+.article-thumb-fallback {
+    display: grid;
+    place-items: center;
+    width: 100%;
+    height: 100%;
+    color: var(--on-bright-soft);
+    font-size: 1.5rem;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+}
+
+.article-card-main {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    gap: 0.3rem;
+    min-width: 0;
+    padding: 0.85rem 1rem 1rem;
+}
+
+@media (max-width: 991.98px) {
+    .article-feature {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .article-feature-body {
+        padding: var(--space-4) var(--space-5);
+    }
+
+    .article-feature-title {
+        font-size: var(--text-xl);
+    }
+}
+
 .article-source-divider {
     margin: 1.35rem 0 0.85rem;
     opacity: 0.25;
@@ -1395,6 +3308,24 @@ img.spotlight-cover {
     display: flex;
     flex-wrap: wrap;
     gap: 0.5rem;
+}
+
+/* 季度多了以后窄屏一行放不下：横向滚动而不是折成两三行把列表往下推 */
+@media (max-width: 575.98px) {
+    .season-nav {
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        padding-bottom: 2px;
+        scrollbar-width: none;
+    }
+
+    .season-nav::-webkit-scrollbar {
+        display: none;
+    }
+
+    .season-nav .season-pill {
+        flex: 0 0 auto;
+    }
 }
 
 .season-pill {
@@ -1440,40 +3371,227 @@ img.spotlight-cover {
     color: var(--on-bright);
 }
 
-/* 星期分组标题 */
-.schedule-day-title {
-    padding-left: 0.65rem;
-    border-left: 4px solid var(--brand-500);
-    line-height: 1.25;
-    font-weight: 700;
-    color: var(--ink-900);
+/* 星期分组标题：从「小标题」升级成块级分隔，一眼能扫到「今天到哪天了」 */
+.schedule-day {
+    --day-gap: var(--space-3);
 }
 
-/* 番剧信息卡片 */
-.schedule-card {
-    overflow: hidden;
-    transition: transform 0.2s var(--ease), box-shadow 0.2s var(--ease);
+.schedule-day + .schedule-day {
+    margin-top: var(--space-6);
+}
+
+.schedule-day-head {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    margin-bottom: var(--day-gap);
+}
+
+.schedule-day-name {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0;
+    color: var(--ink-900);
+    font-size: var(--text-md);
+    font-weight: 700;
+    line-height: 1.3;
+}
+
+.schedule-day-name::before {
+    content: "";
+    width: 4px;
+    height: 1.05em;
+    border-radius: 2px;
+    background: linear-gradient(180deg, var(--brand-400), var(--accent-400));
+}
+
+.schedule-day-count {
+    padding: 0.05rem 0.5rem;
+    border-radius: 999px;
+    background-color: var(--brand-50);
+    color: var(--brand-700);
+    font-size: var(--text-xs);
+    font-weight: 600;
+}
+
+.schedule-day-note {
+    color: var(--ink-500);
+    font-size: var(--text-xs);
+}
+
+.schedule-day-line {
+    flex: 1 1 auto;
+    height: 1px;
+    background: linear-gradient(90deg, #dfe9f4 0%, rgba(223, 233, 244, 0) 100%);
+}
+
+/* 桌面端改成「左侧星期轴 + 右侧卡片」的时间表结构：
+   星期名变成一条竖向轴（滚动时钉住），右侧网格不再被标题行切断，
+   一天只有三四部时留白落在轴上而不是散在卡片右边。 */
+@media (min-width: 992px) {
+    .schedule-day {
+        display: grid;
+        grid-template-columns: 88px minmax(0, 1fr);
+        column-gap: var(--space-4);
+        align-items: start;
+    }
+
+    .schedule-day + .schedule-day {
+        margin-top: var(--space-5);
+        padding-top: var(--space-5);
+        border-top: 1px solid #e8f0f8;
+    }
+
+    .schedule-day-head {
+        position: sticky;
+        top: 4.75rem;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 0.3rem;
+        margin-bottom: 0;
+    }
+
+    .schedule-day-name {
+        font-size: var(--text-lg);
+    }
+
+    .schedule-day-line {
+        display: none;
+    }
+}
+
+/* 档期网格：比作品页更密一档（一天通常只有 3–4 部，6 栏刚好一行放下） */
+.schedule-grid {
+    display: grid;
+    gap: var(--day-gap);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+@media (min-width: 576px) {
+    .schedule-grid {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+}
+
+@media (min-width: 768px) {
+    .schedule-grid {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+}
+
+@media (min-width: 992px) {
+    .schedule-grid {
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+    }
+}
+
+@media (min-width: 1200px) {
+    .schedule-grid {
+        grid-template-columns: repeat(6, minmax(0, 1fr));
+    }
+}
+
+/* 番剧信息卡片：复用作品卡外观，正文行距收紧（字段比作品卡多） */
+.schedule-card .work-card-body {
+    gap: 0.2rem;
+    padding: 0.65rem 0.75rem 0.8rem;
 }
 
 .schedule-card:hover {
     transform: translateY(-4px);
+    border-color: var(--brand-300);
     box-shadow: var(--shadow-lg);
 }
 
-/* 海报位：真实图片 contain 保留全貌；无图片时用渐变 + 图标占位 */
-.schedule-poster {
-    max-height: 300px;
-    object-fit: contain;
-    background: linear-gradient(160deg, #f6f4fd, #ece8f9);
+/* 播出时间：浮在封面右上，等宽数字；深色底保证任何封面上都可读 */
+.schedule-time {
+    position: absolute;
+    top: 0.5rem;
+    right: 0.5rem;
+    z-index: 2;
+    padding: 0.06rem 0.45rem;
+    border-radius: 8px;
+    background-color: rgba(10, 45, 66, 0.76);
+    color: #fff;
+    font-size: var(--text-xs);
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.01em;
+    backdrop-filter: blur(4px);
 }
 
-.schedule-poster-empty {
-    aspect-ratio: 16 / 10;
-    display: grid;
-    place-items: center;
-    font-size: 2.6rem;
-    color: var(--brand-300);
-    background: linear-gradient(160deg, var(--brand-50), var(--brand-100));
+.schedule-card .work-card-title {
+    color: var(--ink-900);
+    text-decoration: none;
+    /* 档期标题多为单行：不预留作品卡的两行位，否则标题下方会空出一行 */
+    min-height: 0;
+}
+
+.schedule-card:hover .work-card-title {
+    color: var(--brand-700);
+}
+
+.schedule-cn {
+    color: var(--brand-700);
+    font-size: var(--text-xs);
+    font-weight: 500;
+}
+
+/* 作品类型徽标 + 题材标签 */
+.schedule-type {
+    align-self: flex-start;
+    padding: 0.05rem 0.4rem;
+    border: 1px solid var(--surface-2);
+    border-radius: 999px;
+    background: var(--surface);
+    color: var(--ink-500);
+    font-size: var(--text-xs);
+    line-height: 1.5;
+}
+
+.schedule-work-tags {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 1;
+    overflow: hidden;
+    color: var(--ink-500);
+    font-size: var(--text-xs);
+    line-height: 1.5;
+}
+
+/* 日文原名 / 播出说明：各占一行，超出省略，卡片高度不被长标题撑开 */
+.schedule-jp,
+.schedule-note {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 1;
+    overflow: hidden;
+    color: var(--ink-500);
+    font-size: var(--text-xs);
+    line-height: 1.5;
+}
+
+.schedule-platforms {
+    margin-top: auto;
+    padding-top: 0.25rem;
+    color: var(--ink-500);
+    font-size: var(--text-xs);
+}
+
+.schedule-platforms a {
+    color: var(--brand-700);
+    font-weight: 600;
+    text-decoration: none;
+}
+
+.schedule-platforms a:hover {
+    text-decoration: underline;
+}
+
+.schedule-tags .badge {
+    padding: 0.12rem 0.45rem;
+    font-size: var(--text-xs);
 }
 
 .schedule-weekday-badge {
@@ -1547,7 +3665,7 @@ img.spotlight-cover {
     box-shadow: 0 3px 8px -3px rgba(21, 125, 116, 0.7);
 }
 
-/* 复用内容平台的深色 brand-mark 方块，使两套导航同源 */
+/* 两套导航共用同一个字标（.brand-wordmark，见文件上方说明） */
 
 .admin-navbar .nav-link {
     color: var(--on-bright-soft);
@@ -1828,12 +3946,7 @@ button.navbar-user {
     background: radial-gradient(circle, rgba(255, 255, 255, 0.15), transparent 68%);
 }
 
-.auth-band .brand-mark {
-    width: 2.7rem;
-    height: 2.7rem;
-    margin: 0 0 0.6rem;
-}
-
+/* 认证页品牌带：字标放大成卡片头部的主体（尺寸见 .auth-band .brand-lockup-lg） */
 .auth-band h1 {
     font-weight: 800;
     letter-spacing: 0.02em;
@@ -1873,6 +3986,150 @@ button.navbar-user {
     user-select: none;
 }
 
+/* 身份区：头像与名字同排，窄屏也不拆行；两个入口按钮在手机独占一行。
+   旧结构用 flex-wrap 直接排 avatar + 名字块 + 按钮，390 宽下整块换行，
+   头像单独一行、名字掉到下一行（实测 y 相差 80px）。 */
+.space-identity {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.85rem 1.15rem;
+}
+
+.space-identity-main {
+    flex: 1 1 11rem;
+    min-width: 0;
+}
+
+.space-identity-name {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.25rem 0.5rem;
+}
+
+.space-identity-name .h5 {
+    line-height: 1.25;
+}
+
+.space-identity-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.15rem 0.75rem;
+    margin-top: 0.15rem;
+    font-size: 0.8rem;
+    color: var(--ink-500);
+}
+
+.space-identity-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
+@media (max-width: 575.98px) {
+    .space-identity-actions {
+        flex: 1 1 100%;
+    }
+
+    /* 「恢复默认」靠右：和左侧两个入口按钮分开，320 宽换行时也不会孤立在左边 */
+    .space-identity-actions > form {
+        margin-left: auto;
+    }
+}
+
+/* 头像即上传入口（抖音 / B站 的做法）：整圆都是 label，
+   桌面 hover 浮出深色蒙层 + 相机图标，窄屏改成右下角常驻小徽标。 */
+.space-avatar-form {
+    margin: 0;
+    flex-shrink: 0;
+}
+
+.space-avatar-trigger {
+    position: relative;
+    display: block;
+    width: 64px;
+    height: 64px;
+    border-radius: 50%;
+    cursor: pointer;
+    line-height: 0;
+}
+
+.space-avatar-trigger:focus-within {
+    outline: 2px solid var(--brand-500);
+    outline-offset: 3px;
+}
+
+/* 透明文件域盖满整圆：点哪里都能唤起选图，同时保留键盘可达与原生文件选择 */
+.space-avatar-file {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    opacity: 0;
+    cursor: pointer;
+}
+
+.space-avatar-mask {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    border-radius: 50%;
+    background: rgba(18, 58, 85, 0.55);
+    color: #fff;
+    opacity: 0;
+    transition: opacity 0.18s var(--ease);
+    pointer-events: none;
+}
+
+.space-avatar-mask svg {
+    width: 24px;
+    height: 24px;
+}
+
+.space-avatar-trigger:hover .space-avatar-mask,
+.space-avatar-trigger:focus-within .space-avatar-mask {
+    opacity: 1;
+}
+
+/* 触屏/窄屏没有 hover：相机徽标常驻头像右下角（不靠悬停也能看出可点） */
+@media (max-width: 767.98px) {
+    .space-avatar-mask {
+        inset: auto -3px -3px auto;
+        width: 22px;
+        height: 22px;
+        background: var(--brand-600);
+        border: 2px solid #fff;
+        box-shadow: var(--shadow-sm);
+        opacity: 1;
+    }
+
+    .space-avatar-mask svg {
+        width: 11px;
+        height: 11px;
+    }
+}
+
+/* 文本级别的次要动作用链接按钮（恢复默认头像），不占按钮位 */
+.space-link-btn {
+    padding: 0;
+    border: 0;
+    background: none;
+    font-size: 0.82rem;
+    line-height: 1.4;
+    color: var(--ink-500);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+    white-space: nowrap;
+}
+
+.space-link-btn:hover {
+    color: var(--brand-600);
+}
+
 /* Tab（作品收藏 / 浏览记录）：下划线式，与数据管理二级导航各自独立 */
 .space-tabs {
     gap: 0.25rem;
@@ -1897,9 +4154,236 @@ button.navbar-user {
     border-bottom-color: var(--brand-600);
 }
 
-/* 简介展示：保留用户手动换行 */
-.space-bio-text {
-    white-space: pre-wrap;
+/* ===== 个人资料（性别 / 生日 / 所在地 · 仅本人可见） ===== */
+/* 卡头右侧的隐私提示：锁形图标 + 一句话，回答「这些会不会被别人看到」 */
+.space-private-hint {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.28rem;
+    padding: 0.1rem 0.52rem 0.1rem 0.42rem;
+    border: 1px solid #e3edf6;
+    border-radius: 999px;
+    background: #f2f7fb;
+    color: var(--ink-500);
+    font-size: 0.72rem;
+    font-weight: 500;
+    white-space: nowrap;
+}
+
+.space-private-hint svg {
+    width: 0.78rem;
+    height: 0.78rem;
+    flex: 0 0 auto;
+}
+
+/* 性别选择：原生 radio 隐藏成盖满的透明层，视觉交给 span 的 pill */
+.space-gender-group {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+}
+
+.space-gender-option {
+    position: relative;
+    display: inline-flex;
+}
+
+.space-gender-option input {
+    position: absolute;
+    inset: 0;
+    margin: 0;
+    opacity: 0;
+    cursor: pointer;
+}
+
+.space-gender-option span {
+    display: inline-block;
+    padding: 0.18rem 0.62rem;
+    border: 1px solid #dbe7f3;
+    border-radius: 999px;
+    background: #fff;
+    color: var(--ink-700);
+    font-size: 0.8rem;
+}
+
+.space-gender-option input:checked + span {
+    border-color: var(--brand-500);
+    background: var(--brand-50);
+    color: var(--brand-700);
+    font-weight: 600;
+}
+
+.space-gender-option input:focus-visible + span {
+    outline: 2px solid var(--brand-400);
+    outline-offset: 1px;
+}
+
+/* 统计数字带：四项横排，用分隔线代替 4 张独立卡片的边框与色条（降噪，省 ~100px 高度） */
+.space-stats {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: stretch;
+    margin-top: var(--space-3);
+    padding-top: 0.7rem;
+    border-top: 1px solid #eaf2f9;
+}
+
+.space-stat {
+    position: relative;
+    flex: 1 1 0;
+    min-width: 4.6rem;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.1rem;
+    padding: 0.15rem 0.4rem;
+}
+
+.space-stat + .space-stat::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 0.3rem;
+    bottom: 0.3rem;
+    width: 1px;
+    background: #e6eff8;
+}
+
+.space-stat-num {
+    font-size: 1.28rem;
+    font-weight: 800;
+    line-height: 1.15;
+    color: var(--ink-900);
+    font-variant-numeric: tabular-nums;
+}
+
+.space-stat-label {
+    font-size: 0.75rem;
+    color: var(--ink-500);
+}
+
+/* 收藏网格：复用全站 .works-grid 的列宽（手机 150px / ≥768 190px），
+   不再用 Bootstrap col-lg-4（那会把封面上撑到 420px，一张卡 800px 高）。 */
+.space-fav-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+}
+
+.space-fav-tools {
+    display: flex;
+    flex-direction: column;
+    gap: 0.2rem;
+    /* 同一行卡片高度不等（标题有一行/两行），工具区统一贴底才对得齐 */
+    margin-top: auto;
+}
+
+.space-fav-status {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.22rem;
+    margin: 0;
+}
+
+.space-fav-status .status-pill-sm {
+    padding: 0.14rem 0.4rem;
+    font-size: 0.72rem;
+    line-height: 1.35;
+}
+
+.space-fav-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.78rem;
+    line-height: 1.4;
+}
+
+.space-fav-actions .btn-link {
+    font-size: 0.78rem;
+    text-decoration: none;
+}
+
+.space-fav-actions .btn-link:hover {
+    color: var(--brand-600) !important;
+    text-decoration: underline;
+}
+
+/* 窄屏表格：历史表按 5 列排会把标题挤成每行两三个字、删除按钮竖排。
+   <576 改成「一行一张记录卡」：标题独占一行，类型/评分/时间并成一行，操作贴右上。 */
+@media (max-width: 575.98px) {
+    .space-table thead {
+        display: none;
+    }
+
+    .space-table,
+    .space-table tbody,
+    .space-table tr,
+    .space-table td {
+        display: block;
+    }
+
+    .space-table tr {
+        position: relative;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 0.3rem 0.55rem;
+        padding: 0.7rem 0.85rem;
+        border-bottom: 1px solid #eef3f9;
+    }
+
+    .space-table tbody tr:last-child {
+        border-bottom: 0;
+    }
+
+    .space-table td {
+        padding: 0;
+        border: 0;
+    }
+
+    /* Bootstrap 的 .table > :not(caption) > * > * 会给每个 td 画下边框，
+       重排成块级后它会变成每个单元格下面一条短横线，这里按更高优先级清掉。 */
+    .space-table.table td {
+        border-bottom: 0;
+    }
+
+    .space-table td:nth-child(1) {
+        flex: 0 0 calc(100% - 3.6rem);
+        font-weight: 600;
+    }
+
+    .space-table td:nth-child(3) {
+        font-size: 0.82rem;
+    }
+
+    .space-table td:nth-child(4) {
+        font-size: 0.75rem;
+        color: var(--ink-500);
+    }
+
+    .space-table td:last-child {
+        position: absolute;
+        top: 0.5rem;
+        right: 0.6rem;
+    }
+
+    .space-table td:last-child .btn {
+        padding: 0.1rem 0.5rem;
+        font-size: 0.76rem;
+    }
+
+    /* 作品申请表列更多（7 列）：标题独占一行，说明整行铺在底部 */
+    .space-table-sub td:nth-child(2) {
+        flex: 1 0 100%;
+    }
+
+    .space-table-sub td:last-child {
+        position: static;
+        flex: 1 0 100%;
+        font-size: 0.76rem;
+        color: var(--ink-500);
+    }
 }
 
 /* 作品标注：看过 / 未看 / 想看（详情页与个人空间标注表格共用的小胶囊） */
@@ -2016,11 +4500,809 @@ button.navbar-user {
     color: rgba(10, 45, 66, 0.68);
 }
 
+/* 作品信息 chip 内的来源标注（作者/公司/系列/译名）：比 chip 名更弱一档 */
+.tag-chip .work-info-kind {
+    font-size: 0.72rem;
+    font-weight: 500;
+    color: var(--ink-400);
+}
+
 /* 「清除标签」：弱化的退出形态 */
 .tag-chip-clear {
     border-style: dashed;
     color: var(--ink-500);
     font-weight: 500;
+}
+
+/* 「展开全部标签 / 收起」：折叠切换入口，弱化但可点 */
+.tag-chip-more {
+    border-style: dashed;
+    color: var(--brand-600);
+    font-weight: 500;
+}
+
+.tag-chip-more:hover {
+    border-color: var(--brand-400);
+    color: var(--brand-700);
+}
+
+/* ===== 年份筛选（B 站式检索分类）：独立于题材标签的发行年维度 =====
+   横排可滚动（新→旧），窄屏不换行、靠横向滚动浏览；选中态复用 .tag-chip.active。 */
+.year-filter {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+}
+
+.filter-cat-label {
+    flex: 0 0 auto;
+    padding-top: 0.35rem;
+    font-size: 0.8rem;
+    font-weight: 700;
+    color: var(--ink-500);
+    letter-spacing: 0.02em;
+}
+
+.year-chips {
+    display: flex;
+    flex-wrap: nowrap;
+    align-items: center;
+    gap: 0.5rem;
+    overflow-x: auto;
+    /* 滚动时留出渐隐边距，避免年份被裁切；隐藏原生滚动条保持工具栏观感 */
+    padding-bottom: 2px;
+    scrollbar-width: thin;
+    -ms-overflow-style: none;
+}
+
+.year-chips::-webkit-scrollbar {
+    height: 4px;
+}
+
+.year-chips::-webkit-scrollbar-thumb {
+    background: var(--surface-3);
+    border-radius: 999px;
+}
+
+.year-chips .tag-chip {
+    flex: 0 0 auto;
+}
+
+/* ==========================================================================
+   全部作品页改版（2026-10-20）：类型 Tab / 已选条件条 / 分组筛选行 /
+   排序与视图切换 / 列表视图。沿用既有品牌变量与 chip 语言，不引入新色。
+   ========================================================================== */
+
+/* ===== 类型 Tab：一级浏览维度（从旧版搜索栏的下拉框提出来） =====
+   选中态沿用品牌蓝实底 + 深字（--on-bright），与 .tag-chip.active 同一语言。 */
+/* ==========================================================================
+   全部作品页（/contents）视觉体系（2026-10-20）
+   hero 品牌带 + 吸顶控制条 + B站式卡片（默认视图）+ 空态插图
+   ========================================================================== */
+
+/* ---------- hero 品牌带：真实主视觉模糊底 + 品牌罩层 + 字标 + 库统计 ----------
+   背景图 static/img/contents/contents-hero-bg.jpg（外部下载的真实主视觉，
+   模糊后只留氛围；换图即季度轮换，代码零改）。罩层与首页 hero 同族：
+   深蓝 → 青绿斜向渐变，保证白字可读。 */
+.contents-hero {
+    position: relative;
+    overflow: hidden;
+    isolation: isolate;
+    border-radius: var(--radius-xl);
+    background: linear-gradient(120deg, var(--brand-800) 0%, var(--brand-600) 58%, var(--accent-600) 130%);
+    box-shadow: 0 18px 40px -22px rgba(10, 45, 66, 0.55);
+    margin-bottom: var(--space-4);
+}
+
+.contents-hero-bg {
+    position: absolute;
+    inset: 0;
+    z-index: -2;
+    background: url("/static/img/contents/contents-hero-bg.jpg") center 62% / cover no-repeat;
+    opacity: 0.85;
+}
+
+.contents-hero::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    background: linear-gradient(100deg,
+        rgba(17, 71, 112, 0.94) 0%,
+        rgba(17, 71, 112, 0.82) 38%,
+        rgba(28, 115, 176, 0.45) 68%,
+        rgba(57, 197, 187, 0.28) 100%);
+    pointer-events: none;
+}
+
+.contents-hero-inner {
+    position: relative;
+    padding: clamp(1.5rem, 4vw, 2.5rem) clamp(1.25rem, 4vw, 2.75rem);
+    color: #fff;
+}
+
+/* hero 上的字标：与首页同一标识在暗底上反相（字母白、注音线半透明白） */
+.contents-hero-copy .wm-lockup.brand-lockup-lg {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.72rem;
+    margin-bottom: var(--space-3);
+}
+
+.contents-hero-copy .brand-lockup-lg .wm-latin {
+    color: #fff;
+    text-shadow: 0 3px 18px rgba(8, 35, 56, 0.45);
+}
+
+.contents-hero-copy .brand-lockup-lg .wm-kana {
+    border-left-color: rgba(255, 255, 255, 0.45);
+    color: rgba(255, 255, 255, 0.8);
+}
+
+.contents-hero-title {
+    font-size: clamp(1.55rem, 3.2vw, 2.3rem);
+    font-weight: 800;
+    line-height: 1.15;
+    letter-spacing: 0.01em;
+    margin-bottom: var(--space-2);
+    text-shadow: 0 2px 14px rgba(10, 45, 66, 0.35);
+}
+
+.contents-hero-sub {
+    max-width: 34em;
+    font-size: 0.95rem;
+    line-height: 1.7;
+    color: rgba(255, 255, 255, 0.88);
+    margin-bottom: var(--space-4);
+}
+
+.contents-hero-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    margin-bottom: var(--space-4);
+}
+
+.contents-hero-actions .btn-outline-light {
+    border-color: rgba(255, 255, 255, 0.65);
+}
+
+.contents-hero-actions .btn-outline-light:hover {
+    background: rgba(255, 255, 255, 0.14);
+    border-color: #fff;
+}
+
+/* hero 数据行：收录总数 + 四类型真实分布（与类型 Tab 同源计数） */
+.contents-hero-stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2) var(--space-4);
+    margin: 0;
+    padding-top: var(--space-3);
+    border-top: 1px solid rgba(255, 255, 255, 0.22);
+}
+
+.contents-hero-stat {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+}
+
+.contents-hero-stat dt {
+    font-size: 0.72rem;
+    letter-spacing: 0.08em;
+    color: rgba(255, 255, 255, 0.75);
+}
+
+.contents-hero-stat dd {
+    margin: 0;
+    font-size: 1.3rem;
+    font-weight: 800;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.1;
+}
+
+/* ---------- 吸顶控制条：类型 Tab + 视图切换 ----------
+   翻 500 页时类型与视图永远可达；毛玻璃白底压在内容之上、导航之下。 */
+.works-sticky {
+    position: sticky;
+    top: 84px;
+    z-index: 1020;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    margin-bottom: var(--space-3);
+    padding: 0.5rem 0.75rem;
+    background: rgba(255, 255, 255, 0.92);
+    backdrop-filter: blur(8px);
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-lg);
+    box-shadow: var(--shadow-sm);
+}
+
+.works-sticky .type-tabs {
+    flex: 1 1 auto;
+    min-width: 0;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
+}
+
+.works-sticky .type-tabs::-webkit-scrollbar {
+    display: none;
+}
+
+.works-sticky .view-switch {
+    flex: 0 0 auto;
+}
+
+.type-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+
+/* 类型 Tab：图标 + 标签 + 计数；四色令牌与首页分类条同源
+   （动画蓝 / 漫画粉 / 游戏青 / 小说紫），选中态用类型色渐变。 */
+.type-tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.45rem 0.9rem;
+    border-radius: 999px;
+    border: 1px solid var(--surface-2);
+    background-color: var(--card-bg);
+    color: var(--ink-700);
+    font-size: 0.88rem;
+    font-weight: 600;
+    line-height: 1.4;
+    white-space: nowrap;
+    flex: 0 0 auto;
+    transition: border-color 0.15s var(--ease), color 0.15s var(--ease),
+        background-color 0.15s var(--ease), box-shadow 0.15s var(--ease);
+}
+
+.type-tab[data-type="anime"] { --type-a: var(--brand-300); --type-b: var(--brand-600); }
+.type-tab[data-type="comic"] { --type-a: #ffb3c7; --type-b: #e8557d; }
+.type-tab[data-type="game"] { --type-a: var(--accent-300); --type-b: var(--accent-600); }
+.type-tab[data-type="novel"] { --type-a: #cdb4f6; --type-b: #7c5cd6; }
+
+.type-tab-icon {
+    display: inline-flex;
+    color: var(--type-b, var(--brand-500));
+}
+
+.type-tab-icon .svg-ic {
+    width: 1.05em;
+    height: 1.05em;
+}
+
+.type-tab:hover {
+    border-color: var(--type-b, var(--brand-300));
+    color: var(--type-b, var(--brand-600));
+}
+
+.type-tab.active {
+    background: linear-gradient(135deg,
+        var(--type-a, var(--brand-400)),
+        var(--type-b, var(--brand-600)));
+    border-color: transparent;
+    color: var(--on-bright);
+    box-shadow: 0 4px 12px -5px rgba(10, 45, 66, 0.45);
+}
+
+.type-tab.active .type-tab-icon {
+    color: #fff;
+}
+
+.type-tab-count {
+    font-size: 0.75rem;
+    font-weight: 500;
+    color: var(--ink-400);
+    font-variant-numeric: tabular-nums;
+}
+
+.type-tab.active .type-tab-count {
+    color: var(--on-bright-soft);
+}
+
+/* ---------- B站式卡片视图（默认）：封面 + 标题 + 元数据行 ----------
+   与网格视图同源动态列（auto-fill），但最小列宽更大（≥768 抬到 196px），
+   一屏作品数约翻倍；无卡身无摘要，信息全在封面与标题两行里。
+   每页 60 条与 2/3/4/5/6 列都能整除，末行不缺格（见 .works-grid 注释）。 */
+.works-grid--bili {
+    grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+}
+
+@media (min-width: 768px) {
+    .works-grid--bili {
+        grid-template-columns: repeat(auto-fill, minmax(196px, 1fr));
+    }
+}
+
+.bili-card {
+    display: flex;
+    flex-direction: column;
+    color: inherit;
+    text-decoration: none;
+    transition: transform 0.2s var(--ease);
+}
+
+.bili-card:hover {
+    color: inherit;
+    transform: translateY(-3px);
+}
+
+.bili-cover {
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-sm);
+    transition: box-shadow 0.25s var(--ease);
+}
+
+.bili-card:hover .bili-cover {
+    box-shadow: var(--shadow-lg);
+}
+
+.bili-card:hover img.work-cover {
+    transform: scale(1.05);
+}
+
+/* 封面左上徽标列：四色类型签 + 「文学」细分角标竖排（都盖上封面可读性处理） */
+.bili-badges {
+    position: absolute;
+    top: var(--space-2);
+    left: var(--space-2);
+    z-index: 2;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.25rem;
+}
+
+.bili-type {
+    padding: 0.1rem 0.5rem;
+    border-radius: 999px;
+    background: linear-gradient(135deg,
+        var(--type-a, var(--brand-400)),
+        var(--type-b, var(--brand-600)));
+    color: #fff;
+    font-size: 0.68rem;
+    font-weight: 700;
+    line-height: 1.55;
+    box-shadow: 0 2px 8px -3px rgba(10, 45, 66, 0.5);
+}
+
+.bili-type[data-type="anime"] { --type-a: var(--brand-300); --type-b: var(--brand-600); }
+.bili-type[data-type="comic"] { --type-a: #ffb3c7; --type-b: #e8557d; }
+.bili-type[data-type="game"] { --type-a: var(--accent-300); --type-b: var(--accent-600); }
+.bili-type[data-type="novel"] { --type-a: #cdb4f6; --type-b: #7c5cd6; }
+
+/* 「文学」细分角标：与详情页/网格视图同一语义（detail-kind-badge），
+   但换成浅色实底 pill —— 封面题材多变，浅底 + 辅助色描边才压得住可读性。 */
+.bili-kind {
+    padding: 0.08rem 0.5rem;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.94);
+    border: 1px solid var(--accent-200);
+    color: var(--accent-700);
+    font-size: 0.68rem;
+    font-weight: 700;
+    line-height: 1.55;
+}
+
+/* 当年新作角标（红，中文语境「新」用色）；年份来自作品信息，不依赖排序 */
+.bili-new {
+    position: absolute;
+    top: var(--space-2);
+    right: var(--space-2);
+    z-index: 2;
+    display: grid;
+    place-items: center;
+    width: 1.35rem;
+    height: 1.35rem;
+    border-radius: 0.5rem;
+    background: linear-gradient(135deg, #ff6b6b, #ee2a4d);
+    color: #fff;
+    font-size: 0.72rem;
+    font-weight: 800;
+    line-height: 1;
+    box-shadow: 0 3px 9px -3px rgba(238, 42, 77, 0.75);
+}
+
+.bili-body {
+    padding: 0.5rem 0.15rem 0;
+}
+
+/* 标题两行截断：min-height 占满两行，网格行高对齐（B站索引页口径） */
+.bili-title {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    overflow: hidden;
+    min-height: 2.9em;
+    color: var(--ink-900);
+    font-size: 0.85rem;
+    font-weight: 600;
+    line-height: 1.45;
+    word-break: break-word;
+}
+
+/* 元数据行：随排序自适应——评分/收藏/年份哪个排序哪个前置加粗，
+   「点了排序看得出变化」做进每一张卡。 */
+.bili-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    margin-top: 0.3rem;
+    color: var(--ink-500);
+    font-size: 0.78rem;
+    line-height: 1.4;
+    white-space: nowrap;
+}
+
+.bili-meta .bili-strong {
+    font-weight: 800;
+}
+
+.bili-rating {
+    color: #d98000;
+    font-variant-numeric: tabular-nums;
+}
+
+.bili-rating.bili-strong {
+    color: #c26a00;
+}
+
+.bili-fav {
+    color: #e8557d;
+    font-variant-numeric: tabular-nums;
+}
+
+.bili-fav.bili-strong {
+    color: #d6366b;
+}
+
+.bili-year {
+    color: var(--ink-400);
+    font-variant-numeric: tabular-nums;
+}
+
+.bili-year.bili-strong {
+    color: var(--ink-900);
+}
+
+/* 窄屏：hero 数据行与动作按钮收紧，吸顶条只留 Tab 横滑 */
+@media (max-width: 767.98px) {
+    .contents-hero-stat dd {
+        font-size: 1.1rem;
+    }
+
+    .works-sticky {
+        top: 76px;
+        padding: 0.4rem 0.55rem;
+    }
+}
+
+/* 空态插图（ImageGen 生成，本地托管）：替代旧的一行灰字 */
+.detail-empty--illustration {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.35rem;
+}
+
+.detail-empty--illustration::before {
+    display: none;
+}
+
+.contents-empty-img {
+    display: block;
+    width: 240px;
+    max-width: 72vw;
+    height: auto;
+    margin-bottom: var(--space-2);
+}
+
+/* ===== 搜索行：输入框占满剩余宽度，按钮贴右；极窄屏换行成整行按钮 ===== */
+.works-search {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.works-search .form-control {
+    flex: 1 1 auto;
+}
+
+@media (max-width: 400px) {
+    .works-search {
+        flex-wrap: wrap;
+    }
+
+    .works-search .btn {
+        width: 100%;
+    }
+}
+
+/* ===== 已选条件条：柔品牌底 + 深蓝字（对比 ≥7:1），点整枚 chip 即摘掉该条件 ===== */
+.active-filters {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.tag-chip-active-filter {
+    background: var(--brand-50);
+    border-color: var(--brand-200);
+    color: var(--brand-800);
+}
+
+.tag-chip-active-filter:hover {
+    background: var(--brand-100);
+    border-color: var(--brand-300);
+    color: var(--brand-900);
+}
+
+.tag-chip-active-filter .tag-remove {
+    font-size: 0.7rem;
+    color: var(--ink-500);
+}
+
+/* ===== 筛选面板内的分组行：左侧分类名（定宽对齐）+ 右侧 chips =====
+   行间细分隔线替代卡片套卡片，保持一张面板内的视觉分组。 */
+.filter-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+    padding: 0.6rem 0;
+}
+
+.filter-row + .filter-row {
+    border-top: 1px solid var(--surface-2);
+}
+
+.filter-row:first-child {
+    padding-top: 0;
+}
+
+.filter-row:last-child {
+    padding-bottom: 0;
+}
+
+.filter-row .tag-filter,
+.filter-row .year-chips {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+/* 分组行内的 chip 容器：与 .tag-filter 同版式，但不叫 tag-filter ——
+   「题材 chips」的计数与「无标签时不渲染筛选栏」的断言都以 tag-filter 为锚点，
+   形式 / 类型专属组不能污染这个语义。 */
+.filter-chips {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+/* ===== 排序 chips：外观与 tag-chip 同一语言，但独立类名 =====
+   排序不是「筛选条件」而是「结果顺序」，不该进题材 chips 的统计口径。 */
+.sort-chips {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.sort-chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.3rem 0.7rem;
+    border-radius: 999px;
+    border: 1px solid var(--surface-2);
+    background-color: var(--card-bg);
+    color: var(--ink-700);
+    font-size: 0.875rem;
+    font-weight: 600;
+    line-height: 1.4;
+    transition: border-color 0.15s var(--ease), color 0.15s var(--ease),
+        background-color 0.15s var(--ease);
+}
+
+.sort-chip:hover {
+    border-color: var(--brand-300);
+    color: var(--brand-600);
+}
+
+.sort-chip.active {
+    background: var(--brand-400);
+    border-color: var(--brand-400);
+    color: var(--on-bright);
+}
+
+/* 窄屏：筛选面板收进「筛选条件」按钮。
+   checkbox hack 而不是 JS —— 页面其余交互全是纯 GET 链接，不为一个折叠引入脚本。 */
+.filter-drawer-input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    pointer-events: none;
+}
+
+.filter-drawer-toggle {
+    display: none;
+}
+
+@media (max-width: 575.98px) {
+    .filter-drawer-toggle {
+        display: inline-flex;
+        align-items: center;
+        margin-bottom: 0.75rem;
+        padding: 0.4rem 0.9rem;
+        border-radius: 999px;
+        border: 1px solid var(--surface-2);
+        background-color: var(--card-bg);
+        color: var(--ink-700);
+        font-size: 0.875rem;
+        font-weight: 600;
+        cursor: pointer;
+    }
+
+    .filter-panel--works {
+        display: none;
+    }
+
+    .filter-drawer-input:checked ~ .filter-panel--works {
+        display: block;
+    }
+}
+
+/* ===== 结果工具条：左计数摘要、右视图切换 ===== */
+.works-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+}
+
+.view-switch {
+    display: inline-flex;
+    overflow: hidden;
+    border: 1px solid var(--surface-2);
+    border-radius: 999px;
+    background: var(--card-bg);
+}
+
+.view-switch-btn {
+    padding: 0.3rem 0.85rem;
+    color: var(--ink-500);
+    font-size: 0.8rem;
+    font-weight: 600;
+    transition: background-color 0.15s var(--ease), color 0.15s var(--ease);
+}
+
+.view-switch-btn + .view-switch-btn {
+    border-left: 1px solid var(--surface-2);
+}
+
+.view-switch-btn:hover {
+    color: var(--brand-600);
+}
+
+.view-switch-btn.active {
+    background: var(--brand-400);
+    color: var(--on-bright);
+}
+
+/* ===== 列表视图：行式高密度，1.2 万部里扫标题比翻海报网格快得多 ===== */
+.works-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.work-row {
+    display: grid;
+    grid-template-columns: 56px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.6rem 0.75rem;
+    border: 1px solid var(--surface-2);
+    border-radius: var(--radius-md);
+    background: var(--card-bg);
+    transition: border-color 0.15s var(--ease), box-shadow 0.15s var(--ease);
+}
+
+.work-row:hover {
+    border-color: var(--brand-300);
+    box-shadow: var(--shadow-sm);
+}
+
+.work-row-cover {
+    position: relative;
+    display: block;
+    width: 56px;
+    aspect-ratio: 2 / 3;
+    overflow: hidden;
+    border-radius: 6px;
+    background: linear-gradient(155deg, var(--brand-100) 0%, var(--brand-300) 58%, var(--accent-200) 100%);
+}
+
+.work-row-main {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    min-width: 0;
+}
+
+.work-row-title {
+    color: var(--ink-900);
+    font-size: 0.95rem;
+    font-weight: 600;
+    line-height: 1.4;
+}
+
+.work-row:hover .work-row-title {
+    color: var(--brand-700);
+}
+
+.work-row-summary {
+    font-size: 0.8rem;
+    line-height: 1.5;
+}
+
+.work-row-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.8rem;
+    color: var(--ink-500);
+}
+
+.work-row-year,
+.work-row-media {
+    padding: 0.1rem 0.45rem;
+    border-radius: 999px;
+    background: var(--surface);
+    font-size: 0.75rem;
+}
+
+.work-row-rating {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+}
+
+/* 窄屏：元信息换到第二行，避免把标题挤成两三个字 */
+@media (max-width: 575.98px) {
+    .work-row {
+        grid-template-columns: 48px minmax(0, 1fr);
+    }
+
+    .work-row-meta {
+        grid-column: 1 / -1;
+    }
+}
+
+/* ===== 网格卡片封面年份角标：不点进详情也知道是哪一年的 ===== */
+.work-card-year {
+    position: absolute;
+    right: var(--space-2);
+    bottom: var(--space-2);
+    z-index: 2;
+    padding: 0.1rem 0.45rem;
+    border-radius: 999px;
+    background: rgba(10, 45, 66, 0.68);
+    color: #fff;
+    font-size: 0.72rem;
+    font-weight: 600;
+    line-height: 1.4;
 }
 
 /* ==========================================================================
@@ -2420,4 +5702,281 @@ button[disabled],
     color: var(--on-bright);
     background: var(--accent-500);
     user-select: none;
+}
+
+/* 审核页：修改申请的新旧对比。审核者不必自己打开作品页逐字比对，
+   差异直接铺在列表里；旧值用删除线弱化，新值才是要落库的内容。 */
+.submission-diff {
+    font-size: 0.78rem;
+    line-height: 1.45;
+    table-layout: fixed;
+    width: 100%;
+    max-width: 30rem;
+}
+
+.submission-diff th {
+    width: 4.5rem;
+    padding: 0.05rem 0.4rem 0.05rem 0;
+    font-weight: 600;
+    color: var(--ink-500);
+    white-space: nowrap;
+    vertical-align: top;
+}
+
+.submission-diff td {
+    padding: 0.05rem 0.25rem;
+    vertical-align: top;
+    word-break: break-all;
+}
+
+.submission-diff .diff-old {
+    color: var(--ink-500);
+    text-decoration: line-through;
+    text-decoration-color: var(--ink-400);
+}
+
+.submission-diff .diff-new {
+    color: var(--ok-fg);
+    font-weight: 600;
+}
+
+.submission-diff .diff-arrow {
+    width: 1.2rem;
+    color: var(--ink-400);
+    text-align: center;
+}
+
+/* ==========================================================================
+   账号设置（/settings/profile、/settings/security）
+   从个人空间独立出来的设置页：左侧信息、右侧动作的「账号条目」列表。
+   ========================================================================== */
+
+/* 字段下方的灰字说明（生日 → 星座/年龄，所在地 → 字数限制） */
+.acct-field-hint {
+    margin-top: 0.28rem;
+    font-size: 0.78rem;
+    line-height: 1.4;
+    color: var(--ink-500);
+}
+
+/* 凭据条目列表：条目之间用分隔线，不再各套一张卡（两条凭据共用一个卡片壳） */
+.acct-list {
+    padding-top: 0.35rem;
+}
+
+.acct-item {
+    padding: 0.9rem 0 0.95rem;
+    border-top: 1px solid #eaf2f9;
+}
+
+.acct-item:first-child {
+    border-top: 0;
+    padding-top: 0.35rem;
+}
+
+.acct-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.6rem 0.85rem;
+}
+
+/* 图标块：36px 圆角方块，浅品牌底 + 深品牌描边色 */
+.acct-icon {
+    display: grid;
+    place-items: center;
+    flex: 0 0 auto;
+    width: 2.25rem;
+    height: 2.25rem;
+    border-radius: var(--radius-sm);
+    background: var(--brand-50);
+    color: var(--brand-700);
+}
+
+.acct-icon svg {
+    width: 1.15rem;
+    height: 1.15rem;
+}
+
+.acct-main {
+    flex: 1 1 12rem;
+    min-width: 0;
+}
+
+.acct-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.35rem 0.5rem;
+}
+
+.acct-title {
+    font-size: 0.95rem;
+    font-weight: 700;
+    color: var(--ink-900);
+}
+
+/* 状态徽标：默认灰（未绑定），已绑定点亮成青绿（与「通过」语义同色系） */
+.acct-status {
+    padding: 0.05rem 0.45rem;
+    border-radius: 999px;
+    background: #f0f4f9;
+    color: var(--ink-500);
+    font-size: 0.72rem;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.acct-status-on {
+    background: var(--ok-bg);
+    color: var(--ok-fg);
+}
+
+/* 凭据值：脱敏后的地址 / 号码，用等宽数字避免跳动 */
+.acct-value {
+    margin: 0.12rem 0 0;
+    font-size: 0.94rem;
+    font-weight: 600;
+    color: var(--ink-900);
+    font-variant-numeric: tabular-nums;
+    word-break: break-all;
+}
+
+.acct-value-empty {
+    color: var(--ink-500);
+    font-weight: 500;
+}
+
+.acct-note {
+    margin: 0.1rem 0 0;
+    font-size: 0.78rem;
+    line-height: 1.45;
+    color: var(--ink-500);
+}
+
+.acct-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.45rem;
+    margin-left: auto;
+}
+
+/* 条目动作按钮：与 btn-outline-secondary btn-sm 同级观感，但用链接实现（不提交表单） */
+.acct-btn {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.24rem 0.7rem;
+    border: 1px solid #d3e1ef;
+    border-radius: 999px;
+    background: #fff;
+    color: var(--ink-700);
+    font-size: 0.8rem;
+    font-weight: 600;
+    text-decoration: none;
+    transition: border-color 0.15s var(--ease), color 0.15s var(--ease),
+        background-color 0.15s var(--ease);
+}
+
+.acct-btn:hover,
+.acct-btn:focus {
+    border-color: var(--brand-400);
+    background: var(--brand-50);
+    color: var(--brand-700);
+}
+
+.acct-btn-danger:hover,
+.acct-btn-danger:focus {
+    border-color: #e3a9b8;
+    background: var(--err-bg);
+    color: var(--err-fg);
+}
+
+@media (max-width: 575.98px) {
+    /* 窄屏：动作按钮独占一行并靠左，避免挤在脱敏号码右侧变成两行小字 */
+    .acct-actions {
+        flex: 1 1 100%;
+        margin-left: 0;
+    }
+}
+
+/* 待确认 / 待验证提示条：左侧竖线 + 浅底，跟在条目下方 */
+.acct-notice {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.35rem 0.75rem;
+    margin-top: 0.6rem;
+    padding: 0.45rem 0.7rem;
+    border-left: 3px solid var(--brand-400);
+    border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+    background: #f4fafe;
+    color: var(--ink-700);
+    font-size: 0.8rem;
+}
+
+.acct-notice-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.acct-notice-actions .btn-link {
+    font-size: 0.8rem;
+    font-weight: 600;
+}
+
+/* 展开中的操作面板（换绑 / 解绑）：浅底 + 虚线边框，和只读区区分开 */
+.acct-panel {
+    margin-top: 0.7rem;
+    padding: 0.75rem 0.85rem;
+    border: 1px dashed #cfe0f0;
+    border-radius: var(--radius-md);
+    background: #f7fbfe;
+}
+
+.acct-panel-lead {
+    margin: 0 0 0.55rem;
+    font-size: 0.84rem;
+    color: var(--ink-700);
+}
+
+.acct-panel-hint {
+    margin: 0.5rem 0 0;
+    font-size: 0.78rem;
+    color: var(--ink-500);
+}
+
+/* 危险操作说明：红字小段，明确「解绑会失去什么」 */
+.acct-panel-warn {
+    margin: 0 0 0.6rem;
+    color: var(--err-fg);
+    font-size: 0.82rem;
+    line-height: 1.5;
+}
+
+.acct-panel-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem 0.75rem;
+}
+
+/* 未配置短信网关时直接展示的验证码：等宽 + 字距，便于手抄 */
+.acct-dev-code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 1.15rem;
+    letter-spacing: 0.16em;
+}
+
+.acct-code-input {
+    max-width: 9rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    letter-spacing: 0.12em;
+}
+
+@media (max-width: 575.98px) {
+    .acct-code-input {
+        max-width: none;
+    }
 }

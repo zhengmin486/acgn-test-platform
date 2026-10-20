@@ -1,14 +1,15 @@
 {% extends "base.html" %}
+{% from "_brand.html" import wordmark %}
 {# 邮箱验证与找回密码共用的「链接已发出」提示页。
    kind="verify" 为邮箱验证，kind="reset" 为找回密码，仅文案与提交地址不同。 #}
-{% block title %}{% if is_reset %}重置密码{% else %}验证邮箱{% endif %} - ACGN 内容服务平台{% endblock %}
+{% block title %}{% if is_reset %}重置密码{% else %}验证邮箱{% endif %}{% endblock %}
 {% block content %}
 <div class="row justify-content-center">
     <div class="col-12 col-md-8 col-lg-6">
         <div class="card app-card auth-card mt-4">
             <div class="card-body p-4">
                 <div class="auth-band mb-4">
-                    <span class="brand-mark" aria-hidden="true"></span>
+                    {{ wordmark("brand-lockup-lg") }}
                     <h1 class="h4 mb-1">{% if is_reset %}重置你的密码{% else %}验证你的邮箱{% endif %}</h1>
                     <p class="small mb-0" style="color: rgba(255,255,255,.85);">
                         {% if is_reset %}打开邮件中的链接即可设置新密码{% else %}完成验证后即可登录 ACGN 内容平台{% endif %}

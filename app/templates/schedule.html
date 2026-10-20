@@ -1,44 +1,53 @@
 {% extends "base_content.html" %}
-{% block title %}新番档期 - ACGN 内容平台{% endblock %}
+{% block title %}新番档期{% endblock %}
 
-{% macro work_card(item, weekday_names) %}
-<div class="col">
-    <div class="card schedule-card h-100">
-        {# 封面点击落到站内作品搜索（按标题），不出站 #}
+{# 档期卡与作品卡共用同一套视觉语言（2:3 海报 + 标题 + 元信息），
+   区别只在「时间优先」：播出时间浮在封面右上角，不占正文行宽。
+   旧版是 Bootstrap card + object-fit:contain + 300px 图位：竖版海报塞进全宽图位后
+   两侧露出紫调留白（#f6f4fd），看着像图片没加载完。 #}
+{% macro work_card(item, weekday_names, show_weekday) %}
+<article class="work-card schedule-card">
+    {# 封面点击落到站内作品搜索（按标题），不出站 #}
+    <a class="work-cover-box" href="/contents?q={{ item.title_main|urlencode }}" tabindex="-1" aria-hidden="true">
+        <span class="work-cover">{{ item.title_main[:1] }}</span>
         {% if item.image_url %}
-        <a href="/contents?q={{ item.title_main|urlencode }}">
-            <img src="{{ item.image_url }}" referrerpolicy="no-referrer" loading="lazy" class="card-img-top schedule-poster" alt="{{ item.title_main }}">
-        </a>
-        {% else %}
-        {# 无海报图：渐变占位，保持卡片视觉统一（不下载外部图片） #}
-        <div class="card-img-top schedule-poster schedule-poster-empty" aria-hidden="true"><span>📺</span></div>
+        <img class="work-cover" src="{{ item.image_url }}" referrerpolicy="no-referrer" loading="lazy" alt="{{ item.title_main }}" onerror="this.style.display='none'">
         {% endif %}
-        <div class="card-body">
-            <div class="d-flex flex-wrap align-items-center gap-1 mb-1">
-                {% if item.weekday and item.weekday in weekday_names %}<span class="badge schedule-weekday-badge">{{ weekday_names[item.weekday] }}</span>{% endif %}
-                {% if item.broadcast_time %}<span class="badge schedule-time-badge">{{ item.broadcast_time }}</span>{% endif %}
-            </div>
-            <h5 class="h6 card-title mb-1">{{ item.title_main }}</h5>
-            {% if item.title_cn and item.title_cn != item.title_main %}
-            <p class="mb-0 small text-primary">中文：{{ item.title_cn }}</p>
-            {% endif %}
-            {% if item.title_jp %}
-            <p class="mb-1 small text-muted">日文：{{ item.title_jp }}</p>
-            {% endif %}
-            {% if item.broadcast_note %}
-            <p class="mb-1 small text-muted">{{ item.broadcast_note }}</p>
-            {% endif %}
-            {% if item.platforms %}
-            <p class="mb-1 small">
-                播放：
-                {% for p in item.platforms %}
-                <a href="{{ p.url }}" target="_blank" rel="noopener noreferrer">{{ p.name }}</a>{% if not loop.last %} · {% endif %}
-                {% endfor %}
-            </p>
-            {% endif %}
-        </div>
+        {% if item.broadcast_time %}
+        <span class="schedule-time">{{ item.broadcast_time }}</span>
+        {% endif %}
+    </a>
+    <div class="work-card-body">
+        {% if show_weekday and item.weekday and item.weekday in weekday_names %}
+        <span class="schedule-tags">
+            <span class="badge schedule-weekday-badge">{{ weekday_names[item.weekday] }}</span>
+        </span>
+        {% endif %}
+        <a class="work-card-title schedule-title" href="/contents?q={{ item.title_main|urlencode }}">{{ item.title_main }}</a>
+        {% if item.title_cn and item.title_cn != item.title_main %}
+        <span class="schedule-cn">{{ item.title_cn }}</span>
+        {% endif %}
+        {% if item.title_jp %}
+        <span class="schedule-jp">{{ item.title_jp }}</span>
+        {% endif %}
+        {% if item.work_type %}
+        <span class="schedule-type">{{ item.work_type }}</span>
+        {% endif %}
+        {% if item.work_tags %}
+        <span class="schedule-work-tags">{{ item.work_tags }}</span>
+        {% endif %}
+        {% if item.broadcast_note %}
+        <span class="schedule-note">{{ item.broadcast_note }}</span>
+        {% endif %}
+        {% if item.platforms %}
+        <span class="schedule-platforms">
+            {% for p in item.platforms %}
+            <a href="{{ p.url }}" target="_blank" rel="noopener noreferrer">{{ p.name }}</a>{% if not loop.last %} · {% endif %}
+            {% endfor %}
+        </span>
+        {% endif %}
     </div>
-</div>
+</article>
 {% endmacro %}
 
 {% block content %}
@@ -52,7 +61,7 @@
 </div>
 
 {% if not seasons %}
-<div class="alert alert-info">
+<div class="detail-empty">
     新番档期数据整理中，稍后再来看看；也可以先去 <a href="/contents">全部作品</a> 逛逛。
 </div>
 {% else %}
@@ -69,23 +78,23 @@
     {% endfor %}
 </div>
 
-{# ===== 筛选（保留当前档期） ===== #}
-<form class="row g-2 align-items-end mb-2" method="get">
+{# ===== 筛选（保留当前档期）：与作品页 / 资讯页同款面板 ===== #}
+<form class="filter-panel row g-2 align-items-end mb-3" method="get">
     <input type="hidden" name="season" value="{{ current_season }}">
-    <div class="col-auto">
-        <label class="form-label small mb-0">星期</label>
-        <select name="weekday" class="form-select form-select-sm">
+    <div class="col-5 col-sm-3 col-lg-2">
+        <label class="form-label small mb-0" for="schedule-weekday">星期</label>
+        <select name="weekday" id="schedule-weekday" class="form-select form-select-sm">
             <option value="">全部</option>
             {% for wd, name in weekday_names.items() %}
             <option value="{{ wd }}" {% if weekday == wd %}selected{% endif %}>{{ name }}</option>
             {% endfor %}
         </select>
     </div>
-    <div class="col-6 col-md-auto">
-        <label class="form-label small mb-0">关键词</label>
-        <input type="text" name="q" value="{{ q }}" class="form-control form-control-sm" placeholder="标题 / 播出说明">
+    <div class="col-12 col-sm">
+        <label class="form-label small mb-0" for="schedule-q">关键词</label>
+        <input type="text" name="q" id="schedule-q" value="{{ q }}" class="form-control form-control-sm" placeholder="标题 / 播出说明">
     </div>
-    <div class="col-6 col-md-auto">
+    <div class="col-12 col-sm-auto">
         <button class="btn btn-primary btn-sm" type="submit">筛选</button>
         <a class="btn btn-outline-secondary btn-sm" href="/schedule">重置</a>
     </div>
@@ -97,38 +106,40 @@
 </p>
 
 {% if not works %}
-<div class="alert alert-warning">该档期暂无匹配的作品记录（可能尚未同步，或筛选条件过严）。</div>
+<div class="detail-empty">该档期暂无匹配的作品记录（可能尚未同步，或筛选条件过严）。</div>
 {% elif grouped_mode %}
-{# ===== 默认视图：按播出星期分组 ===== #}
+{# ===== 默认视图：按播出星期分组的周更时间表 ===== #}
 {% for group in weekday_groups %}
-<section class="mb-4">
-    <h2 class="h6 schedule-day-title mb-2">
-        {{ group.name }}
-        <span class="text-muted small fw-normal">{{ group.works|length }} 部</span>
+<section class="schedule-day">
+    <header class="schedule-day-head">
+        <h2 class="schedule-day-name">{{ group.name }}</h2>
+        <span class="schedule-day-count">{{ group.works|length }} 部</span>
         {% if group.weekday is none %}
-        <span class="text-muted small fw-normal">（源站未标注播出星期）</span>
+        <span class="schedule-day-note">（源站未标注播出星期）</span>
         {% endif %}
-    </h2>
-    <div class="row row-cols-1 row-cols-md-2 row-cols-xl-3 g-3">
-        {% for item in group.works %}{{ work_card(item, weekday_names) }}{% endfor %}
+        <span class="schedule-day-line" aria-hidden="true"></span>
+    </header>
+    <div class="schedule-grid">
+        {% for item in group.works %}{{ work_card(item, weekday_names, false) }}{% endfor %}
     </div>
 </section>
 {% endfor %}
 {% else %}
 {# ===== 筛选视图：分页结果列表 ===== #}
-<div class="row row-cols-1 row-cols-md-2 row-cols-xl-3 g-3">
-    {% for item in works %}{{ work_card(item, weekday_names) }}{% endfor %}
+<div class="schedule-grid">
+    {% for item in works %}{{ work_card(item, weekday_names, true) }}{% endfor %}
 </div>
 
 {% if total_pages > 1 %}
+{% set page_query = '/schedule?season=' ~ (current_season|urlencode) ~ '&weekday=' ~ (weekday if weekday else '') ~ '&q=' ~ (q|urlencode) ~ '&page=' %}
 <nav class="mt-3">
     <ul class="pagination pagination-sm mb-0">
         {% if page > 1 %}
-        <li class="page-item"><a class="page-link" href="/schedule?season={{ current_season }}&weekday={{ weekday if weekday else '' }}&q={{ q }}&page={{ page - 1 }}">上一页</a></li>
+        <li class="page-item"><a class="page-link" href="{{ page_query }}{{ page - 1 }}">上一页</a></li>
         {% endif %}
         <li class="page-item disabled"><span class="page-link">第 {{ page }} / {{ total_pages }} 页</span></li>
         {% if page < total_pages %}
-        <li class="page-item"><a class="page-link" href="/schedule?season={{ current_season }}&weekday={{ weekday if weekday else '' }}&q={{ q }}&page={{ page + 1 }}">下一页</a></li>
+        <li class="page-item"><a class="page-link" href="{{ page_query }}{{ page + 1 }}">下一页</a></li>
         {% endif %}
     </ul>
 </nav>
@@ -136,8 +147,10 @@
 {% endif %}
 {% endif %}
 
-{# 管理性功能不在内容导航中；仅在页脚以“管理入口”形式提供跨区跳转 #}
+{# 管理性功能不在内容导航中；仅在页脚以“管理入口”形式提供跨区跳转，且只对 staff 显示 #}
+{% if current_user and current_user.is_staff %}
 <p class="text-muted small mt-4 mb-0">
     管理入口：<a href="/manage/sync/runs">数据同步历史</a> · <a href="/testcases">测试管理平台</a>
 </p>
+{% endif %}
 {% endblock %}

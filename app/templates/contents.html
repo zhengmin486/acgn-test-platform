@@ -1,125 +1,361 @@
 {% extends "base_content.html" %}
 {% from "_pager.html" import pager %}
-{# 全部作品页：关键词/类型筛选 + 卡片网格 + 分页。
-   首页（门户）只做发现；全量浏览与搜索统一落到本页。 #}
-{% block title %}全部作品 - ACGN 内容平台{% endblock %}
+{% from "_brand.html" import wordmark %}
+{# 全部作品页：hero 品牌带 + 吸顶类型 Tab（图标/四色）+ 关键词 + 分组筛选
+   （题材/形式/年份/排序）+ 三种视图（B站卡片[默认]/网格/列表）+ 分页。
+   2026-10-20 改版①：类型从搜索栏里的下拉框提为页头 Tab（一级维度不该藏在
+   二级控件里），标签按语义分三组（题材 / 形式载体 / 类型专属），新增排序与已选条件条。
+   2026-10-20 改版②（视觉）：默认视图抄哔哩哔哩——封面 + 标题 + 元数据行，
+   元数据行随排序自适应（评分/收藏/年份前置）；hero 用真实主视觉模糊底；
+   类型 Tab 与视图切换吸顶。全部交互纯 GET 链接，无 JS；新参数
+   （media/source/sort/view）未选时不写入 URL。 #}
+{% block title %}全部作品{% endblock %}
+
+{# 分类图标：与首页同一套内联 SVG（.svg-ic 描边助手），跨平台渲染一致 #}
+{% set type_icons = {
+    "anime": "<svg class='svg-ic' viewBox='0 0 24 24' aria-hidden='true'><rect x='3' y='5' width='18' height='14' rx='2.5'/><line x1='8' y1='5' x2='8' y2='19'/><line x1='16' y1='5' x2='16' y2='19'/><line x1='3' y1='12' x2='21' y2='12'/></svg>",
+    "comic": "<svg class='svg-ic' viewBox='0 0 24 24' aria-hidden='true'><path d='M4 4.5h5.5A2.5 2.5 0 0 1 12 7v13a2.5 2.5 0 0 0-2.5-2.5H4z'/><path d='M20 4.5h-5.5A2.5 2.5 0 0 0 12 7v13a2.5 2.5 0 0 1 2.5-2.5H20z'/></svg>",
+    "game": "<svg class='svg-ic' viewBox='0 0 24 24' aria-hidden='true'><rect x='2' y='7' width='20' height='11' rx='5.5'/><line x1='7' y1='10.3' x2='7' y2='14.7'/><line x1='4.7' y1='12.5' x2='9.3' y2='12.5'/><circle cx='16.4' cy='10.9' r='1.15'/><circle cx='18.7' cy='14' r='1.15'/></svg>",
+    "novel": "<svg class='svg-ic' viewBox='0 0 24 24' aria-hidden='true'><path d='M12 6.5C10.5 5 8.5 4.5 4 4.5v13c4.5 0 6.5.5 8 2 1.5-1.5 3.5-2 8-2v-13c-4.5 0-6.5.5-8 2z'/><line x1='12' y1='6.5' x2='12' y2='19.5'/></svg>"
+} %}
+{% set fallback_icon = "<svg class='svg-ic' viewBox='0 0 24 24' aria-hidden='true'><path d='M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z'/></svg>" %}
 
 {% macro stars(rating) %}
 {% set star_count = (rating / 2) | int %}
 <span class="detail-stars" aria-hidden="true">{% for i in range(1, 6) %}<span class="{{ 'star-on' if i <= star_count else 'star-off' }}">★</span>{% endfor %}</span>
 {% endmacro %}
 
+{# 大数万级格式化（B站口径：128.3万） #}
+{% macro fmt_count(n) %}{% if n >= 10000 %}{{ '%.1f' % (n / 10000) }}万{% else %}{{ n }}{% endif %}{% endmacro %}
+
 {% block content %}
-<div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-3">
-    <div>
-        <h1 class="h3 mb-1 section-heading">全部作品</h1>
-        <p class="text-muted small mb-0">库内全部 ACGN 作品，支持按类型筛选与关键词搜索。</p>
+{# ===== Hero 品牌带：真实主视觉模糊底 + 品牌罩层 + 字标 + 库统计。
+   背景图走本地素材（static/img/contents/contents-hero-bg.jpg），换图即季度轮换；
+   文案保持既有（h1 与描述句不可改，测试与品牌口径依赖）。 #}
+<section class="contents-hero">
+    <div class="contents-hero-bg" aria-hidden="true"></div>
+    <div class="contents-hero-inner">
+        <div class="contents-hero-copy">
+            {{ wordmark("brand-lockup-lg") }}
+            <h1 class="contents-hero-title">全部作品</h1>
+            <p class="contents-hero-sub">库内全部 ACGN 作品，支持按类型、题材、形式与年份筛选。</p>
+            <dl class="contents-hero-stats">
+                <div class="contents-hero-stat">
+                    <dt>收录作品</dt>
+                    <dd>{{ hero_total }}</dd>
+                </div>
+                {% for code, label in type_labels.items() %}
+                <div class="contents-hero-stat">
+                    <dt>{{ label }}</dt>
+                    <dd>{{ type_counts.get(code, 0) }}</dd>
+                </div>
+                {% endfor %}
+            </dl>
+            <div class="contents-hero-actions">
+                {% if current_user %}
+                <a class="btn btn-light btn-sm" href="/submit">申请新增作品</a>
+                {% else %}
+                <a class="btn btn-light btn-sm" href="/login?next=/submit">登录后申请作品</a>
+                {% endif %}
+                {# 作者/公司不是独立内容域：花名册从作品浏览页进入，详情页关系 chips 也可直达 #}
+                <a class="btn btn-outline-light btn-sm" href="/creators">作者 / 公司花名册</a>
+                <a class="btn btn-outline-light btn-sm" href="/">&larr; 返回首页</a>
+            </div>
+        </div>
     </div>
-    <div class="d-flex flex-wrap align-items-center gap-2">
-        {% if current_user %}
-        <a class="btn btn-primary btn-sm" href="/submit">申请新增词条</a>
-        {% else %}
-        <a class="btn btn-outline-primary btn-sm" href="/login?next=/submit">登录后申请词条</a>
-        {% endif %}
-        {# 作者/公司不是独立内容域：花名册从作品浏览页进入，详情页关系 chips 也可直达 #}
-        <a class="btn btn-outline-secondary btn-sm" href="/creators">作者 / 公司花名册</a>
-        <a class="btn btn-outline-secondary btn-sm" href="/">&larr; 返回首页</a>
+</section>
+
+{# ===== 吸顶控制条：类型 Tab（一级维度，带真实作品数）+ 视图切换。
+   翻 500 页时类型和视图永远可达；纯 GET 链接，选中态靠 content_type 判断。 #}
+<div class="works-sticky">
+    <nav class="type-tabs" aria-label="作品类型">
+        {% for tab in type_tabs %}
+        <a class="type-tab{% if tab.selected %} active{% endif %}" data-type="{{ tab.code or 'all' }}" href="{{ tab.url }}"{% if tab.selected %} aria-current="page"{% endif %}>
+            <span class="type-tab-icon" aria-hidden="true">{{ (type_icons.get(tab.code) or fallback_icon) | safe }}</span>
+            {{ tab.label }}<span class="type-tab-count">{{ tab.count }}</span>
+        </a>
+        {% endfor %}
+    </nav>
+    <div class="view-switch" role="group" aria-label="视图切换">
+        {% for option in view_options %}
+        <a class="view-switch-btn{% if option.selected %} active{% endif %}" href="{{ option.url }}">{{ option.label }}</a>
+        {% endfor %}
     </div>
 </div>
 
-{# ===== 筛选栏：类型 + 关键词（GET，无 JS） ===== #}
-<form class="row g-2 align-items-end mb-3" method="get" action="/contents">
-    <div class="col-auto">
-        <label class="form-label small mb-0" for="works-type">类型</label>
-        <select name="type" id="works-type" class="form-select form-select-sm">
-            <option value="">全部</option>
-            {% for code, label in type_labels.items() %}
-            <option value="{{ code }}" {% if content_type == code %}selected{% endif %}>{{ label }}</option>
-            {% endfor %}
-        </select>
-    </div>
-    <div class="col">
-        <label class="form-label small mb-0" for="works-q">关键词</label>
-        <input type="text" name="q" id="works-q" value="{{ q }}" class="form-control form-control-sm" placeholder="搜索标题 / 简介">
-    </div>
-    <div class="col">
-        <label class="form-label small mb-0" for="works-creator">作者 / 公司</label>
-        <input type="text" name="creator" id="works-creator" value="{{ creator or '' }}" class="form-control form-control-sm" placeholder="按作者 / 公司筛选">
-    </div>
-    <div class="col-auto">
-        <button class="btn btn-primary btn-sm" type="submit">筛选</button>
-        <a class="btn btn-outline-secondary btn-sm" href="/contents">重置</a>
-    </div>
+{# ===== 搜索框：只管关键词（类型已独立为 Tab，作者/公司走花名册与详情页入口） #}
+<form class="works-search mb-3" method="get" action="/contents">
+    <label class="visually-hidden" for="works-q">关键词</label>
+    <input type="text" name="q" id="works-q" value="{{ q }}" class="form-control" placeholder="搜索标题 / 原名 / 别名 / 公司 / 声优 / 简介">
+    <button class="btn btn-primary" type="submit">搜索</button>
+    {# 已选条件随搜索一起提交，避免「改了关键词就丢掉筛选」 #}
+    {% if content_type %}<input type="hidden" name="type" value="{{ content_type }}">{% endif %}
+    {% if tags %}<input type="hidden" name="tags" value="{{ tags|join(',') }}">{% endif %}
+    {% if creator %}<input type="hidden" name="creator" value="{{ creator }}">{% endif %}
+    {% if year %}<input type="hidden" name="year" value="{{ year }}">{% endif %}
+    {% if media %}<input type="hidden" name="media" value="{{ media }}">{% endif %}
+    {% if source_material %}<input type="hidden" name="source" value="{{ source_material }}">{% endif %}
+    {% if sort %}<input type="hidden" name="sort" value="{{ sort }}">{% endif %}
+    {# view 为 None=卡片默认：不写隐藏域，改关键词后回到默认视图 #}
+    {% if view %}<input type="hidden" name="view" value="{{ view }}">{% endif %}
 </form>
 
-{% if search_mode %}
-<p class="text-muted small">
-    搜索结果：{% if keyword %}关键词“{{ keyword }}”{% endif %}{% if content_type %}{% if keyword %} · {% endif %}类型：{{ type_labels.get(content_type, content_type) }}{% endif %}{% if tag %}{% if keyword or content_type %} · {% endif %}标签：{{ tag }}{% endif %}{% if creator %}{% if keyword or content_type or tag %} · {% endif %}作者/公司：{{ creator }}{% endif %} · 共 {{ total }} 条 · 第 {{ page }}/{{ total_pages }} 页
-</p>
-{% else %}
-<p class="text-muted small">共 {{ total }} 部作品 · 第 {{ page }}/{{ total_pages }} 页</p>
-{% endif %}
-
-{# ===== 标签筛选：标签随 Bangumi 导入（按标注数取前 5），可与类型/关键词叠加 ===== #}
-{% if tag_options or creator %}
-<div class="tag-filter mb-3">
-    {% for name, count in tag_options %}
-    <a class="tag-chip{% if tag == name %} active{% endif %}"
-       href="/contents?q={{ q|urlencode }}&amp;type={{ (content_type or '')|urlencode }}&amp;tag={{ name|urlencode }}&amp;creator={{ (creator or '')|urlencode }}">
-        {{ name }}<span class="tag-count">{{ count }}</span>
-    </a>
+{# ===== 已选条件条：每个条件都能单独摘掉，末尾清除全部。
+   旧版只有一行灰色说明文字，筛多了根本看不出自己选了什么。 #}
+{% if active_filters %}
+<div class="active-filters mb-3">
+    <span class="filter-cat-label">已选</span>
+    {% for item in active_filters %}
+    <a class="tag-chip tag-chip-active-filter" href="{{ item.url }}">{{ item.label }}<span class="tag-remove" aria-hidden="true">✕</span></a>
     {% endfor %}
-    {% if tag %}
-    <a class="tag-chip tag-chip-clear"
-       href="/contents?q={{ q|urlencode }}&amp;type={{ (content_type or '')|urlencode }}&amp;creator={{ (creator or '')|urlencode }}">清除标签</a>
-    {% endif %}
-    {% if creator %}
-    <a class="tag-chip tag-chip-clear"
-       href="/contents?q={{ q|urlencode }}&amp;type={{ (content_type or '')|urlencode }}&amp;tag={{ (tag or '')|urlencode }}">清除作者/公司</a>
-    {% endif %}
+    <a class="tag-chip tag-chip-clear" href="{{ clear_all_url }}">清除全部</a>
 </div>
 {% endif %}
+
+{# ===== 筛选面板：窄屏折叠（checkbox hack，无 JS），桌面常驻。
+   分组顺序：题材 → 类型专属 → 形式 → 年份 → 排序。 #}
+<input type="checkbox" id="filter-drawer" class="filter-drawer-input" aria-hidden="true">
+<label class="filter-drawer-toggle" for="filter-drawer">筛选条件{% if active_filters %}（已选 {{ active_filters|length }} 项）{% endif %}</label>
+<div class="filter-panel filter-panel--works mb-3">
+
+    {# 题材：默认只预览前 N 个，超出给「展开全部标签」入口（纯 GET，无 JS） #}
+    {% if tag_options %}
+    <div class="filter-row">
+        <span class="filter-cat-label">题材</span>
+        <div class="tag-filter">
+            {% for option in tag_options %}
+            <a class="tag-chip{% if option.selected %} active{% endif %}" href="{{ option.url }}">
+                {{ option.name }}<span class="tag-count">{{ option.count }}</span>
+            </a>
+            {% endfor %}
+            {% if tags %}
+            <a class="tag-chip tag-chip-clear" href="{{ clear_tags_url }}">清除标签</a>
+            {% endif %}
+            {% if not show_all_tags and has_more_tags %}
+            <a class="tag-chip tag-chip-more" href="{{ expand_tags_url }}">展开全部标签 ›</a>
+            {% endif %}
+            {% if show_all_tags %}
+            <a class="tag-chip tag-chip-more" href="{{ collapse_tags_url }}">收起 ‹</a>
+            {% endif %}
+        </div>
+    </div>
+    {% endif %}
+
+    {# 类型专属：游戏类型词 / 书籍形态词，只在选中类型时出现（给动画看 RPG 没意义） #}
+    {% if type_specific_options %}
+    <div class="filter-row">
+        <span class="filter-cat-label">{% if content_type == 'game' %}游戏类型{% elif content_type == 'novel' %}书籍形态{% else %}细分{% endif %}</span>
+        <div class="filter-chips">
+            {% for option in type_specific_options %}
+            <a class="tag-chip{% if option.selected %} active{% endif %}" href="{{ option.url }}">
+                {{ option.name }}<span class="tag-count">{{ option.count }}</span>
+            </a>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+
+    {# 形式：放送形态（TV / 剧场版…）+ 原作载体（漫画改 / 小说改…），
+       数据来自 contents.media / contents.source_material 两列，与题材标签解耦。 #}
+    {% if media_options or source_options %}
+    <div class="filter-row">
+        <span class="filter-cat-label">形式</span>
+        <div class="filter-chips">
+            {% for option in media_options %}
+            <a class="tag-chip{% if option.selected %} active{% endif %}" href="{{ option.url }}">
+                {{ option.name }}<span class="tag-count">{{ option.count }}</span>
+            </a>
+            {% endfor %}
+            {% for option in source_options %}
+            <a class="tag-chip{% if option.selected %} active{% endif %}" href="{{ option.url }}">
+                {{ option.name }}<span class="tag-count">{{ option.count }}</span>
+            </a>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+
+    {# 年份：横排可滚动（新→旧）；点已在选的年份=清除 #}
+    {% if year_options %}
+    <div class="filter-row year-filter">
+        <span class="filter-cat-label">年份</span>
+        <div class="year-chips">
+            {% if year %}
+            <a class="tag-chip tag-chip-clear" href="{{ clear_year_url }}">全部</a>
+            {% endif %}
+            {% for option in year_options %}
+            <a class="tag-chip{% if option.selected %} active{% endif %}" href="{{ option.url }}">
+                {{ option.year }}<span class="tag-count">{{ option.count }}</span>
+            </a>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+
+    {# 排序：三档互斥（评分 / 收藏 / 最新），点已选的=回到默认序 #}
+    <div class="filter-row">
+        <span class="filter-cat-label">排序</span>
+        <div class="sort-chips">
+            {% for option in sort_options %}
+            <a class="sort-chip{% if option.selected %} active{% endif %}" href="{{ option.url }}">{{ option.label }}</a>
+            {% endfor %}
+        </div>
+    </div>
+</div>
+
+{# ===== 结果工具条：条数 + 筛选摘要（视图切换已上吸顶条） ===== #}
+<div class="works-toolbar mb-3">
+    <div class="text-muted small">
+        {% if search_mode %}
+        搜索结果：{% if keyword %}关键词“{{ keyword }}”{% endif %}{% if content_type %}{% if keyword %} · {% endif %}类型：{{ type_labels.get(content_type, content_type) }}{% endif %}{% if tags %}{% if keyword or content_type %} · {% endif %}标签：{{ tags|join('、') }}{% endif %}{% if media %}{% if keyword or content_type or tags %} · {% endif %}形式：{{ media }}{% endif %}{% if source_material %}{% if keyword or content_type or tags or media %} · {% endif %}{{ source_material }}{% endif %}{% if creator %}{% if keyword or content_type or tags or media or source_material %} · {% endif %}作者/公司：{{ creator }}{% endif %}{% if year %}{% if keyword or content_type or tags or media or source_material or creator %} · {% endif %}年份：{{ year }}{% endif %}{% if sort %}{% if keyword or content_type or tags or media or source_material or creator or year %} · {% endif %}按{{ sort_label }}{% endif %} · 共 {{ total }} 条 · 第 {{ page }}/{{ total_pages }} 页
+        {% else %}
+        共 {{ total }} 部作品 · 第 {{ page }}/{{ total_pages }} 页
+        {% endif %}
+    </div>
+</div>
 
 {% if not contents %}
-<div class="detail-empty">
-    {% if search_mode %}
-    没有找到匹配的内容。试试更短的关键词，或<a href="/contents">清除筛选</a>查看全部作品。
-    {% else %}
-    暂无内容数据。
-    {% endif %}
+<div class="detail-empty detail-empty--illustration">
+    <img class="contents-empty-img" src="/static/img/contents/contents-empty.png" alt="" width="240" height="179" loading="lazy">
+    <div>
+        {% if search_mode %}
+        没有找到匹配的内容。试试更短的关键词，或<a href="/contents">清除筛选</a>查看全部作品。
+        {% if active_filters|length > 1 %}
+        <div class="mt-2">
+            {% for item in active_filters[:3] %}
+            <a class="tag-chip tag-chip-more" href="{{ item.url }}">去掉「{{ item.label }}」</a>
+            {% endfor %}
+        </div>
+        {% endif %}
+        {% else %}
+        暂无内容数据。
+        {% endif %}
+    </div>
 </div>
 {% else %}
-{# ===== 作品卡片网格：封面占位（渐变+首字）+ 标题/类型/评分/摘要 =====
-   id="works-list" 是翻页锚点落点（配合 _pager.html 的 frag 参数），滚到网格顶部而非页面顶部。 #}
-<div class="row g-3" id="works-list">
+{% if active_view == 'list' %}
+{# ===== 列表视图：行式高密度，适合大库里扫片（1.2 万部翻网格太慢） ===== #}
+<div class="works-list" id="works-list">
     {% for item in contents %}
-    <div class="col-12 col-sm-6 col-lg-4">
-        <a class="work-card" href="/contents/{{ item.id }}">
-            <span class="work-cover-box">
-                <span class="work-cover" aria-hidden="true">{{ item.title[:1] }}</span>
-                {% if item.image_url %}
-                <img class="work-cover" src="{{ thumb_src(item.image_url) }}" alt="{{ item.title }}封面" loading="lazy" onerror="this.style.display='none'">
-                {% endif %}
+    <a class="work-row" href="/contents/{{ item.id }}">
+        <span class="work-row-cover">
+            <span class="work-cover" aria-hidden="true">{{ item.title[:1] }}</span>
+            {% if item.image_url %}
+            <img class="work-cover" src="{{ thumb_src(item.image_url) }}" alt="{{ item.title }}封面" loading="lazy" onerror="this.style.display='none'">
+            {% endif %}
+        </span>
+        <span class="work-row-main">
+            <span class="work-row-title">{{ item.title }}</span>
+            <span class="work-row-summary text-secondary">{{ item.summary[:70] }}{% if item.summary|length > 70 %}…{% endif %}</span>
+        </span>
+        <span class="work-row-meta">
+            <span class="badge detail-type-badge-sm">{{ type_labels.get(item.type, item.type) }}</span>
+            {% if item.year %}<span class="work-row-year">{{ item.year }}</span>{% endif %}
+            {% if item.media %}<span class="work-row-media">{{ item.media }}</span>{% endif %}
+            {% if item.rating > 0 %}
+            <span class="work-row-rating">{{ stars(item.rating) }}<span>{{ '%.1f' % item.rating }}</span></span>
+            {% else %}
+            <span class="text-muted small">暂无评分</span>
+            {% endif %}
+            {% set row_tags = (tag_map.get(item.id) or [])[:3] %}
+            {% if row_tags %}
+            <span class="work-card-tags">
+                {% for name in row_tags %}<span class="work-card-tag">{{ name }}</span>{% endfor %}
             </span>
-            <span class="work-card-body">
-                <span class="d-flex justify-content-between align-items-center gap-2">
-                    <span class="fw-semibold text-truncate">{{ item.title }}</span>
-                    <span class="badge detail-type-badge-sm">{{ type_labels.get(item.type, item.type) }}</span>
-                </span>
-                <span class="d-flex align-items-center gap-2 mt-1">
-                    {{ stars(item.rating) }}
-                    <span class="small text-muted">{{ '%.1f' % item.rating }}</span>
-                </span>
-                <span class="small text-secondary mt-1 work-card-summary">{{ item.summary[:60] }}{% if item.summary|length > 60 %}…{% endif %}</span>
-            </span>
-        </a>
-    </div>
+            {% endif %}
+        </span>
+    </a>
     {% endfor %}
 </div>
+{% elif active_view == 'grid' %}
+{# ===== 网格视图（信息模式）：竖版海报卡 + 标题/评分/题材/摘要，
+   给有目的查找用；纯浏览走默认的 B站卡片视图。 #}
+<div class="works-grid" id="works-list">
+    {% for item in contents %}
+    <a class="work-card" href="/contents/{{ item.id }}">
+        <span class="work-cover-box">
+            <span class="work-cover" aria-hidden="true">{{ item.title[:1] }}</span>
+            {% if item.image_url %}
+            <img class="work-cover" src="{{ thumb_src(item.image_url) }}" alt="{{ item.title }}封面" loading="lazy" onerror="this.style.display='none'">
+            {% endif %}
+            {% if item.year %}<span class="work-card-year">{{ item.year }}</span>{% endif %}
+        </span>
+        <span class="work-card-body">
+            <span class="work-card-title">{{ item.title }}</span>
+            <span class="work-card-rating">
+                <span class="badge detail-type-badge-sm">{{ type_labels.get(item.type, item.type) }}</span>
+                {% if item.book_kind == 'literature' %}
+                <span class="badge detail-kind-badge" title="日本普通小说：与文库出身的轻小说同区，但不属于轻小说">文学</span>
+                {% endif %}
+            {% if item.rating > 0 %}
+            {{ stars(item.rating) }}
+            <span>{{ '%.1f' % item.rating }}</span>
+            {% else %}
+            <span class="text-muted small">暂无评分</span>
+            {% endif %}
+            </span>
+            {# 题材 chip：不点进详情也能看出这片讲什么（至多 2 个，多了刷屏） #}
+            {% set card_tags = (tag_map.get(item.id) or [])[:2] %}
+            {% if card_tags %}
+            <span class="work-card-tags">
+                {% for name in card_tags %}<span class="work-card-tag">{{ name }}</span>{% endfor %}
+            </span>
+            {% endif %}
+            <span class="text-secondary work-card-summary">{{ item.summary[:60] }}{% if item.summary|length > 60 %}…{% endif %}</span>
+        </span>
+    </a>
+    {% endfor %}
+</div>
+{% else %}
+{# ===== B站式卡片视图（默认）：封面 + 标题 + 元数据行。
+   元数据行随排序自适应——点了排序每张卡都看得出变化：
+   rating→★ 前置加粗 / favorites→♥ 前置 / newest→年份前置；无排序回退默认序。
+   列宽与网格同源（auto-fill 动态列），卡片更轻：无卡身、无摘要，一屏作品数约翻倍。 #}
+<div class="works-grid works-grid--bili" id="works-list">
+    {% for item in contents %}
+    <a class="bili-card" href="/contents/{{ item.id }}">
+        <span class="bili-cover work-cover-box">
+            <span class="work-cover" aria-hidden="true">{{ item.title[:1] }}</span>
+            {% if item.image_url %}
+            <img class="work-cover" src="{{ thumb_src(item.image_url) }}" alt="{{ item.title }}封面" loading="lazy" onerror="this.style.display='none'">
+            {% endif %}
+            {# 封面左上徽标列：四色类型签 + 「文学」细分角标（book_kind=literature 时，
+               与网格视图同口径——默认视图也不能丢了这个区分） #}
+            <span class="bili-badges">
+                <span class="bili-type" data-type="{{ item.type }}">{{ type_labels.get(item.type, item.type) }}</span>
+                {% if item.book_kind == 'literature' %}
+                <span class="bili-kind detail-kind-badge" title="日本普通小说：与文库出身的轻小说同区，但不属于轻小说">文学</span>
+                {% endif %}
+            </span>
+            {# 当年新作角标：年份来自作品信息，不依赖排序 #}
+            {% if item.year and item.year >= current_year %}<span class="bili-new" title="{{ item.year }} 年作品">新</span>{% endif %}
+        </span>
+        <span class="bili-body">
+            <span class="bili-title">{{ item.title }}</span>
+            <span class="bili-meta">
+                {% if sort == 'favorites' %}
+                <span class="bili-fav bili-strong">♥ {{ fmt_count(favorite_counts.get(item.id, 0)) }}</span>
+                {% if item.rating > 0 %}<span class="bili-rating">★ {{ '%.1f' % item.rating }}</span>{% endif %}
+                {% if item.year %}<span class="bili-year">{{ item.year }}</span>{% endif %}
+                {% elif sort == 'newest' %}
+                {% if item.year %}<span class="bili-year bili-strong">{{ item.year }}</span>{% endif %}
+                {% if item.rating > 0 %}<span class="bili-rating">★ {{ '%.1f' % item.rating }}</span>{% endif %}
+                <span class="bili-fav">♥ {{ fmt_count(favorite_counts.get(item.id, 0)) }}</span>
+                {% else %}
+                {% if item.rating > 0 %}<span class="bili-rating bili-strong">★ {{ '%.1f' % item.rating }}</span>{% endif %}
+                <span class="bili-fav">♥ {{ fmt_count(favorite_counts.get(item.id, 0)) }}</span>
+                {% if item.year %}<span class="bili-year">{{ item.year }}</span>{% endif %}
+                {% endif %}
+            </span>
+        </span>
+    </a>
+    {% endfor %}
+</div>
+{% endif %}
 
 {# 分页链接前缀：带上全部当前筛选条件，翻页不丢状态。
-   creator 为空时不拼该参数，保持既有地址形状不变（测试按此断言）。 #}
-{% set pager_prefix = '/contents?q=' ~ q|urlencode ~ '&type=' ~ (content_type or '')|urlencode ~ '&tag=' ~ (tag or '')|urlencode ~ ('&creator=' ~ (creator or '')|urlencode if creator else '') ~ '&' %}
+   creator/year/media/source/sort 为空时不拼该参数；view 仅网格/列表时写。 #}
+{% set pager_prefix = '/contents?q=' ~ q|urlencode ~ '&type=' ~ (content_type or '')|urlencode ~ '&tags=' ~ (tags|join(','))|urlencode ~ ('&creator=' ~ (creator or '')|urlencode if creator else '') ~ ('&year=' ~ (year or '')|urlencode if year else '') ~ ('&media=' ~ (media or '')|urlencode if media else '') ~ ('&source=' ~ (source_material or '')|urlencode if source_material else '') ~ ('&sort=' ~ (sort or '')|urlencode if sort else '') ~ ('&view=' ~ view if view else '') ~ '&' %}
 
 {% if total_pages > 1 %}
 <div class="mt-3">

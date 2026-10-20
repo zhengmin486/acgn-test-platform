@@ -1,0 +1,14 @@
+{# 账号设置二级导航（/settings/profile、/settings/security）。
+   两个分区就是「资料」与「安全」：前者是可改的个人信息，后者是登录凭据的绑定关系。
+   沿用个人空间的分区 Tab 样式（.space-tabs），保持内容平台内导航观感一致。 #}
+{% set account_path = request.url.path %}
+<ul class="nav space-tabs mb-3">
+    <li class="nav-item">
+        <a class="nav-link space-tab{% if active_tab == 'profile' %} active{% endif %}"
+           href="/settings/profile">个人资料</a>
+    </li>
+    <li class="nav-item">
+        <a class="nav-link space-tab{% if active_tab == 'security' %} active{% endif %}"
+           href="/settings/security">账号与安全</a>
+    </li>
+</ul>

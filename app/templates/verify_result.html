@@ -1,12 +1,13 @@
 {% extends "base.html" %}
-{% block title %}{% if success %}邮箱验证成功{% else %}邮箱验证失败{% endif %} - ACGN 内容服务平台{% endblock %}
+{% from "_brand.html" import wordmark %}
+{% block title %}{% if success %}邮箱验证成功{% else %}邮箱验证失败{% endif %}{% endblock %}
 {% block content %}
 <div class="row justify-content-center">
     <div class="col-12 col-md-8 col-lg-6">
         <div class="card app-card auth-card mt-4">
             <div class="card-body p-4">
                 <div class="auth-band mb-4">
-                    <span class="brand-mark" aria-hidden="true"></span>
+                    {{ wordmark("brand-lockup-lg") }}
                     <h1 class="h4 mb-1">{% if success %}邮箱验证成功{% else %}邮箱验证失败{% endif %}</h1>
                     <p class="small mb-0" style="color: rgba(255,255,255,.85);">
                         {% if success %}现在可以使用账号登录了{% else %}链接无效或已过期{% endif %}

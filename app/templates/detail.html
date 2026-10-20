@@ -1,5 +1,5 @@
 {% extends "base_content.html" %}
-{% block title %}{{ content.title }} - ACGN 内容平台{% endblock %}
+{% block title %}{{ content.title }}{% endblock %}
 {% block content %}
 {% set star_count = (content.rating / 2) | int %}
 
@@ -19,182 +19,278 @@
 <div class="alert alert-warning py-2 mb-3">标注无效，请重新选择。</div>
 {% endif %}
 
-<div class="card detail-hero">
-    <div class="card-body p-4">
-        {# 返回：文案是「返回内容列表」，无 JS 时 href=/contents 兜底；
-           有点击脚本时（同源有来路）改为 history.back()，从而带回原筛选/页码/滚动位置。
-           data-back-nav 由 base.html 的脚本统一接管，不影响无 JS 场景。 #}
-        <p class="small mb-3"><a href="/contents" data-back-nav>&larr; 返回内容列表</a></p>
+{# 首屏（判断区）：封面 + 标题 / 评分 / 常用操作 / 简介。
+   手机优先保证封面、标题、评分、收藏四件事同屏；标题字号走 --detail-title-size 令牌
+   （手机 20px 起、桌面放大），长标题自然换行不截断、不挤掉操作区。
+   返回：文案是「返回内容列表」，无 JS 时 href=/contents 兜底；
+   有点击脚本时（同源有来路）改为 history.back()，从而带回原筛选/页码/滚动位置。 #}
+<section class="detail-hero card border-0">
+    <div class="card-body p-3 p-md-4">
+        <p class="detail-back small mb-3"><a href="/contents" data-back-nav>&larr; 返回内容列表</a></p>
 
-        {# 条目头图：占位层（品牌渐变 + 标题首字）常驻，有封面时图片层叠在上；
-           图片走 /media/full/ 压缩端点（≤1200px / ≤400KB），加载失败即隐藏，
-           露出下面的占位层（见 style.css 的 detail-cover-box） #}
-        <div class="d-flex flex-wrap flex-sm-nowrap align-items-start gap-3">
+        <div class="detail-hero-grid">
+            {# 条目头图：占位层（品牌渐变 + 标题首字）常驻，有封面时图片层叠在上；
+               图片走 /media/full/ 压缩端点（≤1200px / ≤400KB），加载失败即隐藏，
+               露出下面的占位层（见 style.css 的 .detail-cover-box） #}
             <div class="detail-cover-box">
                 <div class="detail-cover" aria-hidden="true">{{ content.title[:1] }}</div>
                 {% if content.image_url %}
                 <img class="detail-cover" src="{{ full_src(content.image_url) }}" alt="{{ content.title }}封面" onerror="this.style.display='none'">
                 {% endif %}
             </div>
-            <div class="flex-grow-1">
-                <div class="d-flex flex-wrap align-items-start justify-content-between gap-2">
-                    <h1 class="h3 mb-0">{{ content.title }}</h1>
+
+            <div class="detail-hero-main">
+                <div class="detail-title-row">
+                    <h1 class="detail-title mb-0">{{ content.title }}</h1>
                     <span class="badge detail-type-badge">{{ type_label }}</span>
-                </div>
-
-                <div class="d-flex flex-wrap align-items-center gap-3 mt-2">
-                    <span class="detail-stars" aria-hidden="true">{% for i in range(1, 6) %}<span class="{{ 'star-on' if i <= star_count else 'star-off' }}">★</span>{% endfor %}</span>
-                    <span class="detail-rating-num">{{ '%.1f' % content.rating }}<small class="text-muted fw-normal"> / 10</small></span>
-                    <span class="text-muted small">条目 ID：{{ content.id }}</span>
-                </div>
-            </div>
-        </div>
-
-        <p class="detail-summary mt-3 mb-0">{{ content.summary }}</p>
-
-        <div class="mt-3 d-flex flex-wrap align-items-center gap-2">
-            <span class="detail-chip">{{ type_label }}</span>
-            {% if content.year %}<span class="detail-chip">{{ content.year }}</span>{% endif %}
-            {% if content_studios %}
-            <span class="text-muted small">制作：{% for name in content_studios %}<a href="/studios/{{ name|urlencode }}">{{ name }}</a>{% if not loop.last %} / {% endif %}{% endfor %}</span>
-            {% endif %}
-            {# 该文案只在确实没有题材标签时成立；有标签时由下方标签区展示 #}
-            {% if not content_tags and not content_studios %}<span class="text-muted small ms-1">暂无其他标签数据</span>{% endif %}
-        </div>
-
-        {# 作品标签（随 Bangumi 导入）：点击跳全部作品页按该标签筛选 #}
-        {% if content_tags %}
-        <div class="mt-3 d-flex flex-wrap align-items-center gap-2">
-            <span class="text-muted small">标签：</span>
-            {% for name in content_tags %}
-            <a class="tag-chip" href="/contents?tag={{ name|urlencode }}">{{ name }}</a>
-            {% endfor %}
-        </div>
-        {% endif %}
-
-        {# 作者 / 公司关系（Bangumi 信息卡识别，见 app/entity_links.py）：
-            按角色分组，点击姓名进索引页反查其全部作品；系列 chip 进系列详情页 #}
-        {% if content_entity_roles or content_series %}
-        <div class="mt-3 d-flex flex-wrap align-items-center gap-2">
-            <span class="text-muted small">关系：</span>
-            {% for role, names in content_entity_roles.items() %}
-            <span class="text-muted small">{{ role }}</span>
-            {% for name in names %}
-            <a class="tag-chip" href="/creators/{{ name|urlencode }}">{{ name }}</a>
-            {% endfor %}
-            {% endfor %}
-            {% if content_series %}
-            <span class="text-muted small">系列</span>
-            <a class="tag-chip" href="/creators/{{ content_series.name|urlencode }}">{{ content_series.name }}</a>
-            {% endif %}
-        </div>
-        {% endif %}
-
-        {# 客观信息（只展示，不参与标签筛选）：媒介 / 话数 / 原作载体 + 键值补充 #}
-        {% if content.media or content.episodes or content.source_material or content_facts %}
-        <div class="mt-2 d-flex flex-wrap align-items-center gap-2 small text-muted">
-            {% if content.media %}<span class="detail-chip">{{ content.media }}</span>{% endif %}
-            {% if content.episodes %}<span>{{ content.episodes }} 话</span>{% endif %}
-            {% if content.source_material %}<span class="detail-chip">{{ content.source_material }}</span>{% endif %}
-            {% for key, value in content_facts %}
-            <span>· {{ key }}：{{ value }}</span>
-            {% endfor %}
-        </div>
-        {% endif %}
-
-        {# 制作人员与主要声优：来自 Bangumi 元数据补全（app/bangumi_meta.py）。
-            主创（导演 / 音乐 / 系列构成 等）在上面的「关系」里已有入口，
-            这里只展示实体体系未覆盖的职位与长尾职员，避免重复。 #}
-        {% set main_credits = content_credits | selectattr('tier', 'equalto', 'main') | list %}
-        {% set long_credits = content_credits | selectattr('tier', 'equalto', 'long') | list %}
-        {% if content_cast or main_credits or long_credits %}
-        <div class="mt-3 small">
-            {% if content_cast %}
-            <div class="d-flex flex-wrap align-items-baseline gap-2">
-                <span class="text-muted">主要声优：</span>
-                {% for item in content_cast[:6] %}
-                    {% if item.person_id %}
-                    <a class="tag-chip" href="/cast/{{ item.person_id }}">{{ item.actor }}</a>
-                    {% else %}
-                    <span class="tag-chip">{{ item.actor }}</span>
+                    {% if content.book_kind == 'literature' %}
+                    <span class="badge detail-kind-badge" title="日本普通小说：不是文库出身的轻小说">文学</span>
                     {% endif %}
-                    <span class="text-muted">&larr; {{ item.character }}</span>
-                {% endfor %}
-            </div>
-            {% endif %}
-            {% if main_credits %}
-            <div class="d-flex flex-wrap align-items-baseline gap-2 mt-2">
-                <span class="text-muted">制作人员：</span>
-                {% for item in main_credits %}
-                <span class="text-muted">{{ item.role }}</span><span>{{ item.name }}</span>
-                {% endfor %}
-            </div>
-            {% endif %}
-            {% if long_credits %}
-            <details class="mt-2">
-                <summary class="text-muted">更多制作人员（{{ long_credits|length }}）</summary>
-                <div class="d-flex flex-wrap align-items-baseline gap-2 mt-1">
-                    {% for item in long_credits %}
-                    <span class="text-muted">{{ item.role }}</span><span>{{ item.name }}</span>
-                    {% endfor %}
                 </div>
-            </details>
-            {% endif %}
+
+                <div class="detail-stat-row">
+                    {% if content.rating > 0 %}
+                    <span class="detail-score-box">
+                        <span class="detail-score">{{ '%.1f' % content.rating }}</span>
+                        <span class="detail-score-meta">
+                            <span class="detail-stars" aria-hidden="true">{% for i in range(1, 6) %}<span class="{{ 'star-on' if i <= star_count else 'star-off' }}">★</span>{% endfor %}</span>
+                            <span class="detail-score-unit">满分 10 分</span>
+                        </span>
+                    </span>
+                    {% else %}
+                    <span class="detail-score-box detail-score-box--empty">
+                        <span class="detail-score-unit">暂无评分</span>
+                    </span>
+                    {% endif %}
+                    <span class="detail-quick-facts">
+                        {% if content.year %}<span class="detail-chip">{{ content.year }}</span>{% endif %}
+                        {% if content.media %}<span class="detail-chip">{{ content.media }}</span>{% endif %}
+                        {% if content.episodes %}<span class="detail-chip">{{ content.episodes }} 话</span>{% endif %}
+                    </span>
+                </div>
+
+                {# 常用操作（拇指区）：收藏主按钮 + 标注 pill。data-* 标记供 base.html 脚本做无刷新切换；
+                   无 JS 时仍是普通表单 POST + 303 整页回跳。
+                   注意：标注表单与其「清除标注」表单必须是同级兄弟节点（脚本按 parentNode 定位）。 #}
+                <div class="detail-actions">
+                    {% if current_user %}
+                    <form method="post" action="/contents/{{ content.id }}/favorite" class="m-0"
+                          data-ajax-fav data-label-add="收藏作品" data-label-remove="取消收藏"
+                          data-toast-add="已加入收藏" data-toast-remove="已取消收藏">
+                        <input type="hidden" name="next" value="/contents/{{ content.id }}">
+                        <button class="btn btn-sm {{ 'btn-outline-secondary' if is_favorited else 'btn-primary' }}"
+                                data-fav-btn type="submit">
+                            <svg class="svg-ic{{ ' d-none' if is_favorited }}" data-fav-heart viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20.5s-7.6-4.8-9.3-9.1A5.2 5.2 0 0 1 12 6.5a5.2 5.2 0 0 1 9.3 4.9c-1.7 4.3-9.3 9.1-9.3 9.1z"/></svg><span data-fav-label>{{ '取消收藏' if is_favorited else '收藏作品' }}</span>
+                        </button>
+                    </form>
+                    <span class="detail-status-group">
+                        <span class="detail-status-label">标注</span>
+                        <form method="post" action="/contents/{{ content.id }}/status" class="m-0 d-flex flex-wrap gap-2"
+                              data-ajax-status>
+                            <input type="hidden" name="next" value="/contents/{{ content.id }}">
+                            {% for key, label in status_labels.items() %}
+                            <button class="status-pill{% if content_status == key %} active{% endif %}"
+                                    data-status-btn="{{ key }}" data-status-label="{{ label }}"
+                                    type="submit" name="status" value="{{ key }}">{{ label }}</button>
+                            {% endfor %}
+                        </form>
+                        {% if content_status %}
+                        <form method="post" action="/contents/{{ content.id }}/status/clear" class="m-0" data-ajax-clear>
+                            <input type="hidden" name="next" value="/contents/{{ content.id }}">
+                            <button class="btn btn-link btn-sm text-muted p-0" type="submit">清除标注</button>
+                        </form>
+                        {% endif %}
+                    </span>
+                    <a class="small detail-actions-link" href="/me?tab=favorites">我的收藏 &rarr;</a>
+                    {% else %}
+                    <a class="btn btn-sm btn-outline-primary" href="/login?next=/contents/{{ content.id }}">登录后可收藏作品</a>
+                    <span class="small text-muted">登录后可标注「看过 / 未看 / 想看」，标注会自动加入收藏</span>
+                    {% endif %}
+                </div>
+
+                {% if content.summary %}
+                <p class="detail-summary mb-0">{{ content.summary }}</p>
+                {% endif %}
+            </div>
         </div>
+    </div>
+</section>
+
+{# 系列作品（续接区）：紧凑横向关系条，不做大型内容区块。
+   职责是「我在第几季、前后是什么」——关系类型 + 作品入口，点进即跳。
+   手机横向滚动并带右侧溢出暗示（is-scrollable 由本页脚本按 scrollWidth 判定，只在不溢出时隐藏）；
+   ≥992 改为换行排布，全部可见、无需滚动。
+   数据来自 crud.list_series_section：真实关系 ∪ 同系列，已去重并按关系远近 + 年份排序。 #}
+{% if series_contents %}
+<section class="detail-series" aria-labelledby="detail-series-heading">
+    <div class="detail-series-head">
+        <h2 class="detail-series-title" id="detail-series-heading">
+            系列作品{% if content_series %} · {{ content_series.name }}{% endif %}
+        </h2>
+        {% if content_series %}
+        <a class="detail-series-more" href="/creators/{{ content_series.name|urlencode }}">系列详情 &rarr;</a>
         {% endif %}
+    </div>
+    <div class="detail-series-wrap">
+        <ul class="detail-series-rail" data-series-rail>
+            {% for rel in series_contents %}
+            <li class="detail-series-item">
+                <a class="detail-series-chip" href="/contents/{{ rel.id }}">
+                    <span class="detail-series-thumb">
+                        <span class="detail-series-ph" aria-hidden="true">{{ rel.title[:1] }}</span>
+                        {% if rel.image_url %}
+                        <img src="{{ thumb_src(rel.image_url) }}" alt="" loading="lazy" onerror="this.style.display='none'">
+                        {% endif %}
+                    </span>
+                    <span class="detail-series-body">
+                        <span class="detail-series-name">{{ rel.title }}</span>
+                        <span class="detail-series-meta">
+                            {% if rel.id in series_relation_labels %}
+                            <span class="detail-badge-rel">{{ series_relation_labels[rel.id] }}</span>
+                            {% endif %}
+                            {% if rel.year %}<span class="detail-series-sub">{{ rel.year }}</span>{% endif %}
+                            {% if rel.rating > 0 %}<span class="detail-series-sub">评分 {{ '%.1f' % rel.rating }}</span>{% endif %}
+                        </span>
+                    </span>
+                </a>
+            </li>
+            {% endfor %}
+        </ul>
+    </div>
+</section>
+{% endif %}
 
-        {# 收藏入口（个人空间）：登录用户可收藏 / 取消收藏，游客引导登录后回来本页。
-           状态语义：未收藏=品牌紫实心主按钮（行动召唤），已收藏=次级描边（弱化）。
-           data-* 标记供 base.html 脚本做「无刷新切换」：脚本读跳转结果原地换按钮态 + Toast，
-           无 JS 时仍是普通表单 POST + 303 整页回跳（下方 alert 回显照旧）。 #}
-        <div class="mt-3 d-flex flex-wrap align-items-center gap-3">
-            {% if current_user %}
-            <form method="post" action="/contents/{{ content.id }}/favorite" class="m-0"
-                  data-ajax-fav data-label-add="收藏作品" data-label-remove="取消收藏"
-                  data-toast-add="已加入收藏" data-toast-remove="已取消收藏">
-                <input type="hidden" name="next" value="/contents/{{ content.id }}">
-                <button class="btn btn-sm {{ 'btn-outline-secondary' if is_favorited else 'btn-primary' }}"
-                        data-fav-btn type="submit">
-                    <svg class="svg-ic{{ ' d-none' if is_favorited }}" data-fav-heart viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20.5s-7.6-4.8-9.3-9.1A5.2 5.2 0 0 1 12 6.5a5.2 5.2 0 0 1 9.3 4.9c-1.7 4.3-9.3 9.1-9.3 9.1z"/></svg><span data-fav-label>{{ '取消收藏' if is_favorited else '收藏作品' }}</span>
-                </button>
-            </form>
-            <a class="small" href="/me?tab=favorites">我的收藏 &rarr;</a>
-            {% else %}
-            <a class="btn btn-sm btn-outline-primary"
-               href="/login?next=/contents/{{ content.id }}">登录后可收藏作品</a>
+{# 资料区：标签 / 基本信息 / 制作 / 关系 / 演员与职员。
+   只做展示与跳转，不参与筛选逻辑；字段缺失时整行不渲染（模板不编造数据）。
+   排版为编辑式平铺（无卡片外壳），靠细线分隔行，避免与三个模块叠成卡片墙。 #}
+<section class="detail-meta">
+    <h2 class="detail-block-title">作品资料</h2>
+    <dl class="detail-meta-list">
+            {% if content_tags %}
+            <div class="detail-meta-item">
+                <dt>标签</dt>
+                <dd>
+                    {% for name in content_tags %}
+                    {# 点击跳全部作品页按该标签筛选 #}
+                    <a class="tag-chip" href="/contents?type={{ (content.type or '')|urlencode }}&amp;tag={{ name|urlencode }}">{{ name }}</a>
+                    {% endfor %}
+                </dd>
+            </div>
             {% endif %}
-        </div>
+            <div class="detail-meta-item">
+                <dt>基本信息</dt>
+                <dd>
+                    <span class="detail-fact"><span class="detail-fact-key">类型</span>{{ type_label }}</span>
+                    {% if content.year %}<span class="detail-fact"><span class="detail-fact-key">年份</span>{{ content.year }}</span>{% endif %}
+                    {% if content.media %}<span class="detail-fact"><span class="detail-fact-key">媒介</span>{{ content.media }}</span>{% endif %}
+                    {% if content.episodes %}<span class="detail-fact"><span class="detail-fact-key">话数</span>{{ content.episodes }} 话</span>{% endif %}
+                    {% if content.source_material %}<span class="detail-fact"><span class="detail-fact-key">原作载体</span>{{ content.source_material }}</span>{% endif %}
+                    {% for key, value in content_facts %}
+                    <span class="detail-fact"><span class="detail-fact-key">{{ key }}</span>{{ value }}</span>
+                    {% endfor %}
+                    <span class="detail-fact"><span class="detail-fact-key">条目 ID</span>{{ content.id }}</span>
+                </dd>
+            </div>
+            {% if content_studios %}
+            <div class="detail-meta-item">
+                <dt>制作</dt>
+                <dd>
+                    {% for name in content_studios %}
+                    <a class="tag-chip" href="/studios/{{ name|urlencode }}">{{ name }}</a>
+                    {% endfor %}
+                </dd>
+            </div>
+            {% endif %}
+            {# 作者 / 公司关系（Bangumi 信息卡识别，见 app/entity_links.py）：
+                按角色分组，点击姓名进索引页反查其全部作品；系列 chip 进系列详情页 #}
+            {% if content_entity_roles or content_series %}
+            <div class="detail-meta-item">
+                <dt>关系</dt>
+                <dd>
+                    {% for role, names in content_entity_roles.items() %}
+                    <span class="detail-role-group">
+                        <span class="detail-role-name">{{ role }}</span>
+                        {% for name in names %}
+                        <a class="tag-chip" href="/creators/{{ name|urlencode }}">{{ name }}</a>
+                        {% endfor %}
+                    </span>
+                    {% endfor %}
+                    {% if content_series %}
+                    <span class="detail-role-group">
+                        <span class="detail-role-name">系列</span>
+                        <a class="tag-chip" href="/creators/{{ content_series.name|urlencode }}">{{ content_series.name }}</a>
+                    </span>
+                    {% endif %}
+                </dd>
+            </div>
+            {% endif %}
+            {# 制作人员与主要声优：来自 Bangumi 元数据补全（app/bangumi_meta.py）。
+                主创（导演 / 音乐 / 系列构成 等）在上面的「关系」里已有入口，
+                这里只展示实体体系未覆盖的职位与长尾职员，避免重复。 #}
+            {% set main_credits = content_credits | selectattr('tier', 'equalto', 'main') | list %}
+            {% set long_credits = content_credits | selectattr('tier', 'equalto', 'long') | list %}
+            {% if content_cast or main_credits or long_credits %}
+            <div class="detail-meta-item">
+                <dt>演员与职员</dt>
+                <dd>
+                    {% if content_cast %}
+                    <div class="detail-role-block">
+                        <span class="detail-role-name">主要声优</span>
+                        <span class="detail-cast-list">
+                            {% for item in content_cast[:6] %}
+                            <span class="detail-cast-pair">
+                                {% if item.person_id %}
+                                <a class="tag-chip" href="/cast/{{ item.person_id }}">{{ item.actor }}</a>
+                                {% else %}
+                                <span class="tag-chip">{{ item.actor }}</span>
+                                {% endif %}
+                                <span class="detail-cast-role">&larr; {{ item.character }}</span>
+                            </span>
+                            {% endfor %}
+                        </span>
+                    </div>
+                    {% endif %}
+                    {% if main_credits %}
+                    <div class="detail-role-block">
+                        <span class="detail-role-name">制作人员</span>
+                        <span class="detail-credit-list">
+                            {% for item in main_credits %}
+                            <span class="detail-fact"><span class="detail-fact-key">{{ item.role }}</span>{{ item.name }}</span>
+                            {% endfor %}
+                        </span>
+                    </div>
+                    {% endif %}
+                    {% if long_credits %}
+                    <details class="detail-credit-more">
+                        <summary>更多制作人员（{{ long_credits|length }}）</summary>
+                        <span class="detail-credit-list mt-2">
+                            {% for item in long_credits %}
+                            <span class="detail-fact"><span class="detail-fact-key">{{ item.role }}</span>{{ item.name }}</span>
+                            {% endfor %}
+                        </span>
+                    </details>
+                    {% endif %}
+                </dd>
+            </div>
+            {% endif %}
+            {% if not content_tags and not content_studios and not content_entity_roles and not content_series and not content_cast and not content_credits and not content_facts %}
+            <div class="detail-meta-item">
+                <dt>资料</dt>
+                <dd><span class="text-muted small">暂无其他标签数据</span></dd>
+            </div>
+            {% endif %}
+        </dl>
+</section>
 
-        {# 作品标注：看过 / 未看 / 想看（登录用户）。标注会自动把作品加入收藏；
-           已标注的作品可清除标注，收藏不受影响。 #}
-        <div class="mt-3 d-flex flex-wrap align-items-center gap-2">
-            <span class="text-muted small fw-semibold">标注：</span>
-            {% if current_user %}
-            <form method="post" action="/contents/{{ content.id }}/status" class="m-0 d-flex flex-wrap gap-2"
-                  data-ajax-status>
-                <input type="hidden" name="next" value="/contents/{{ content.id }}">
-                {% for key, label in status_labels.items() %}
-                <button class="status-pill{% if content_status == key %} active{% endif %}"
-                        data-status-btn="{{ key }}" data-status-label="{{ label }}"
-                        type="submit" name="status" value="{{ key }}">{{ label }}</button>
-                {% endfor %}
-            </form>
-            {% if content_status %}
-            <form method="post" action="/contents/{{ content.id }}/status/clear" class="m-0" data-ajax-clear>
-                <input type="hidden" name="next" value="/contents/{{ content.id }}">
-                <button class="btn btn-link btn-sm text-muted p-0" type="submit">清除标注</button>
-            </form>
-            {% endif %}
-            <a class="small" href="/me?tab=favorites">我的收藏 &rarr;</a>
-            <a class="small" href="/contents/{{ content.id }}/edit">申请修改词条</a>
-            {% else %}
-            <span class="text-muted small">登录后可标注「看过 / 未看 / 想看」，标注会自动加入收藏</span>
-            {% endif %}
-        </div>
-
-        {# 封面上传（仅 staff：管理员 / 站长）：给作品补图 / 换图，校验后与导入封面同管线生成缩略图与全图 #}
+{# 维护操作（申请修改资料 / 封面上传）：保留功能但降为次级入口，收进折叠区。
+   封面上传仅 staff（管理员 / 站长）：校验后与导入封面同管线生成缩略图与全图。 #}
+<details class="detail-ops">
+    <summary class="detail-ops-summary">维护操作</summary>
+    <div class="detail-ops-body">
+        <a class="btn btn-outline-secondary btn-sm"
+           href="/contents/{{ content.id }}/edit">申请修改资料</a>
         {% if current_user and current_user.role != 'user' %}
-        <div class="mt-3">
+        <div class="detail-ops-block">
             {% if request.query_params.get('cover') == 'ok' %}
             <div class="alert alert-success py-2">封面已更新。</div>
             {% elif request.query_params.get('cover') == 'error' %}
@@ -202,9 +298,9 @@
             <div class="alert alert-warning py-2">封面上传失败：{% if why == 'too_big' %}图片超过大小上限{% elif why == 'not_image' %}只支持 jpg / png / webp / gif 图片{% elif why == 'corrupt' %}图片文件无法解码{% elif why == 'empty' %}没有选择文件{% else %}请换一张图片重试{% endif %}。</div>
             {% endif %}
             <form method="post" action="/manage/contents/{{ content.id }}/cover" enctype="multipart/form-data"
-                  class="d-flex flex-wrap align-items-end gap-2">
+                  class="detail-upload">
                 <input type="hidden" name="next" value="/contents/{{ content.id }}">
-                <div>
+                <div class="detail-upload-field">
                     <label class="form-label small fw-semibold mb-1" for="cover-file">上传封面（jpg / png / webp / gif，≤ 5 MB）</label>
                     <input class="form-control form-control-sm" type="file" id="cover-file" name="cover"
                            accept="image/jpeg,image/png,image/webp,image/gif" required>
@@ -214,94 +310,95 @@
         </div>
         {% endif %}
     </div>
-</div>
+</details>
 
-<div class="row g-3 mt-1">
-    <section class="col-12 col-lg-7">
-        <div class="card detail-section h-100">
-            <div class="card-header bg-white fw-semibold">相关内容推荐</div>
-            <div class="card-body">
-                {% if related_contents %}
-                <div class="row g-3">
-                    {% for rel in related_contents %}
-                    <div class="col-12 col-md-6">
-                        <a class="detail-related-item" href="/contents/{{ rel.id }}">
-                            <div class="d-flex justify-content-between align-items-center gap-2">
-                                <span class="fw-semibold text-truncate">{{ rel.title }}</span>
-                                <span class="badge detail-type-badge-sm">{{ type_label }}</span>
-                            </div>
-                            <div class="small text-muted mt-1">评分 {{ '%.1f' % rel.rating }}</div>
-                            <p class="small text-secondary mb-0 mt-1">
-                                {{ rel.summary[:40] }}{% if rel.summary|length > 40 %}…{% endif %}
-                            </p>
-                        </a>
-                    </div>
-                    {% endfor %}
+{# 相关资讯（跟进区）：默认紧凑显示标题、日期、来源；摘要按需展开，不占首屏高度。
+   空态文案沿用既有措辞（真实匹配不到时不编造关联）。 #}
+<section class="detail-block" aria-labelledby="detail-news-heading">
+    <div class="detail-block-head">
+        <h2 class="detail-block-title" id="detail-news-heading">相关资讯</h2>
+        <a class="detail-block-link" href="/articles">全部资讯 &rarr;</a>
+    </div>
+    {% if related_articles %}
+    <ul class="detail-news">
+        {% for art in related_articles %}
+        <li class="detail-news-item">
+            <time class="detail-news-date" datetime="{{ art.published_at.strftime('%Y-%m-%d') }}">
+                <span class="detail-news-md">{{ art.published_at.strftime('%m-%d') }}</span>
+                <span class="detail-news-y">{{ art.published_at.strftime('%Y') }}</span>
+            </time>
+            <div class="detail-news-main">
+                <a class="detail-news-title" href="/articles/{{ art.id }}">{{ art.title }}</a>
+                <div class="detail-news-meta">
+                    <span class="detail-badge-cat">{{ art.category }}</span>
+                    {% if art.source %}<span class="detail-news-source">{{ art.source }}</span>{% endif %}
                 </div>
-                {% else %}
-                <div class="detail-empty">暂无同类型内容可推荐。</div>
+                {% if art.summary %}
+                <details class="detail-news-more">
+                    <summary>摘要</summary>
+                    <p class="detail-news-summary">{{ art.summary }}</p>
+                </details>
                 {% endif %}
             </div>
-        </div>
-    </section>
+        </li>
+        {% endfor %}
+    </ul>
+    {% else %}
+    <div class="detail-empty">
+        暂无提到该作品的资讯（含译名与作者 / 公司 / 系列关联）。<br>
+        <a class="small" href="/articles">去浏览全部资讯</a>
+    </div>
+    {% endif %}
+</section>
 
-    <section class="col-12 col-lg-5">
-        <div class="card detail-section h-100">
-            <div class="card-header bg-white fw-semibold d-flex justify-content-between align-items-center">
-                <span>相关资讯</span>
-                <a class="small fw-normal" href="/articles">全部资讯 &rarr;</a>
-            </div>
-            <div class="card-body">
-                {% if related_articles %}
-                <ul class="list-unstyled mb-0">
-                    {% for art in related_articles %}
-                    <li class="detail-article-item{% if not loop.last %} pb-2 mb-2 border-bottom{% endif %}">
-                        <a class="fw-semibold" href="/articles/{{ art.id }}">{{ art.title }}</a>
-                        <div class="small text-muted mt-1">{{ art.category }} · {{ art.published_at.strftime('%Y-%m-%d') }}</div>
-                        <p class="small text-secondary mb-0 mt-1">
-                            {{ art.summary[:60] }}{% if art.summary|length > 60 %}…{% endif %}
-                        </p>
-                    </li>
-                    {% endfor %}
-                </ul>
-                {% else %}
-                <div class="detail-empty">
-                    暂无提到该作品的资讯。<br>
-                    <a class="small" href="/articles">去浏览全部资讯</a>
-                </div>
+{# 相关内容推荐（发现区）：海报网格，优先保证封面展示与探索价值。
+   推荐理由只用业务侧真实字段 related_reasons（同原作 / 同导演 / 同制作公司 / 同题材 / 同类型高分），
+   为空则不渲染理由位，不拼任何占位文案；候选不足就少给几条，空态不强塞。 #}
+<section class="detail-block" aria-labelledby="detail-related-heading">
+    <div class="detail-block-head">
+        <h2 class="detail-block-title" id="detail-related-heading">相关内容推荐</h2>
+        <span class="detail-block-note">按共享创作者 / 题材召回</span>
+    </div>
+    {% if related_contents %}
+    <div class="detail-poster-grid">
+        {% for rel in related_contents %}
+        <a class="detail-poster" href="/contents/{{ rel.id }}">
+            <span class="detail-poster-cover">
+                <span class="detail-poster-ph" aria-hidden="true">{{ rel.title[:1] }}</span>
+                {% if rel.image_url %}
+                <img src="{{ thumb_src(rel.image_url) }}" alt="" loading="lazy" onerror="this.style.display='none'">
                 {% endif %}
-            </div>
-        </div>
-    </section>
-</div>
-
-{# 系列作品（同系列的多季 / 剧场版，contents.series_id 指向同一行）：
-    仅当该作品已归系列且系列内还有别的作品时展示 #}
-{% if content_series and series_contents %}
-<div class="card detail-section mt-3">
-    <div class="card-header bg-white fw-semibold d-flex justify-content-between align-items-center">
-        <span>系列作品 · {{ content_series.name }}</span>
-        <a class="small fw-normal" href="/creators/{{ content_series.name|urlencode }}">系列详情 &rarr;</a>
+            </span>
+            <span class="detail-poster-title">{{ rel.title }}</span>
+            <span class="detail-poster-meta">{{ type_labels.get(rel.type, rel.type) }}{% if rel.year %} · {{ rel.year }}{% endif %}{% if rel.rating > 0 %} · 评分 {{ '%.1f' % rel.rating }}{% endif %}</span>
+            {% if related_reasons.get(rel.id) %}
+            <span class="detail-poster-why">{{ related_reasons[rel.id] }}</span>
+            {% endif %}
+        </a>
+        {% endfor %}
     </div>
-    <div class="card-body">
-        <div class="row g-3">
-            {% for rel in series_contents %}
-            <div class="col-12 col-md-6 col-lg-4">
-                <a class="detail-related-item" href="/contents/{{ rel.id }}">
-                    <div class="d-flex justify-content-between align-items-center gap-2">
-                        <span class="fw-semibold text-truncate">{{ rel.title }}</span>
-                        <span class="badge detail-type-badge-sm">{{ type_label }}</span>
-                    </div>
-                    <div class="small text-muted mt-1">评分 {{ '%.1f' % rel.rating }}</div>
-                </a>
-            </div>
-            {% endfor %}
-        </div>
-    </div>
-</div>
-{% endif %}
+    {% else %}
+    <div class="detail-empty">暂无相关作品可推荐。</div>
+    {% endif %}
+</section>
 
 <div class="mt-4">
     <a class="btn btn-outline-secondary btn-sm" href="/contents" data-back-nav>返回列表</a>
 </div>
+
+<script>
+/* 系列关系条的横向溢出暗示：只有真的能横向滚动时才显示右侧渐隐，
+   条目少、能排下时不出现假的「还能滑」提示。纯渐进增强，无脚本也能滚动。 */
+(function () {
+    var rail = document.querySelector("[data-series-rail]");
+    if (!rail) return;
+    var wrap = rail.parentNode;
+    function sync() {
+        wrap.classList.toggle("is-scrollable", rail.scrollWidth - rail.clientWidth > 4);
+    }
+    sync();
+    window.addEventListener("resize", sync);
+    if (window.ResizeObserver) { new ResizeObserver(sync).observe(rail); }
+})();
+</script>
 {% endblock %}

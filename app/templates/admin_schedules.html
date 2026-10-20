@@ -1,7 +1,7 @@
 {% extends "base_content.html" %}
 {% from "_pager.html" import pager %}
 {# 新番档期管理：查看 / 删除 / 按档期重新同步（复用既有 Yuc 同步流程） #}
-{% block title %}新番档期 - ACGN 内容平台{% endblock %}
+{% block title %}新番档期{% endblock %}
 {% block content %}
 <div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-1">
     <div>
@@ -94,6 +94,9 @@
                 {% endif %}
                 {% if w.title_cn and w.title_cn != w.title_main %}
                 <div class="small text-muted">{{ w.title_cn }}</div>
+                {% endif %}
+                {% if w.work_type or w.work_tags %}
+                <div class="small text-muted">{{ w.work_type or '' }}{% if w.work_type and w.work_tags %} · {% endif %}{{ w.work_tags or '' }}</div>
                 {% endif %}
             </td>
             <td>{{ weekday_names.get(w.weekday, '待定') }}</td>

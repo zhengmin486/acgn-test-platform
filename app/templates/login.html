@@ -1,13 +1,14 @@
 {% extends "base.html" %}
-{% block title %}登录 - ACGN 内容服务平台{% endblock %}
+{% from "_brand.html" import wordmark %}
+{% block title %}登录{% endblock %}
 {% block content %}
 <div class="row justify-content-center">
     <div class="col-12 col-md-8 col-lg-5">
         <div class="card app-card auth-card mt-4">
             <div class="card-body p-4">
                 <div class="auth-band mb-4">
-                    <span class="brand-mark" aria-hidden="true"></span>
-                    <h1 class="h4 mb-1">ACGN 内容服务平台</h1>
+                    {{ wordmark("brand-lockup-lg") }}
+                    <h1 class="h4 mb-1">{{ site_tagline }}</h1>
                     <p class="small mb-0" style="color: rgba(255,255,255,.85);">登录后可作为管理员进入测试管理平台</p>
                 </div>
 

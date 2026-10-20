@@ -1,14 +1,14 @@
 {% extends "base_content.html" %}
 {% from "_pager.html" import pager %}
-{# 词条审核：用户提交的新增 / 修改提案 → 管理员通过或驳回。 #}
-{% block title %}词条审核 - ACGN 内容平台{% endblock %}
+{# 作品审核：用户提交的新增 / 修改提案 → 管理员通过或驳回。 #}
+{% block title %}作品审核{% endblock %}
 {% block content %}
-<h1 class="h3 mb-1 section-heading">词条审核</h1>
+<h1 class="h3 mb-1 section-heading">作品审核</h1>
 <p class="text-muted small mb-3">用户提交的新增 / 修改提案，通过后才会写入内容库。</p>
 {% include "_manage_nav.html" %}
 
 {% if decided == 'ok' %}
-<div class="alert alert-success py-2">已处理该词条申请。</div>
+<div class="alert alert-success py-2">已处理该作品申请。</div>
 {% elif decided == 'error' %}
 <div class="alert alert-danger py-2">处理失败：{{ reason or '未知原因' }}</div>
 {% endif %}
@@ -29,7 +29,7 @@
 </div>
 
 {% if not submissions %}
-<div class="detail-empty">当前没有符合条件的词条申请。</div>
+<div class="detail-empty">当前没有符合条件的作品申请。</div>
 {% else %}
 <div class="card table-card">
     <div class="table-responsive">
@@ -40,7 +40,6 @@
                     <th>申请</th>
                     <th>标题 / 简介</th>
                     <th>类型</th>
-                    <th>评分</th>
                     <th>提交人</th>
                     <th>提交时间</th>
                     <th>操作</th>
@@ -63,11 +62,28 @@
                             {% if target %}<a href="/contents/{{ target.id }}">{{ target.title }}</a>
                             {% else %}作品 #{{ s.content_id }}（已删除）{% endif %}
                         </div>
+                        {% set diff = diffs.get(s.id, []) %}
+                        {% set changed = diff | selectattr('changed') | list %}
+                        {% if changed %}
+                        <table class="table table-sm table-borderless mb-0 mt-1 submission-diff">
+                            <tbody>
+                                {% for d in changed %}
+                                <tr>
+                                    <th>{{ d.label }}</th>
+                                    <td class="diff-old">{{ d.old or '—' }}</td>
+                                    <td class="diff-arrow">&rarr;</td>
+                                    <td class="diff-new">{{ d.new or '—' }}</td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                        {% elif diff %}
+                        <div class="small text-muted mt-1">与当前内容一致，没有实际改动。</div>
+                        {% endif %}
                         {% endif %}
                     </td>
                     <td><span class="badge detail-type-badge-sm">{{ type_labels.get(s.content_type, s.content_type) }}</span></td>
-                    <td>{{ '%.1f' % s.rating }}</td>
-                    <td class="small">用户 #{{ s.user_id }}</td>
+                    <td class="small">{{ usernames.get(s.user_id, '用户 #' ~ s.user_id) }}</td>
                     <td class="text-muted small">{{ s.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
                     <td style="min-width: 12rem;">
                         {% if s.status == 'pending' %}

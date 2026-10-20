@@ -1,12 +1,13 @@
 {% extends "base.html" %}
-{% block title %}注册 - ACGN 内容服务平台{% endblock %}
+{% from "_brand.html" import wordmark %}
+{% block title %}注册{% endblock %}
 {% block content %}
 <div class="row justify-content-center">
     <div class="col-12 col-md-8 col-lg-5">
         <div class="card app-card auth-card mt-4">
             <div class="card-body p-4">
                 <div class="auth-band mb-4">
-                    <span class="brand-mark" aria-hidden="true"></span>
+                    {{ wordmark("brand-lockup-lg") }}
                     <h1 class="h4 mb-1">注册普通用户</h1>
                     <p class="small mb-0" style="color: rgba(255,255,255,.85);">
                         {% if invite_required %}本站已关闭公开注册，需有效邀请码{% endif %}{% if invite_required and require_email %}；{% endif %}{% if require_email %}注册后需验证邮箱才能登录{% if not invite_required %}；{% endif %}{% else %}{% if not invite_required %}注册后即可使用 ACGN 内容平台{% endif %}{% endif %}

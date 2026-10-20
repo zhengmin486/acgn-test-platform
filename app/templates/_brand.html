@@ -1,0 +1,9 @@
+{# 站点字标：Otaku（首字母 O 内嵌星芒）+ 竖排片假名「オタク」注音。
+   全站唯一来源（内容导航 / 测试平台导航 / 六个认证页 / 首页 hero），改标识只改这里。
+
+   O 用矢量画而不是字体字：字体 O 的内孔在 19px 字号下只有 6px，塞不进任何可见的东西；
+   画成 3.5/24 环宽的圆环后，环内留出 7.8 半径的空，星芒才站得住。
+   环宽按 800 字重的笔画比例定，与后面 taku 的墨色重量对齐。 #}
+{% macro wordmark(size="") -%}
+<span class="wm-lockup{% if size %} {{ size }}{% endif %}" aria-hidden="true"><span class="wm-latin"><span class="wm-o"><svg viewBox="0 0 24 24" focusable="false"><circle cx="12" cy="12" r="9.55" fill="none" stroke="currentColor" stroke-width="3.5"/><path d="M12 5.3c.37 2.9 2.13 4.66 5.03 5.03-2.9.37-4.66 2.13-5.03 5.03-.37-2.9-2.13-4.66-5.03-5.03 2.9-.37 4.66-2.13 5.03-5.03Z" fill="currentColor"/></svg></span>taku</span><span class="wm-kana"><span>オ</span><span>タ</span><span>ク</span></span></span>
+{%- endmacro %}
