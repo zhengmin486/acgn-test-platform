@@ -35,8 +35,15 @@ backup.bat
 # 本地记忆与项目数据（不入库）
 .workbuddy/
 
-# 页面调试转储草稿（不入库）
+# 页面调试转储草稿（不入库；含脚本抓下来的源站 HTML 单页快照）
 __*.html
+/_*.html
+
+# 选品/清洗临时样本（不入库）
+cont_sample.json
+
+# 设计预览、素材候选与文档流水线产物（不入库；source 在 scripts/ 与 app/ 里）
+output/
 
 # 封面本地化与派生图运行时产物（可用 fetch_covers.py 重新抓，不入库）
 app/static/covers/
