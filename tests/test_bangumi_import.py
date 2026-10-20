@@ -297,24 +297,39 @@ class TestExtractTags:
         assert import_bangumi.extract_tags({}) == []
 
     def test_non_genre_tags_dropped_before_limit(self):
-        """年份 / 公司 / 声优 / 媒介 / 平台在入库前被丢掉，不占题材名额。
+        """年份 / 公司 / 媒介 / 平台在入库前被丢掉，不占题材名额。
 
         这条是线上教训：不过滤时标签云被 TV / 剧场版 / PC 这类媒介词霸榜，
-        「按标签筛选」点哪个都是全站作品，等于废掉。
+        「按标签筛选」点哪个都是全站作品，等于废掉。放宽白名单后，未进白名单的
+        真实主题词（作画）会保留，但作品信息（年份 / 公司 / 媒介 / 平台）与已知
+        噪音仍坚决排除。作者 / 声优不出现在 Bangumi 的 tags 字段（在 characters /
+        persons 接口），若有则经 exclude 参数兜底排除（见下条）。
         """
         payload = make_payload(402, 2)
         payload["tags"] = [
             {"name": "TV", "count": 9999},
             {"name": "2011", "count": 5000},
             {"name": "A-1 Pictures", "count": 4000},
-            {"name": "花泽香菜", "count": 3000},
             {"name": "剧场版", "count": 2000},
             {"name": "PC", "count": 1000},
+            {"name": "作画", "count": 500},  # 未进白名单的真实主题 -> 保留
             {"name": "治愈", "count": 100},
             {"name": "日常", "count": 90},
         ]
 
-        assert import_bangumi.extract_tags(payload) == ["治愈", "日常"]
+        # 作品信息 + 已知噪音被丢弃；真实主题（作画）保留，按标注数取前 N 个
+        assert import_bangumi.extract_tags(payload) == ["作画", "治愈", "日常"]
+
+    def test_person_names_excluded_via_exclude_param(self):
+        """声优 / 主创名经 exclude 参数兜底排除，不进标签云（与「作者声优不进标签」一致）。"""
+        payload = make_payload(403, 2)
+        payload["tags"] = [
+            {"name": "花泽香菜", "count": 3000},
+            {"name": "治愈", "count": 100},
+        ]
+        # 导入路径（无 exclude）无法区分声优名与未知主题，但 Bangumi tags 不含人物名；
+        # 回源同步路径持有真实人名，经 exclude 排除 -> 声优名不进标签。
+        assert import_bangumi.extract_tags(payload, exclude={"花泽香菜"}) == ["治愈"]
 
     def test_genre_aliases_normalized_on_import(self):
         """同义词入库即归一：SF -> 科幻、日常系 -> 日常。"""

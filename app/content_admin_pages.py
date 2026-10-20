@@ -1,6 +1,6 @@
 """内容管理页面路由（内容平台 → 内容管理，/manage/*）。
 
-面向管理员的内容运营入口：作品 / 资讯 / 新番档期 / 数据同步 / 同步历史 / 词条审核。
+面向管理员的内容运营入口：作品 / 资讯 / 新番档期 / 数据同步 / 同步历史 / 作品审核。
 数据全部来自 app.crud 与 app.sync_tasks，不依赖测试平台的任何模块；
 账号 / 邀请码 / 角色等站点治理在 app.site_admin_pages。
 
@@ -53,7 +53,7 @@ PAGE_SIZE = 20
 # 同步历史展示条数：够看清最近几次同步即可，避免页面过长。
 SYNC_HISTORY_LIMIT = 20
 
-# 词条审核列表每页条数：与作品数据列表保持一致，便于逐页核对。
+# 作品审核列表每页条数：与作品数据列表保持一致，便于逐页核对。
 SUBMISSION_PAGE_SIZE = 20
 
 
@@ -841,7 +841,7 @@ def import_random_action(
     )
 
 
-# ---------- 词条审核 ----------
+# ---------- 作品审核 ----------
 
 
 @router.get("/manage/submissions", response_class=HTMLResponse)
@@ -853,7 +853,7 @@ def submissions_page(
     decided: str = Query(default=""),
     reason: str = Query(default=""),
 ):
-    """词条审核：按状态筛选的申请列表，支持直接通过 / 驳回。"""
+    """作品审核：按状态筛选的申请列表，支持直接通过 / 驳回。"""
     status_filter = status if status in crud.SUBMISSION_STATUSES else None
     total, submissions = crud.list_content_submissions(
         db, status=status_filter, page=page, page_size=SUBMISSION_PAGE_SIZE
@@ -866,6 +866,16 @@ def submissions_page(
     ]
     target_contents = {
         content.id: content for content in crud.get_contents_by_ids(db, target_ids)
+    }
+    # 修改申请的新旧对比，以及提交人账号名：避免审核者自己打开作品页逐字比对。
+    diffs = {
+        submission.id: crud.submission_diff(
+            submission,
+            target_contents.get(submission.content_id),
+            type_labels=CONTENT_TYPE_LABELS,
+        )
+        for submission in submissions
+        if submission.kind == crud.SUBMISSION_KIND_UPDATE
     }
     counts = {
         "pending": crud.count_content_submissions(
@@ -890,6 +900,10 @@ def submissions_page(
             "status_filter": status_filter or "",
             "counts": counts,
             "contents": target_contents,
+            "diffs": diffs,
+            "usernames": crud.get_usernames_by_ids(
+                db, [submission.user_id for submission in submissions]
+            ),
             "decided": decided,
             "reason": reason,
             "status_labels": crud.SUBMISSION_STATUS_LABELS,
@@ -901,7 +915,7 @@ def submissions_page(
 
 @router.post("/manage/submissions/{submission_id}/approve")
 def approve_submission(request: Request, db: DbSession, submission_id: int):
-    """通过词条申请：写入 / 更新 contents；重复处理返回错误提示。"""
+    """通过作品申请：写入 / 更新 contents；重复处理返回错误提示。"""
     reviewer = getattr(request.state, "current_user", None)
     _, error = crud.decide_content_submission(
         db,
@@ -922,7 +936,7 @@ def approve_submission(request: Request, db: DbSession, submission_id: int):
 
 @router.post("/manage/submissions/{submission_id}/reject")
 async def reject_submission(request: Request, db: DbSession, submission_id: int):
-    """驳回词条申请：可附驳回说明，内容库不变。"""
+    """驳回作品申请：可附驳回说明，内容库不变。"""
     form = await request.form()
     note = str(form.get("note", "")).strip()
     reviewer = getattr(request.state, "current_user", None)

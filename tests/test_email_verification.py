@@ -385,7 +385,7 @@ class TestSmtpDelivery:
         assert len(server.sent) == 1
         message = server.sent[0]
         assert message["To"] == "mailuser@example.com"
-        assert message["Subject"] == "验证你的 ACGN 平台账号邮箱"
+        assert message["Subject"] == "验证你的 Otaku 账号邮箱"
         body = "".join(
             part.get_content()
             for part in message.walk()
@@ -557,8 +557,27 @@ class TestLegacySchemaMigration:
             "password_changed_at",
         }
 
-        # 个人空间上线后 init_db 还会补简介列（与邮箱列同一套幂等补列模式）
-        assert crud.ensure_user_profile_columns(engine) == ["bio"]
+        # 个人空间上线后 init_db 还会补简介列（与邮箱列同一套幂等补列模式）；
+        # 头像上传又补了 avatar_url，个人资料（性别 / 生日 / 所在地）再补三列，
+        # 账号与安全页再补手机两列（phone / phone_bound_at）。
+        assert set(crud.ensure_user_profile_columns(engine)) == {
+            "bio",
+            "avatar_url",
+            "gender",
+            "birthday",
+            "location",
+            "phone",
+            "phone_bound_at",
+        }
+
+        # 成分检测 LLM 配置列是另一组幂等补列（并行功能引入），查询 User 前同样要补，
+        # 否则 ORM 一次性 SELECT 全列会撞 no such column: users.llm_provider。
+        assert set(crud.ensure_user_llm_columns(engine)) == {
+            "llm_provider",
+            "llm_api_key",
+            "llm_base_url",
+            "llm_model",
+        }
 
         inspector = inspect(engine)
         columns = {column["name"] for column in inspector.get_columns("users")}
@@ -568,6 +587,11 @@ class TestLegacySchemaMigration:
             "email_verified_at",
             "password_changed_at",
             "bio",
+            "gender",
+            "birthday",
+            "location",
+            "phone",
+            "phone_bound_at",
         } <= columns
         assert "uq_users_email" in {
             index["name"] for index in inspector.get_indexes("users")

@@ -23,11 +23,15 @@ def test_health():
 
 
 def test_list_contents():
-    """内容列表：total 与 items 一致，且关键业务字段类型正确。"""
+    """内容列表：默认按上限分页，total 为全量、items 为第一页，字段类型正确。"""
     resp = client.get("/api/contents")
     assert resp.status_code == 200
     body = resp.json()
-    assert body["total"] == len(body["items"]) > 0
+    assert body["total"] > 0
+    assert 0 < len(body["items"]) <= 500
+    assert body["total"] >= len(body["items"])
+    # 未显式 ?all=1 时带分页回显键。
+    assert {"page", "page_size", "total_pages"} <= set(body)
     for item in body["items"]:
         assert REQUIRED_FIELDS <= set(item)
         assert isinstance(item["id"], int)
@@ -93,10 +97,18 @@ def test_list_contents_invalid_type(content_type):
 
 
 def test_get_content_detail():
-    """详情：完整字段与种子数据条目逐一相等，而不只是 id 相同。"""
+    """详情：契约字段与种子数据逐一相等，另附加 cover_url/tags/year/bangumi_id。"""
     resp = client.get("/api/contents/1")
     assert resp.status_code == 200
-    assert resp.json() == FAKE_CONTENTS[0]
+    body = resp.json()
+    # 历史契约字段逐键相等（新增字段是超集，不改变旧字段取值）。
+    for key, value in FAKE_CONTENTS[0].items():
+        assert body[key] == value
+    # 附加展示字段：种子数据带本地封面 -> 压缩全图端点，带年份；无标签/溯源 id。
+    assert body["cover_url"] == "/media/full/cover_xinghai.jpg"
+    assert body["tags"] == []
+    assert body["year"] == 2024
+    assert body["bangumi_id"] is None
 
 
 def test_get_content_not_found():
@@ -180,7 +192,9 @@ def test_empty_database_api_behaviour(tmp_path):
 
     app.dependency_overrides[get_db] = override_get_db
     try:
-        assert client.get("/api/contents").json() == {"total": 0, "items": []}
+        body = client.get("/api/contents").json()
+        assert body["total"] == 0
+        assert body["items"] == []
         assert client.get("/api/contents/1").status_code == 404
         search = client.get("/api/contents/search", params={"q": "星海"})
         assert search.status_code == 200
@@ -215,6 +229,46 @@ def test_detail_page_not_found():
     assert resp.status_code == 404
     assert "内容不存在" in resp.text
     assert "返回列表" in resp.text
+
+
+def test_list_contents_adds_display_fields():
+    """列表条目在契约字段外附加 cover_url/tags/year/bangumi_id（均为新增，不覆盖旧字段）。"""
+    body = client.get("/api/contents").json()
+    item = body["items"][0]
+    assert REQUIRED_FIELDS <= set(item)
+    assert {"cover_url", "tags", "year", "bangumi_id"} <= set(item)
+    assert isinstance(item["tags"], list)
+    # 默认（未显式 ?all=1）按上限分页，响应含分页回显键；结构为超集而非仅 total+items。
+    assert {"total", "items", "page", "page_size", "total_pages"} <= set(body)
+
+
+def test_list_contents_pagination():
+    """显式传 page/page_size 才分页：total 仍为全量，附带分页回显。"""
+    full = client.get("/api/contents").json()
+    body = client.get("/api/contents", params={"page": 1, "page_size": 2}).json()
+    assert body["total"] == full["total"]
+    assert len(body["items"]) == min(2, full["total"])
+    assert body["page"] == 1 and body["page_size"] == 2
+    expected_pages = (full["total"] + 1) // 2
+    assert body["total_pages"] == expected_pages
+
+
+def test_list_contents_full_dump():
+    """?all=1 显式全量：返回全部且结构恰为 {total, items}（无分页键）。"""
+    body = client.get("/api/contents", params={"all": 1}).json()
+    assert set(body) == {"total", "items"}
+    assert body["total"] == len(body["items"])
+
+
+def test_list_tags_endpoint():
+    """标签字典：返回名称 + 计数，非法 type -> 400。"""
+    resp = client.get("/api/tags", params={"type": "anime"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["type"] == "anime"
+    assert body["total"] == len(body["items"])
+    assert all({"name", "count"} <= set(row) for row in body["items"])
+    assert client.get("/api/tags", params={"type": "book"}).status_code == 400
 
 
 def test_static_css_served():

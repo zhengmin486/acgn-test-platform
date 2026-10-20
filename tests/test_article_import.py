@@ -207,7 +207,9 @@ def test_preview_then_apply_writes_and_skips_duplicates(session_factory):
     rows = _articles(session_factory)
     assert [a.title for a in rows] == ["资讯标题 101", "资讯标题 102"]
     assert rows[0].source == ia.SOURCE_NAME
-    assert rows[0].category == "动漫资讯"
+    # 栏目名「动漫资讯」按新分类口径归一化到主体类型「动画」
+    assert rows[0].category == "动画"
+    assert rows[0].source_type == "官方PR"
     assert rows[0].original_url == f"{SITE}/detail.html?id=101"
     assert rows[0].is_published is True
     assert rows[0].body == "第 101 条正文"
@@ -258,6 +260,80 @@ def test_title_duplicate_is_skipped_even_with_other_url(session_factory):
     assert [a.title for a in _articles(session_factory)] == ["资讯标题 102", "资讯标题 101"]
 
 
+def test_import_writes_ip_name_column(session_factory):
+    """导入时把列表页「作品名／」前缀落库（回填识别的 extra_names 来源）。"""
+    fetch = make_site(
+        {NEWS_URL: list_page([
+            list_item(101, "Oct 16, 2026", "THE LAST PV解禁！", ip="BLEACH 千年血戦篇"),
+        ])},
+        {101: detail_page("THE LAST PV解禁！", "Oct 16, 2026", "<p>正文</p>")},
+    )
+    summary = ia.run_import_articles(session_factory, apply=True, fetch=fetch)
+    assert summary.added == 1
+    row = _articles(session_factory)[0]
+    assert row.ip_name == "BLEACH 千年血戦篇"
+
+
+def test_import_without_ip_prefix_leaves_null(session_factory):
+    """列表标题没有「作品名／」前缀时 ip_name 为空（不写空字符串）。"""
+    summary = ia.run_import_articles(session_factory, apply=True, fetch=_news_site())
+    assert summary.added == 2
+    assert all(article.ip_name is None for article in _articles(session_factory))
+
+
+def test_reimport_backfills_ip_name_on_existing(session_factory):
+    """重复导入不覆盖本地内容，但会给空 ip_name 的存量文章补上前缀。"""
+    db = session_factory()
+    db.add(Article(
+        title="THE LAST PV解禁！",
+        category="动漫资讯",
+        summary="本地摘要（不可被覆盖）",
+        body="本地正文（不可被覆盖）",
+        original_url=f"{SITE}/detail.html?id=101",
+        is_published=True,
+    ))
+    db.commit()
+    db.close()
+
+    fetch = make_site(
+        {NEWS_URL: list_page([
+            list_item(101, "Oct 16, 2026", "THE LAST PV解禁！", ip="BLEACH 千年血戦篇"),
+        ])},
+        {101: detail_page("THE LAST PV解禁！", "Oct 16, 2026", "<p>正文</p>")},
+    )
+    summary = ia.run_import_articles(session_factory, apply=True, fetch=fetch)
+    assert (summary.added, summary.existing) == (0, 1)
+    row = _articles(session_factory)[0]
+    assert row.ip_name == "BLEACH 千年血戦篇"
+    assert row.summary == "本地摘要（不可被覆盖）"
+    assert row.body == "本地正文（不可被覆盖）"
+
+
+def test_reimport_does_not_overwrite_existing_ip_name(session_factory):
+    """已有 ip_name 的存量文章不被源站覆盖（只补空列）。"""
+    db = session_factory()
+    db.add(Article(
+        title="THE LAST PV解禁！",
+        category="动漫资讯",
+        summary="本地摘要",
+        body="本地正文",
+        ip_name="本地认定的作品",
+        original_url=f"{SITE}/detail.html?id=101",
+        is_published=True,
+    ))
+    db.commit()
+    db.close()
+
+    fetch = make_site(
+        {NEWS_URL: list_page([
+            list_item(101, "Oct 16, 2026", "THE LAST PV解禁！", ip="BLEACH 千年血戦篇"),
+        ])},
+        {101: detail_page("THE LAST PV解禁！", "Oct 16, 2026", "<p>正文</p>")},
+    )
+    ia.run_import_articles(session_factory, apply=True, fetch=fetch)
+    assert _articles(session_factory)[0].ip_name == "本地认定的作品"
+
+
 def test_detail_failure_marks_failed_and_keeps_others(session_factory):
     """详情页抓取失败的条目计为 failed 且不写库，其余条目照常写入。"""
     summary = ia.run_import_articles(
@@ -290,7 +366,8 @@ def test_external_category_uses_original_link(session_factory):
     )
     assert (summary.added, summary.failed) == (1, 0)
     row = _articles(session_factory)[0]
-    assert row.category == "活动资讯"
+    # 栏目名「活动资讯」归一化到兜底主体类型「综合动态」
+    assert row.category == "综合动态"
     assert row.original_url == "https://ip.example/event/1"
     assert row.body == "发售纪念活动\n\n原文：https://ip.example/event/1"
 
@@ -309,6 +386,56 @@ def test_fetch_error_propagates(session_factory):
     with pytest.raises(ia.ArticleFetchError):
         ia.run_import_articles(session_factory, fetch=failing_fetch)
     assert _count(session_factory) == 0
+
+
+# ---------- 跨栏目放量导入 ----------
+
+
+def _multi_site():
+    """含「动漫资讯 / 榜单资讯」两个栏目的假站点，每栏目 1 条可入库资讯。"""
+    ranking_url = f"{SITE}/?category=ranking"
+    return make_site(
+        {
+            NEWS_URL: list_page([list_item(1, "Oct 16, 2026", "资讯 1")]),
+            ranking_url: list_page([list_item(2, "Oct 15, 2026", "榜单 1")]),
+        },
+        {
+            1: detail_page("资讯 1", "Oct 16, 2026", "<p>正文一</p>"),
+            2: detail_page("榜单 1", "Oct 15, 2026", "<p>正文二</p>"),
+        },
+    )
+
+
+def test_run_import_all_categories_stops_at_total(session_factory):
+    """跨栏目放量：累计够 total 条就停，不跑多余的栏目。"""
+    summaries = ia.run_import_all_categories(
+        session_factory, apply=True, total=1, fetch=_multi_site()
+    )
+    assert [s.category for s in summaries] == ["动漫资讯"]
+    assert summaries[0].added == 1
+    assert _count(session_factory) == 1
+
+
+def test_run_import_all_categories_walks_next_category(session_factory):
+    """额度没用完时继续跑下一个栏目，直到凑够 total。"""
+    summaries = ia.run_import_all_categories(
+        session_factory, apply=True, total=2, fetch=_multi_site()
+    )
+    assert [s.category for s in summaries] == ["动漫资讯", "榜单资讯"]
+    assert _count(session_factory) == 2
+
+
+def test_run_import_all_categories_per_category_cap(session_factory):
+    """per_category 优先于 total 余额：每个栏目各自只抓上限条。"""
+    summaries = ia.run_import_all_categories(
+        session_factory,
+        apply=True,
+        categories=["动漫资讯", "榜单资讯"],
+        per_category=1,
+        fetch=_multi_site(),
+    )
+    assert [s.requested for s in summaries] == [1, 1]
+    assert _count(session_factory) == 2
 
 
 # ---------- 网络层 ----------

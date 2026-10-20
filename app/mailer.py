@@ -20,8 +20,9 @@ logger = logging.getLogger(__name__)
 
 SMTP_TIMEOUT_SECONDS = 10
 
-VERIFICATION_SUBJECT = "验证你的 ACGN 平台账号邮箱"
-RESET_SUBJECT = "重置你的 ACGN 平台账号密码"
+VERIFICATION_SUBJECT = "验证你的 Otaku 账号邮箱"
+RESET_SUBJECT = "重置你的 Otaku 账号密码"
+EMAIL_CHANGE_SUBJECT = "确认更换 Otaku 账号邮箱"
 
 
 class EmailDeliveryError(RuntimeError):
@@ -127,7 +128,7 @@ def build_verification_email(
         to_address,
         username,
         verify_url,
-        "感谢注册 ACGN 内容服务与接口自动化测试平台。"
+        "感谢注册 Otaku（ACGN 内容平台）。"
         "请打开下面的链接完成邮箱验证，验证后即可登录：",
         settings.email_verification_token_ttl_seconds,
     )
@@ -165,7 +166,7 @@ def build_password_reset_email(
         to_address,
         username,
         reset_url,
-        "我们收到了重置你 ACGN 平台账号密码的请求。"
+        "我们收到了重置你 Otaku 账号密码的请求。"
         "请打开下面的链接设置新密码；如果你没有发起该请求，忽略本邮件即可。",
         settings.password_reset_token_ttl_seconds,
     )
@@ -185,3 +186,36 @@ def send_password_reset_email(
         "当前未配置邮件服务，可使用页面上的重置链接继续操作",
     )
     return ok, (f"重置密码邮件已发送至 {to_address}" if ok else error)
+
+
+def build_email_change_email(
+    to_address: str,
+    username: str,
+    confirm_url: str,
+) -> EmailMessage:
+    """构造「更换绑定邮箱」确认邮件；发给**新地址**，证明该地址确实可用。"""
+    return _build_message(
+        EMAIL_CHANGE_SUBJECT,
+        to_address,
+        username,
+        confirm_url,
+        "我们收到了把你的 Otaku 账号邮箱更换为当前地址的请求。"
+        "请打开下面的链接完成确认；如果你没有发起该请求，忽略本邮件即可（原邮箱不受影响）。",
+        settings.email_verification_token_ttl_seconds,
+    )
+
+
+def send_email_change_email(
+    to_address: str,
+    username: str,
+    confirm_url: str,
+) -> tuple[bool, str]:
+    """发送换绑确认邮件，返回 ``(是否真实发出, 说明)``；语义同 ``send_verification_email``。"""
+    message = build_email_change_email(to_address, username, confirm_url)
+    ok, error = _deliver(
+        message,
+        to_address,
+        confirm_url,
+        "当前未配置邮件服务，可使用设置页上的确认按钮完成换绑",
+    )
+    return ok, (f"确认邮件已发送至 {to_address}" if ok else error)

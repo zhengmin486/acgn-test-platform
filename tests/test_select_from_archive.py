@@ -32,17 +32,19 @@ from scripts.select_from_archive import (  # noqa: E402
 
 
 def _make_dump(tmp_path: Path, entries: list[dict]) -> Path:
-    """造一个最小归档 zip（JSON Lines 格式，与官方一致）。"""
+    """造一个最小归档 zip（JSON Lines 格式，成员名与官方一致）。"""
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
         body = "\n".join(json.dumps(e, ensure_ascii=False) for e in entries)
-        archive.writestr("dump/subject.json", body)
+        archive.writestr("dump/subject.jsonlines", body)
     path = tmp_path / "dump.zip"
     path.write_bytes(buffer.getvalue())
     return path
 
 
-def _entry(sid, bgm_type=2, rank=10, score=8.0, nsfw=False, **extra):
+def _entry(sid, bgm_type=2, rank=10, score=8.0, nsfw=False, platform=None, **extra):
+    """按官方归档的真实字段形态造条目：score 顶层 float、rank 顶层整数、
+    书籍区（type=1）platform 是数字代码（1001=漫画/1002=小说）。"""
     entry = {
         "id": sid,
         "type": bgm_type,
@@ -50,10 +52,13 @@ def _entry(sid, bgm_type=2, rank=10, score=8.0, nsfw=False, **extra):
         "name_cn": f"作品{sid}",
         "summary": f"这是 {sid} 的简介",
         "nsfw": nsfw,
-        "score": {"score": score, "rank": rank, "score_details": {"8": 1000, "9": 500}},
+        "score": score,
+        "rank": rank,
+        "score_details": {"8": 1000, "9": 500},
         "tags": [{"name": "科幻", "count": 100}],
         "infobox": "|中文名: 作品\r\n|话数: 12",
         "date": "2020-01-01",
+        "platform": platform if platform is not None else ("TV" if bgm_type == 2 else ("PC" if bgm_type == 4 else None)),
     }
     entry.update(extra)
     return entry
@@ -157,22 +162,30 @@ class TestSelectFromArchive:
 
         assert [p["id"] for p in results] == [3]
 
-    def test_music_and_real_skipped(self, tmp_path):
+    def test_music_real_and_artbook_skipped(self, tmp_path):
+        """音乐(3)、三次元真人(6)、画集(platform=1003) 都不属于本站四类型。
+
+        回归防护：Archive README 写「6=漫画」是错的——实测 6 是真人剧
+        （一升的眼泪/白夜行），曾经按它映射导致日剧入库。
+        """
         entries = [
-            _entry(1, bgm_type=3, rank=1),   # 音乐
-            _entry(2, bgm_type=5, rank=2),   # 三次元（API 语义）
-            _entry(3, bgm_type=1, rank=3),   # 书籍 -> novel
+            _entry(1, bgm_type=3, rank=1),                     # 音乐
+            _entry(2, bgm_type=6, rank=2),                     # 真人剧
+            _entry(3, bgm_type=1, rank=3, platform=1001),      # 漫画
+            _entry(4, bgm_type=1, rank=4, platform=1002),      # 小说
+            _entry(5, bgm_type=1, rank=5, platform=1003),      # 画集
         ]
         dump = _make_dump(tmp_path, entries)
 
         results, counter, _scanned = select_from_archive(
-            dump, {"anime": 5, "game": 5, "novel": 5, "comic": 0}
+            dump, {"anime": 5, "game": 5, "novel": 5, "comic": 5}
         )
 
-        assert 1 not in [p["id"] for p in results]
-        assert 2 not in [p["id"] for p in results]
-        assert [p["id"] for p in results] == [3]
-        assert results[0]["_content_type"] == "novel"
+        assert {p["id"] for p in results} == {3, 4}
+        by_type = {p["id"]: p["_content_type"] for p in results}
+        assert by_type == {3: "comic", 4: "novel"}
+        assert counter["comic"] == 1
+        assert counter["novel"] == 1
 
     def test_summary_required(self, tmp_path):
         entries = [_entry(1, rank=1, summary=""), _entry(2, rank=2)]

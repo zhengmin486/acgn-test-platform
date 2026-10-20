@@ -13,3 +13,12 @@ def _disable_bangumi_meta_on_demand(monkeypatch):
     需要验证补全逻辑的用例自行 monkeypatch 或直接调用 sync_content_meta(payload=...)。
     """
     monkeypatch.setattr(settings, "bangumi_meta_on_demand", False)
+
+
+@pytest.fixture(autouse=True)
+def _disable_article_image_download(monkeypatch):
+    """测试一律不联网：资讯图片默认不下载（保留源站外链）。
+
+    需要验证下载/本地化的用例自己注入 downloader，或把这个开关 monkeypatch 回 True。
+    """
+    monkeypatch.setattr(settings, "article_image_download_enabled", False)

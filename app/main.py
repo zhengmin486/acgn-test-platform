@@ -11,6 +11,7 @@ from fastapi import Depends, FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from app import (
+    account_pages,
     api,
     auth,
     business_pages,
@@ -41,8 +42,9 @@ from app.database import engine
 BASE_DIR = Path(__file__).resolve().parent
 
 app = FastAPI(
-    title="ACGN 内容服务与接口自动化测试平台",
-    description="ACGN 内容服务与接口自动化测试平台（数据已接入数据库层，本地验证默认 SQLite）。",
+    title="Otaku · ACGN 内容平台与接口自动化测试后台",
+    description="Otaku 是一个 ACGN 内容平台（作品 / 资讯 / 档期），同进程内含一套接口回归测试后台"
+    "（数据已接入数据库层，本地验证默认 SQLite）。",
     version="0.2.0",
     # 应用级依赖：每个请求解析一次当前登录用户（含内容页面），供模板与守卫复用。
     dependencies=[Depends(load_current_user)],
@@ -60,12 +62,15 @@ app.include_router(cases.router, dependencies=[Depends(require_admin_api)])
 app.include_router(business_pages.router)
 # 个人空间页面（/me）：内容平台的登录用户功能，未登录跳登录页（路由内部校验）。
 app.include_router(space_pages.router)
-# 词条申请（/submit、/contents/{id}/edit）：登录用户提交新增 / 修改提案，等待审核。
+# 账号设置（/settings/profile、/settings/security）：个人资料 + 邮箱 / 手机的绑定解绑。
+# 从 /me 独立成页（主流站点的「头像菜单 → 账号设置」结构），入口见 base_content.html。
+app.include_router(account_pages.router)
+# 作品申请（/submit、/contents/{id}/edit）：登录用户提交新增 / 修改提案，等待审核。
 app.include_router(submission_pages.router)
 # 封面图片上传（/manage/contents/{id}/cover，仅 staff）：管理员给作品补图 / 换图，
 # 与导入落地的封面同一条 app/media.py 管线（校验 → 落盘 → 双尺寸派生）。
 app.include_router(cover_admin.router)
-# 阿宅画像（/me/persona）：登录用户绑定 Bangumi 用户名、同步公开收藏并生成画像。
+# 御宅成分检测（/me/persona）：登录用户绑定 Bangumi 用户名、同步公开收藏并生成画像。
 app.include_router(persona_pages.router)
 # 免登录试算（/persona）：引流入口，不写库、不建账号，只渲染当次结果。
 app.include_router(persona_pages.public_router)
@@ -97,6 +102,14 @@ if not AVATAR_DIR.is_absolute():
     AVATAR_DIR = BASE_DIR.parent / AVATAR_DIR
 AVATAR_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/avatars", StaticFiles(directory=AVATAR_DIR), name="avatars")
+
+# 资讯图片目录：正文图与头图本地化后落盘，Article.image_url / 正文 [图] 行
+# 存 /article-images/<文件名>。同样支持指到其它盘符。
+ARTICLE_IMAGE_DIR = Path(settings.article_image_storage_dir)
+if not ARTICLE_IMAGE_DIR.is_absolute():
+    ARTICLE_IMAGE_DIR = BASE_DIR.parent / ARTICLE_IMAGE_DIR
+ARTICLE_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/article-images", StaticFiles(directory=ARTICLE_IMAGE_DIR), name="article-images")
 
 # 页面级拒绝的统一处理：未登录 -> 登录页；权限不足 -> 403 页面。
 app.add_exception_handler(LoginRequired, login_required_handler)

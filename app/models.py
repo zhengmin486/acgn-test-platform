@@ -1,8 +1,8 @@
 """内容数据模型（SQLAlchemy 2.0 声明式风格）。"""
 
-from datetime import datetime
+from datetime import date, datetime
 
-from sqlalchemy import Boolean, DateTime, Float, Index, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, Date, DateTime, Float, Index, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -58,10 +58,29 @@ class Content(Base):
     episodes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # 制作 / 声优 / 客观信息最近一次从 Bangumi 补全的时间（为空表示还没补）。
     meta_fetched_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 最近一次补全**失败**的时间（见 app/bangumi_meta.mark_meta_failed）。
+    # 只靠 meta_fetched_at 不够：失败时它保持 NULL，于是每次访问都会重新尝试，
+    # Bangumi 不可达时每个详情页都要白等满超时（线上实测每页 12.5 秒）。
+    # 失败后写本列，冷却期内不再发起请求；成功补全时清空。
+    meta_failed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # 所属系列（系列文件夹 series.id）：同系列的多季 / 剧场版指向同一行，
     # NULL 表示未归系列。与 year 一样经 crud.ensure_content_series_column
     # 幂等补列，且不进 as_dict（API 契约保持不变）。
     series_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 日文原名与别名（搜索增强）：
+    # - title_original：Bangumi 的 name（多为日文）。title 只存 name_cn or name
+    #   二选一，中文名条目的日文原名此前不入库，搜原名永远搜不到；
+    # - aliases：infobox「别名」键拆出的别名（英文名 / 台版译名等），JSON 数组。
+    # 经 crud.ensure_content_title_alias_columns 幂等补列；历史行由
+    # scripts/backfill_title_aliases.py 按官方归档回填。同样不进 as_dict
+    # （API 契约保持不变）。
+    title_original: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    aliases: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    # 书籍细分标注：light_novel（文库轻小说）/ literature（日本普通文学）。
+    # Bangumi 只有一个「小说」platform，两类都在里面；本站不为此拆类型，
+    # 只在卡片与详情页打一枚「文学」角标让用户一眼分辨（详见 app/page_common）。
+    # NULL = 非书籍条目或尚未判定。同样不进 as_dict。
+    book_kind: Mapped[str | None] = mapped_column(String(20), nullable=True)
 
     def as_dict(self) -> dict:
         """序列化为对外 JSON 结构，保持接口契约不变。"""
@@ -290,6 +309,15 @@ class Article(Base):
     String(1000), nullable=True
 )
 
+    # 头图地址：资讯导入时下载源站 keyvisual 到本地（/article-images/...）；
+    # 下载失败时保留源站外链（同域可直连），历史库留 NULL（由回填脚本补）。
+    image_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    # 列表页「作品名／」前缀（aniplex 源站的 IP 归属信号）：导入时从标题
+    # 拆分落库，供识别回填（scripts/link_articles.py）作 extra_names 强信号；
+    # 历史行留 NULL（导入时无此前缀的资讯）。
+    ip_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
     is_published: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True
     )
@@ -306,6 +334,24 @@ class Article(Base):
         onupdate=datetime.now,
     )
 
+    # ---------- 分类 / 优先级（2026-10 资讯重构，三维度分离） ----------
+    # 主体类型（面向用户的分类）：动画 / 漫画 / 轻小说 / 游戏 / 综合动态。
+    # 音乐 / 创作者 / 业界不另立主体，按关联作品归入四类之一（见 scripts/news_classify）。
+    category: Mapped[str] = mapped_column(String(50), nullable=False, default="综合动态")
+    # 游戏子类（仅游戏有意义）：Galgame / 二游 / 其他游戏。
+    subcategory: Mapped[str] = mapped_column(String(20), nullable=False, default="")
+    # 事件类型（辅助分类，不替代主体）：新作发布 / 发售 / 歌曲发布 / 创作者动态 /
+    # 健康状况 / 制作消息 / 行业事件 / 其他。
+    event_type: Mapped[str] = mapped_column(String(20), nullable=False, default="其他")
+    # 地区（内部权重参考，不面向用户）：日本 / 国产 / 欧美 / 其他。
+    region: Mapped[str] = mapped_column(String(20), nullable=False, default="日本")
+    # 来源类型（排序与折叠用）：媒体编译 / 原文 / 官方PR / 用户投稿。
+    source_type: Mapped[str] = mapped_column(String(20), nullable=False, default="媒体编译")
+    # 优先级总分（落库，供首页 / 资讯频道排序）：主体 + 子类 + 地区 + 事件 + 来源 叠加。
+    priority_score: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # 成人向标记：展示层按全局「隐藏成人内容」开关遮蔽图片与露骨摘要，不删除、不过滤。
+    is_adult: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
 
 class AnimeSchedule(Base):
     """新番档期条目（数据来源：Yuc.wiki 档期页，独立于 Content / Article）。
@@ -315,6 +361,10 @@ class AnimeSchedule(Base):
       采用“规范化主标题”（去空白、小写）作为键，与 season_code 联合唯一，
       同一档期重复同步时据此去重与更新；
     - weekday：播出星期，1=周一 … 7=周日；无法可靠提取时为 NULL；
+    - broadcast_time：具体播出时间 HH:MM（可能 24:00+ 深夜时段），
+      取自档期页星期区播出位，按海报/标题关联回填；
+    - work_type：作品类型（原创动画 / 漫画改编动画 / 小说改编动画 等）；
+    - work_tags：题材标签，源站原文（斜杠或换行分隔）；
     - platforms：确认的播放平台链接列表 [{name, url}]，JSON 存储；
     - 同步只新增/更新本表记录，不触碰 Content、Article 等其他模块数据。
     """
@@ -335,6 +385,8 @@ class AnimeSchedule(Base):
     weekday: Mapped[int | None] = mapped_column(Integer, nullable=True)
     broadcast_time: Mapped[str | None] = mapped_column(String(20), nullable=True)
     broadcast_note: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    work_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    work_tags: Mapped[str | None] = mapped_column(String(200), nullable=True)
     image_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     platforms: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     source_url: Mapped[str] = mapped_column(String(500), nullable=False)
@@ -354,6 +406,8 @@ class AnimeSchedule(Base):
             "weekday": self.weekday,
             "broadcast_time": self.broadcast_time,
             "broadcast_note": self.broadcast_note,
+            "work_type": self.work_type,
+            "work_tags": self.work_tags,
             "image_url": self.image_url,
             "platforms": list(self.platforms or []),
             "source_url": self.source_url,
@@ -439,12 +493,29 @@ class User(Base):
       历史账号该列为 NULL，按「从未改密」处理，不受影响。
     - bio 为个人空间「简介」：自由文本，NULL / 空串表示未填写；
       历史库由 crud.ensure_user_profile_columns 幂等补列，不影响既有账号。
+    - gender / birthday / location 为「个人资料」三字段，**只在个人空间展示给本人**：
+      站内没有公开用户主页，任何页面都不会把这三项展示给别人；gender 取值见
+      crud.GENDER_LABELS（NULL = 保密未填），birthday 只存日期不含时间，
+      星座与年龄由 crud.zodiac_sign / crud.age_from_birthday 现算，不落库。
+    - phone / phone_bound_at 为「绑定手机」（账号与安全页）：
+      * phone 只在**验证码校验通过之后**才落库，因此「有值」就等于「已验证」，
+        不需要额外的 phone_verified 标志位；NULL 表示未绑定；
+      * 归一化规则见 crud.normalize_phone（去空格/连字符，去掉 +86 前缀，
+        只存 11 位大陆号码）；
+      * 历史库由 crud.ensure_user_profile_columns 幂等补列。
+    - llm_provider / llm_api_key / llm_base_url / llm_model 为「成分检测 LLM 文案」
+      的用户级接口配置（OpenAI 兼容）：填了 Key 就走用户自己的额度生成文案，
+      没填回落到站点级配置（PERSONA_LLM_* 环境变量）。Key 只服务端使用、
+      页面脱敏回显；历史库由 crud.ensure_user_llm_columns 幂等补列。
     """
 
     __tablename__ = "users"
     __table_args__ = (
         Index("uq_users_username", "username", unique=True),
         Index("uq_users_email", "email", unique=True),
+        # 手机号唯一：绑定后即「第二身份凭据」，同一个号不能挂在两个账号上。
+        # 唯一索引允许多行 NULL，未绑定账号互不冲突。
+        Index("uq_users_phone", "phone", unique=True),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -458,6 +529,21 @@ class User(Base):
     bio: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 头像：站内相对地址（/avatars/avatar_u<id>_<ts>.webp）；NULL 表示用渐变首字占位。
     avatar_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # --- 个人资料（仅本人可见）：性别 / 生日 / 所在地 ---
+    # gender 取值见 crud.GENDER_LABELS；NULL 表示保密或没填。
+    gender: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    # birthday 只存日期（不存时间）；NULL 表示未填写。星座与年龄现算，不落库。
+    birthday: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # location 为所在地自由文本（如「浙江 杭州」），站内不做省市级联。
+    location: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # --- 账号与安全：绑定手机（有值即已验证，见类文档） ---
+    phone: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    phone_bound_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 成分检测 LLM 文案的用户级接口配置（OpenAI 兼容协议）。
+    llm_provider: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    llm_api_key: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    llm_base_url: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    llm_model: Mapped[str | None] = mapped_column(String(100), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
 
 
@@ -517,11 +603,16 @@ class ContentViewHistory(Base):
 
 
 class ContentSubmission(Base):
-    """词条申请：登录用户对内容的「新增 / 修改」提案，需管理员审核。
+    """作品申请：登录用户对内容的「新增 / 修改」提案，需管理员审核。
 
-    - kind：create（新增词条）/ update（修改已有词条，content_id 指向目标）；
-    - 提交时把提案字段（标题 / 类型 / 简介 / 评分）整体快照存入本表，
+    - kind：create（新增作品）/ update（修改已有作品，content_id 指向目标）；
+    - 提交时把提案字段（标题 / 类型 / 简介）整体快照存入本表，
       审核通过后才写到 contents，审核前不改动任何业务数据；
+    - rating 不接收用户提交：只存「提交时目标作品的当前评分」快照，供审核页
+      展示原值；新增申请存 0.0。评分由外部数据源（Bangumi 等）链路维护；
+    - year / media / episodes / source_material 是客观信息，与 contents 同名列一一
+      对应（经 crud.ensure_content_submission_extra_columns 幂等补列），
+      让申请能覆盖详情页展示的全部结构化信息，而不是只有标题与简介；
     - status：pending（待审核）/ approved（已通过）/ rejected（已驳回）；
     - reviewer_id / reviewed_at / review_note 记录审核人、时间与驳回说明；
     - applied_content_id 记录通过后实际写入 / 更新的作品主键，便于追溯；
@@ -542,6 +633,11 @@ class ContentSubmission(Base):
     content_type: Mapped[str] = mapped_column(String(20), nullable=False)
     summary: Mapped[str] = mapped_column(Text, nullable=False)
     rating: Mapped[float] = mapped_column(Float, nullable=False)
+    # 客观信息（与 contents 同名列对应）；全部可空：修改申请里留空表示「不改动原值」。
+    year: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    media: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    episodes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_material: Mapped[str | None] = mapped_column(String(20), nullable=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
     reviewer_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -551,7 +647,7 @@ class ContentSubmission(Base):
 
 
 class BangumiCollection(Base):
-    """个人空间「阿宅画像」的 Bangumi 收藏快照（按用户名读取公开收藏）。
+    """个人空间「御宅成分检测」的 Bangumi 收藏快照（按用户名读取公开收藏）。
 
     - (user_id, subject_id) 联合唯一：同一账号同一作品只保留一条，重新同步为覆盖写；
     - subject_type 为 Bangumi 原始类型（1 书籍 / 2 动画 / 3 音乐 / 4 游戏 / 6 三次元），
@@ -591,8 +687,46 @@ class BangumiCollection(Base):
     fetched_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
 
 
+class BilibiliFollow(Base):
+    """个人空间「御宅成分检测」的 B站追番快照（按数字 UID 读公开追番列表）。
+
+    - (user_id, season_id) 联合唯一：同一账号同一番剧只保留一条，重新同步为覆盖写；
+    - season_type 为 B站原始类型（1 番剧 / 4 国创，均按动画参与画像；影视不拉）；
+    - follow_status 为追番状态（1 想看 / 2 在看 / 3 看过），分析时映射到
+      统一口径（在看 / 看过都算看过，与 Bangumi 一致）；
+    - rating 为 B站评分（部分条目没有，None）；follow_count 为追番人数（热度）；
+    - tags 存 styles 题材标签（缺的是真没打标签）；series_title / season_title
+      保留系列与分季信息，供跨源去重（Bangumi 优先）与系列归并；
+    - 接口匿名可读（无需 cookie），53013 = 用户把追番列表设成隐私。
+    """
+
+    __tablename__ = "bilibili_follows"
+    __table_args__ = (
+        UniqueConstraint(
+            "user_id", "season_id", name="uq_bilibili_follows_user_season"
+        ),
+        Index("ix_bilibili_follows_user", "user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    season_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    title: Mapped[str] = mapped_column(String(300), nullable=False)
+    season_type: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    season_type_name: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    follow_status: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    rating: Mapped[float | None] = mapped_column(Float, nullable=True)
+    follow_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    year: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    tags: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    series_title: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    season_title: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    is_finish: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    fetched_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
+
+
 class PersonaReport(Base):
-    """阿宅画像报告（每个账号一份，重新生成为覆盖写）。
+    """御宅成分检测报告（每个账号一份，重新生成为覆盖写）。
 
     - payload：结构化画像（维度分数、标签、统计、模板文案、LLM 提示词）；
     - narrative：可选的 LLM 文案（直接调用或用户从网页版贴回）；
@@ -616,6 +750,8 @@ class PersonaReport(Base):
     # 重新生成时沿用，不清空。
     tone_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     extra_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # B站追番表绑定的数字 UID（成分检测第二数据源；NULL 表示未绑定）。
+    bilibili_mid: Mapped[str | None] = mapped_column(String(30), nullable=True)
     generated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
 
 
@@ -710,14 +846,15 @@ class ArticleContentLink(Base):
     """资讯-作品关联表：(article_id, content_id) 联合唯一，重复识别幂等。
 
     作品由「自动识别」写入（见 app/article_tags.py）：拿库中作品标题
-    （contents.title）在资讯文本里做子串匹配，命中的作品按出现频次截断后
-    入库，是「这篇资讯在讲哪部作品」的结构化答案。
+    （contents.title）、译名（title_original / aliases）与作品信息词表
+    （作者 / 公司 / 系列）在资讯文本里匹配，命中的作品按得分截断后入库，
+    是「这篇资讯在讲哪部作品」的结构化答案。
 
     - 替换式写入（crud.replace_article_content_links）：重新识别先删旧关联；
     - 弱关联：作品被后台删除后关联行仍保留，页面内连接查不到即不展示；
-    - 与作品详情页的「相关资讯」（crud.list_related_articles，请求时实时
-      文本匹配）互为反向：那一侧保证新导入作品立即可见，这一侧把识别结果
-      落库，供资讯页展示与后续统计使用。
+    - 与作品详情页的「相关资讯」（crud.list_related_articles）互为反向：
+      那一侧 = 本表识别关联 ∪ 标题 LIKE（显式关联优先占位），这一侧把
+      识别结果落库，供资讯页展示与作品页反查使用。
     """
 
     __tablename__ = "article_content_links"
@@ -729,6 +866,43 @@ class ArticleContentLink(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     article_id: Mapped[int] = mapped_column(Integer, nullable=False)
     content_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
+
+
+class ArticleEntity(Base):
+    """资讯-作品信息关联表：(article_id, name) 联合唯一，重复识别幂等。
+
+    「作品信息」标签（与 article_tags 的题材词表是两套东西）：词表来自
+    库内作品的结构化信息，不是 Bangumi 题材标签——
+
+    - ``kind=entity``：作者 / 公司名（entities 表，Bangumi infobox 识别），
+      ``entity_type`` 快照 person / company / association；
+    - ``kind=series``：系列名（series 表，同系列的多季 / 剧场版）；
+    - ``kind=alias``：作品译名（contents 的 title_original / aliases），
+      ``content_id`` 指向该作品（实体 / 系列行留 NULL）。
+
+    由自动识别写入（见 app/article_tags.match_work_info）：资讯文本命中
+    后按得分截断入库；实体 / 系列名再经 content_entity_links /
+    contents.series_id 反查作品，为 article_content_links 补分（标题
+    精确命中优先，作品信息命中权重更低、只作补充关联）。
+
+    与 ArticleTag / ArticleContentLink 同一套弱关联 + 替换式写入语义：
+    资讯被后台删除后关联行仍保留（文章 id 不会再被复用命中）。
+    """
+
+    __tablename__ = "article_entities"
+    __table_args__ = (
+        UniqueConstraint("article_id", "name", name="uq_article_entities_article_name"),
+        Index("ix_article_entities_name", "name"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    article_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    entity_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    content_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    score: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
 
 
@@ -781,6 +955,44 @@ class ContentEntityLink(Base):
     content_id: Mapped[int] = mapped_column(Integer, nullable=False)
     entity_id: Mapped[int] = mapped_column(Integer, nullable=False)
     role: Mapped[str] = mapped_column(String(40), nullable=False)
+
+
+class ContentRelation(Base):
+    """作品之间的真实关系：前作 / 续作 / 衍生作。
+
+    与 ContentEntityLink（作品 ↔ 作者/公司）互补：那张表回答「谁做的」，
+    这张表回答「和哪部作品是同一条线上的」。
+
+    - **数据来源是 Bangumi 关联条目端点**（/v0/subjects/{id}/subjects），
+      由 scripts/backfill_content_relations.py 批量回填；**不靠标题前缀推断**，
+      前缀聚类（crud.series_title_key）只服务首页分组去重，不进本表；
+    - 方向语义：``from_content_id`` 视角下 ``to_content_id`` 是它的
+      ``relation_type``（「本作 → 第2期」= 续作）。反向查询时类型取镜像
+      （续作 ↔ 前作，衍生作不变），见 crud.list_content_relations；
+    - 只有**双方作品都在库内**才写（脚本侧按 bangumi_id 配对保证），
+      页面查询无需再过滤悬空 id；
+    - 与系列（contents.series_id）是两条独立来源：系列文件夹覆盖多季/
+      剧场版，关系表覆盖前作/续作/衍生作，详情页系列区取两者并集；
+    - 弱关联风格与其余关联表一致：作品被删后行可留，内连接查不到即不展示。
+    """
+
+    __tablename__ = "content_relations"
+    __table_args__ = (
+        UniqueConstraint(
+            "from_content_id", "to_content_id", "relation_type",
+            name="uq_content_relations_from_to_type",
+        ),
+        Index("ix_content_relations_from", "from_content_id"),
+        Index("ix_content_relations_to", "to_content_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    from_content_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    to_content_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    relation_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=datetime.now
+    )
 
 
 class Series(Base):
@@ -893,6 +1105,63 @@ class PasswordResetToken(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     user_id: Mapped[int] = mapped_column(Integer, nullable=False)
     token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
+
+
+class EmailChangeToken(Base):
+    """更换 / 绑定邮箱的确认令牌：库中只存哈希，明文只出现在确认邮件里。
+
+    与 EmailVerificationToken 分开的**唯一原因**是它还需要记住「换成哪个邮箱」：
+    验证令牌只管「这个账号的邮箱已验证」，换绑令牌管「这个账号的邮箱要改成 X」。
+    因此多一列 new_email（目标是哪个地址），其余同构：一次性、带过期时间、
+    签发时作废旧令牌。
+
+    - 确认时把 users.email 改写成 new_email，并顺带标记为已验证
+      （能收到这封信本身就证明了地址可用）；
+    - 未消费的令牌永远不改动 users，用户放弃确认即等于什么都没发生。
+    """
+
+    __tablename__ = "email_change_tokens"
+    __table_args__ = (
+        Index("uq_email_change_tokens_hash", "token_hash", unique=True),
+        Index("ix_email_change_tokens_user", "user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    # 目标邮箱（已归一化）；确认前不动 users.email。
+    new_email: Mapped[str] = mapped_column(String(200), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
+
+
+class PhoneVerificationCode(Base):
+    """手机绑定 / 解绑的短信验证码：库中只存验证码哈希与目标号码。
+
+    - purpose 只有 bind / unbind 两种：bind 走「校验新号码」，unbind 走
+      「校验当前绑定号码」，两者的码互不通用；
+    - 6 位数字码的空间只有一百万，必须同时限制有效期（默认 5 分钟）与
+      尝试次数（crud.PHONE_CODE_MAX_ATTEMPTS），超限即作废、要求重新发送；
+    - 签发时作废该账号同类未消费记录，保证「同一时刻只有一个有效码」。
+    """
+
+    __tablename__ = "phone_verification_codes"
+    __table_args__ = (
+        Index("ix_phone_codes_user", "user_id"),
+        Index("ix_phone_codes_hash", "code_hash"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    # 验证码针对的号码（bind = 新号码，unbind = 当前绑定号码）。
+    phone: Mapped[str] = mapped_column(String(20), nullable=False)
+    purpose: Mapped[str] = mapped_column(String(10), nullable=False)
+    code_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)

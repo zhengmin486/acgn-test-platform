@@ -46,9 +46,13 @@ class Settings(BaseSettings):
     # 任何非法取值都按 invite 处理（安全默认），只有显式 open 才放开发布。
     registration_mode: str = "invite"
 
-    # ---------- 阿宅画像（Bangumi 公开收藏 + 可选 LLM） ----------
+    # ---------- 御宅成分检测（Bangumi 公开收藏 + 可选 LLM） ----------
     # Bangumi API 基址，一般不用改。
     bangumi_api_base: str = "https://api.bgm.tv"
+    # 详情页元数据补全单独走哪个基址：留空则沿用 bangumi_api_base。
+    # 单独一项是为了**只**让作品资料补全指向可用镜像，不牵动上面成分检测的
+    # 收藏同步（线上服务器直连 api.bgm.tv 被 DNS 污染，镜像 bgmapi.anibt.net 可用）。
+    bangumi_meta_api_base: str = ""
     # Bangumi 要求可识别的 User-Agent；这里带上项目标识。
     bangumi_user_agent: str = "acgn-persona/0.1 (local dev)"
     # 出网代理（如 http://127.0.0.1:9910）；留空则用系统默认（含环境变量代理）。
@@ -62,14 +66,42 @@ class Settings(BaseSettings):
     # 免登录试算（引流用）：最多拉多少条收藏、同一 IP 多少秒内只允许一次。
     # 试算结果不落库，只渲染当次页面；登录后才保存快照与报告。
     persona_guest_max_items: int = 200
+    # B站游客试算单独压到 100：翻页少、响应快，也降低被当免费代理刷的风险。
+    persona_guest_bilibili_max_items: int = 100
+    # 20 秒防抖：防双击 / 连点，不占额度（与下面的日限正交）。
     persona_guest_cooldown_seconds: int = 20
-    # 详情页按需补全制作 / 声优 / 客观信息（2 次 Bangumi 请求）；失败静默，不阻塞页面。
+    # 游客试算双闸日限（24 小时滑动窗口）：
+    # - 设备闸：签名的设备 Cookie（HttpOnly），同一设备每天最多 3 次；
+    #   清 Cookie / 无痕可绕过，所以再叠一层 IP 闸；
+    # - IP 闸：同一 IP 每天最多 10 次（放宽：NAT / 校园网后多设备共用出口，
+    #   额度给足才不误伤，只用来兜住「清 Cookie 连刷」的脚本）；
+    # - 登录用户不受限（游走路：登录后绑定数据源随便同步）。
+    persona_guest_device_daily_limit: int = 3
+    persona_guest_ip_daily_limit: int = 10
+    # 详情页按需补全制作 / 声优 / 客观信息；**不在请求内同步执行**，交给后台任务，
+    # 失败写 meta_failed_at 进入冷却（见 app/business_pages._refresh_content_assets）。
     # 批量补全用 scripts/backfill_meta.py，产物一致。
     bangumi_meta_on_demand: bool = True
     # 补全结果的缓存有效期（天）：同一部作品超过这个时间再次访问才重拉。
     bangumi_meta_ttl_days: int = 30
+    # 后台补全的单接口超时（秒）。比 bangumi_timeout 短：后台任务不该长占线程，
+    # 拉不到就等冷却结束后再试，而不是把三接口的超时叠起来。
+    bangumi_meta_timeout: float = 5.0
+    # 补全失败后的冷却（小时）：冷却期内详情页不再发起请求。
+    # 线上 Bangumi 被污染时，没有冷却的旧实现会让每个详情页每次都等满超时。
+    bangumi_meta_retry_cooldown_hours: int = 6
     # Bangumi 请求超时（秒）。
     bangumi_timeout: float = 15.0
+    # B站追番表（成分检测第二数据源）：匿名公开接口即可读，无需登录 / cookie。
+    # 国内站点直连；UA 必须是浏览器形态，否则容易触发 -352 风控。
+    bilibili_user_agent: str = (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+    )
+    # 单次同步最多拉取多少条追番（ps 上限 30，翻页拉取）。
+    bilibili_max_items: int = 500
+    # B站接口超时（秒）。
+    bilibili_timeout: float = 15.0
     # 可选：LLM 文案生成。国内主流三家都兼容 OpenAI 的 /chat/completions 协议，
     # 只填 PERSONA_LLM_PROVIDER + PERSONA_LLM_API_KEY 即可，地址与模型按预设自动补：
     #   deepseek → https://api.deepseek.com                 / deepseek-chat
@@ -95,7 +127,7 @@ class Settings(BaseSettings):
     backup_retain: int = 14
 
     # ---------- 增量入库通道（app/ingest_api.py） ----------
-    # 服务器无境外出网，词条由本机抓取后 POST 回服务器入库；请求头 X-Ingest-Key
+    # 服务器无境外出网，作品数据由本机抓取后 POST 回服务器入库；请求头 X-Ingest-Key
     # 比对这个值。留空 = 端点一律 503（默认关闭），配了才启用。
     # 只放生产 .env（chmod 600），不要提交进仓库。
     ingest_api_key: str = ""
@@ -113,6 +145,33 @@ class Settings(BaseSettings):
     avatar_storage_dir: str = "app/static/avatars"
     # 上传原图大小上限：头像会被裁成 256×256 WebP，2MB 足够。
     avatar_upload_max_bytes: int = 2 * 1024 * 1024
+
+    # ---------- 资讯图片 ----------
+    # 资讯正文图与头图的本地目录（挂到 /article-images）；相对路径按项目根解析。
+    article_image_storage_dir: str = "app/static/article_images"
+    # 单张资讯图大小上限（字节）：只认魔术字节，不信 URL 后缀与 Content-Type。
+    article_image_max_bytes: int = 5 * 1024 * 1024
+    # 导入/回填时是否下载资讯图；关闭时只记源站外链（测试里全局关闭，避免触网）。
+    article_image_download_enabled: bool = True
+
+    # ---------- 多源资讯每日同步（scripts/news_daily.py） ----------
+    # 每天新入库资讯总上限（全站、不分源）。cron 每 4 小时跑一次也按自然日累计，
+    # 当天已入库多少就从配额里扣多少，跑满即停。
+    # 取数口径：日语源优先于中文源；题材优先级 动画 > 漫画 > 轻小说 > 游戏 > 其他。
+    news_daily_quota: int = 30
+    # 日文源自动翻译（OpenAI 兼容接口）：NEWS_LLM_* 留空则回退 PERSONA_LLM_*，
+    # 两边都没配就跳过日文源、只用中文源（不产出看不懂的日文条目）。
+    news_llm_provider: str = ""
+    news_llm_base_url: str = ""
+    news_llm_api_key: str = ""
+    news_llm_model: str = ""
+    news_translate_timeout: float = 60.0
+
+    # ---------- 成人内容展示（不是年龄验证 / 分级） ----------
+    # 全局「隐藏成人内容」开关：开启时，标记 is_adult 的资讯在展示层隐藏头图与露骨摘要，
+    # 用普通占位提示替代；作品名 / 发售日 / 非露骨资讯仍正常展示。默认开启。
+    # 这是展示偏好而非权限系统——不实现年龄验证、不扩展账号权限。
+    news_hide_adult_content: bool = True
 
     # ---------- 封面图片处理（app/media.py） ----------
     # 列表缩略图宽度（px）：只缩不放，输出 WebP；列表页流量主要靠它省。
@@ -138,7 +197,21 @@ class Settings(BaseSettings):
     smtp_use_ssl: bool = False
     smtp_use_tls: bool = True
     smtp_from_address: str = ""
-    smtp_from_name: str = "ACGN 平台"
+    smtp_from_name: str = "Otaku"
+
+    # ---------- 短信验证码（手机绑定 / 解绑） ----------
+    # 与「邮件可插拔」同一思路：sms_api_url + sms_api_key 都留空 = 不真发短信，
+    # 验证码写日志并在页面上直接展示（仅测试环境可接受），保证本地无短信网关
+    # 也能把绑定 / 解绑流程走完。接入具体服务商时只需要改 app/sms.py 的
+    # 请求体拼装，业务代码不动。
+    sms_api_url: str = ""
+    sms_api_key: str = ""
+    # 短信签名，多数服务商要求与报备内容一致；未配置网关时仅用于日志。
+    sms_sign_name: str = "Otaku"
+    # 验证码有效期（秒），默认 5 分钟——6 位数字码不能长留。
+    sms_code_ttl_seconds: int = 5 * 60
+    # 同一账号两次发送验证码之间的冷却时间（秒），防止被拿来轰炸手机。
+    sms_resend_cooldown_seconds: int = 60
 
     @property
     def registration_invite_only(self) -> bool:

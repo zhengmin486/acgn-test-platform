@@ -34,6 +34,16 @@ templates = Jinja2Templates(
     context_processors=[_inject_current_user],
 )
 
+# 静态资源缓存版本号（模板全局）：取 style.css 的 mtime。
+# 模板以 /static/style.css?v={{ asset_v }} 引用，样式一改版本号就变，
+# 浏览器自动拉新文件，不再出现「改了 CSS 用户端还是旧样式」的缓存问题；
+# 文件缺失（异常环境）时退化为固定值，不影响渲染。
+try:
+    templates.env.globals["asset_v"] = str(int((BASE_DIR / "static" / "style.css").stat().st_mtime))
+except OSError:
+    templates.env.globals["asset_v"] = "1"
+
+
 # 封面图片助手（模板全局）：本地封面走 /media 派生图端点（缩略图 / 压缩全图），
 # 远端完整地址原样透传；模板里直接 {{ thumb_src(item.image_url) }}。
 templates.env.globals["thumb_src"] = media.thumb_src
@@ -44,6 +54,26 @@ templates.env.globals["full_src"] = media.full_src
 # 所以提升到这里注册为 Jinja 全局；business_pages 仅 re-export 保持旧导入路径不变。
 CONTENT_TYPE_LABELS = {"anime": "动画", "comic": "漫画", "game": "游戏", "novel": "轻小说"}
 templates.env.globals["type_labels"] = CONTENT_TYPE_LABELS
+
+# 站点品牌（2026-10-19 改名）：**Otaku** 是站名，「ACGN 内容平台」降级为站点性质。
+# 页面标题后缀、页脚副标、404 分区名都从这里取——模板不再各自写死站名，
+# 以后改名只改这两个常量（原先 38 处标题后缀各写一遍，改一次要全库搜替换）。
+SITE_NAME = "Otaku"
+SITE_TAGLINE = "ACGN 内容平台"
+templates.env.globals["site_name"] = SITE_NAME
+templates.env.globals["site_tagline"] = SITE_TAGLINE
+
+# 书籍细分标注（2026-10-19）：Bangumi 书籍区只有一个「小说」platform，里面既有
+# 文库出身的轻小说，也有日本普通小说（纯文学 / 一般文艺）。早先一律入库后，
+# 轻小说区混进《罪与罚》《红楼梦》这类普通书籍。
+#
+# 但「文学」**不是一个新类型**：拆类型的代价是导航、筛选、统计、我的空间各处的
+# 类型枚举都要改一遍，而用户视角这两类都在同一个「轻小说区」翻——真正需要的
+# 只是「这本书其实是普通文学，不是文库轻小说」的一眼区分。
+# 所以：类型仍是 novel，额外用一个轻量标注列 contents.book_kind 打标，
+# 卡片与详情页显示「文学」角标，参与不了、也不该参与类型筛选。
+BOOK_KIND_LABELS = {"light_novel": "轻小说", "literature": "文学"}
+templates.env.globals["book_kind_labels"] = BOOK_KIND_LABELS
 
 
 # 按 404 主体归属选择所属区域的布局与返回入口：

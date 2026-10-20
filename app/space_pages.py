@@ -1,4 +1,4 @@
-"""个人空间页面路由：用户信息 / 简介编辑 / 作品收藏 / 浏览记录 / 词条申请。
+"""个人空间页面路由：用户信息 / 作品收藏 / 浏览记录 / 作品申请。
 
 边界与约定：
 - 整个模块只要求登录（不限制角色）：路由级挂 ``require_login_page``，
@@ -9,7 +9,10 @@
   因此收藏 Tab 是唯一列表，状态在行内展示与切换（见 models.ContentFavorite）；
 - 写操作统一 PRG：303 跳回 ``/me``（或来源详情页）并用查询参数回显结果，
   避免刷新重复提交；
-- 页面布局沿用内容平台（base_content.html），个人空间是内容平台的登录用户功能。
+- 页面布局沿用内容平台（base_content.html），个人空间是内容平台的登录用户功能；
+- **资料编辑不在这里**：简介 / 性别 / 生日 / 所在地 / 邮箱 / 手机都在账号设置
+  （/settings/profile、/settings/security，见 app/account_pages.py）。/me 只展示
+  「我收藏了什么」，不承担设置功能。
 """
 
 from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
@@ -70,12 +73,12 @@ def space_page(
     status: str | None = Query(default=None, max_length=20),
     page: int = Query(default=1, ge=1),
 ):
-    """个人空间：用户信息 + 简介编辑 + 收藏 / 浏览记录 / 词条申请（Tab 切换 + 分页）。
+    """个人空间：用户信息 + 简介编辑 + 收藏 / 浏览记录 / 作品申请（Tab 切换 + 分页）。
 
     - 收藏 Tab 支持两级筛选：``?type=`` 按内容类型（追番 / 漫画 / 游戏 / 轻小说）、
       ``?status=`` 按标注（看过 / 未看 / 想看，``unmarked`` 为未标注）；
     - 标注与收藏是同一行数据，直接在这个列表里展示与切换，没有独立标注 Tab；
-    - 词条申请 Tab 展示本人提交的新增 / 修改提案及审核状态；
+    - 作品申请 Tab 展示本人提交的新增 / 修改提案及审核状态；
     - 非法 type / status 一律宽容忽略，回退为「全部」。
     """
     account = _current_account(request, db)
@@ -163,20 +166,8 @@ def space_page(
             ),
             "submission_status_labels": crud.SUBMISSION_STATUS_LABELS,
             "submission_kind_labels": crud.SUBMISSION_KIND_LABELS,
-            "bio_max_length": crud.MAX_BIO_LENGTH,
         },
     )
-
-
-@router.post("/me/profile")
-def update_profile(request: Request, db: DbSession, bio: str = Form(default="")):
-    """保存简介：空串表示清除简介；超长只回显错误，不落库。"""
-    account = _current_account(request, db)
-    try:
-        crud.set_user_bio(db, account, bio)
-    except ValueError:
-        return RedirectResponse("/me?bio=error", status_code=303)
-    return RedirectResponse("/me?bio=ok", status_code=303)
 
 
 @router.post("/me/avatar")

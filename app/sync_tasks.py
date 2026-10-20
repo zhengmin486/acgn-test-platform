@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from app import crud
+from app.config import settings
 from app.database import SessionLocal
 from scripts.import_articles import (
     DEFAULT_LIMIT as ARTICLE_DEFAULT_LIMIT,
@@ -35,6 +36,8 @@ from scripts.import_articles import (
     run_import_articles,
 )
 from scripts.import_bangumi import ImportSummary, run_import
+from scripts.news_daily import DailyNewsSummary, run_import_daily
+from scripts.fill_schedule_works import fill_works_for_season
 from scripts.sync_yuc_schedule import SyncSummary, resolve_insecure, run_sync
 
 # ---------- 任务标识与状态 ----------
@@ -42,6 +45,7 @@ from scripts.sync_yuc_schedule import SyncSummary, resolve_insecure, run_sync
 TASK_BANGUMI = "bangumi"
 TASK_YUC = "yuc_schedule"
 TASK_ARTICLES = "articles"
+TASK_NEWS = "news"  # 多源每日资讯（cron 用；按自然日配额）
 
 MODE_PREVIEW = "preview"
 MODE_APPLY = "apply"
@@ -146,6 +150,18 @@ TASKS: tuple[TaskSpec, ...] = (
         scope_help=(
             f"从 Aniplex 官方新闻站抓取，按站点栏目筛选，"
             f"留空取最新 {ARTICLE_DEFAULT_LIMIT} 条"
+        ),
+    ),
+    TaskSpec(
+        key=TASK_NEWS,
+        label="每日资讯（多源）",
+        source="多源：机核 / 游民星空 ACG / アニメ！アニメ！ 等",
+        scope_kind="news",
+        scope_label="配额",
+        scope_placeholder="",
+        scope_help=(
+            f"按自然日配额抓取（当前上限 {settings.news_daily_quota} 条/天）；"
+            "日文源需要配置 NEWS_LLM_* 才会启用"
         ),
     ),
 )
@@ -277,6 +293,9 @@ def prepare_scope(spec: TaskSpec, scope_text: str, limit_text: str | None = None
     if spec.scope_kind == "season":
         code = parse_season_code(scope_text)
         return ParsedScope(display=code, season_code=code)
+
+    if spec.scope_kind == "news":
+        return ParsedScope(display=f"每日上限 {settings.news_daily_quota} 条")
 
     category = (scope_text or "").strip()
     limit = parse_article_limit(limit_text)
@@ -473,8 +492,69 @@ def _from_articles(
     return result
 
 
+def _from_daily(
+    summary: DailyNewsSummary, spec: TaskSpec, parsed: ParsedScope, mode: str
+) -> TaskResult:
+    """把多源每日资讯的汇总映射为统一的 TaskResult。"""
+    result = TaskResult(
+        task_key=spec.key,
+        task_label=spec.label,
+        source_label=spec.source,
+        scope=parsed.display,
+        mode=mode,
+        added=summary.added,
+        pending=summary.pending,
+        duplicates=summary.existing,
+        failed=summary.failed,
+        started_at=datetime.now(),
+    )
+    result.details = summary.details[:DETAILS_MAX]
+    message = summary.message
+    # getattr 兜底：服务器上的 scripts/news_daily.py 可能仍是旧版，没有
+    # filtered / deduped 等后加的字段（直接取属性会 AttributeError，导致整条
+    # 资讯任务失败、cron 退出码非 0）。等资讯图管线整批部署后可改回直接取属性。
+    if getattr(summary, "skipped_sources", 0):
+        message += f"；{summary.skipped_sources} 个日文源因未配置翻译 Key 跳过"
+    if getattr(summary, "filtered", 0):
+        message += f"；硬广过滤 {summary.filtered} 条"
+    if getattr(summary, "deduped", 0):
+        message += f"；同事件合并 {summary.deduped} 条"
+    result.message = message
+    return result
+
+
+def _auto_fill_works(
+    season_code: str, *, apply: bool, session_factory, trigger: str
+) -> str:
+    """档期同步后的自动补库：把档期里有、作品库里没有的作品补进作品库。
+
+    补库要逐条联网解析（镜像搜索 + 取条目），一次约几十秒到一分钟。线上是
+    单 worker 的 uvicorn，放在页面点击里会整站阻塞，因此**只在定时任务
+    （trigger=scheduled）里接力**，手动点击不跑。
+    补库失败不影响档期同步本身的结果，只把原因写进运行记录。
+    """
+    if not apply:
+        return "预览模式未执行自动补库"
+    if trigger != TRIGGER_SCHEDULED:
+        return "手动同步不执行自动补库（仅定时任务接力，避免阻塞 Web 进程）"
+    try:
+        summary = fill_works_for_season(
+            session_factory=session_factory,
+            season_code=season_code,
+            apply=True,
+        )
+    except Exception as exc:  # noqa: BLE001 - 补库失败不牵连档期同步结果
+        return f"自动补库未执行：{_short_reason(exc)}"
+    return summary.message
+
+
 def _execute(
-    spec: TaskSpec, parsed: ParsedScope, *, apply: bool, session_factory
+    spec: TaskSpec,
+    parsed: ParsedScope,
+    *,
+    apply: bool,
+    session_factory,
+    trigger: str = TRIGGER_MANUAL,
 ) -> TaskResult:
     """按任务类型分派到既有同步流程，并把结果统一映射为 TaskResult。"""
     mode = MODE_APPLY if apply else MODE_PREVIEW
@@ -490,7 +570,20 @@ def _execute(
             apply=apply,
             insecure=resolve_insecure(None),
         )
-        return _from_yuc(summary, spec, parsed, mode)
+        result = _from_yuc(summary, spec, parsed, mode)
+        # 自动接力补库：档期里有、作品库里没有的作品直接入库。
+        note = _auto_fill_works(
+            parsed.season_code,
+            apply=apply,
+            session_factory=session_factory,
+            trigger=trigger,
+        )
+        result.message = f"{result.message}；{note}" if result.message else note
+        return result
+
+    if spec.key == TASK_NEWS:
+        summary = run_import_daily(session_factory, apply=apply)
+        return _from_daily(summary, spec, parsed, mode)
 
     summary = run_import_articles(
         session_factory, apply=apply, category=parsed.category or None, limit=parsed.limit or None
@@ -552,7 +645,13 @@ def run_task(
             db.close()
 
         try:
-            result = _execute(spec, parsed, apply=apply, session_factory=session_factory)
+            result = _execute(
+                spec,
+                parsed,
+                apply=apply,
+                session_factory=session_factory,
+                trigger=trigger,
+            )
         except Exception as exc:  # 失败也要留下记录，页面再回显原因
             _finalize(run_id, session_factory, status=STATUS_FAILED,
                       message=_short_reason(exc), details=[])

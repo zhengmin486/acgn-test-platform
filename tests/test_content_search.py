@@ -12,18 +12,19 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from app import business_pages
 from app.crud import search_contents, search_contents_page, seed_if_empty
 from app.database import Base, get_db
 from app.main import app
 
 client = TestClient(app)
 
-BULK_COUNT = 25  # 额外批量作品数量，使分页（每页 20）产生第二页
+BULK_COUNT = business_pages.CONTENT_PAGE_SIZE + 1  # 比每页条数多 1 条，保证一定翻出第二页
 
 
 @pytest.fixture()
 def seeded_client(tmp_path):
-    """种子库（6 条）+ 批量作品（25 条，无“的”字摘要，避免干扰关键词统计）。"""
+    """种子库（6 条）+ 批量作品（每页条数 + 1 条，无“的”字摘要，避免干扰关键词统计）。"""
     from app.models import Content
 
     engine = create_engine(
@@ -151,15 +152,20 @@ def test_api_search_type_case_insensitive_and_invalid(seeded_client):
 
 
 def test_api_search_pagination(seeded_client):
-    """分页回显：total/total_pages/翻页切片按 id 稳定排序；越界页返回空列表。"""
+    """分页回显：total/total_pages/翻页切片按排名稳定排序；越界页返回空列表。
+
+    排序契约（2026-10-19 搜索增强）：标题类命中 > 其余，同级内评分降序、
+    id 升序兜底——种子库中 id=2《漫画屋的日常》标题含「的」排第一，
+    其余五条（仅简介命中）按评分降序。
+    """
     page1 = seeded_client.get("/api/contents/search", params={"q": "的", "page_size": 2}).json()
     assert (page1["total"], page1["page"], page1["page_size"], page1["total_pages"]) == (6, 1, 2, 3)
-    assert [i["id"] for i in page1["items"]] == [1, 2]
+    assert [i["id"] for i in page1["items"]] == [2, 3]
 
     page2 = seeded_client.get(
         "/api/contents/search", params={"q": "的", "page_size": 2, "page": 2}
     ).json()
-    assert [i["id"] for i in page2["items"]] == [3, 4]
+    assert [i["id"] for i in page2["items"]] == [1, 5]
 
     beyond = seeded_client.get(
         "/api/contents/search", params={"q": "的", "page_size": 2, "page": 9}
@@ -206,12 +212,14 @@ def test_contents_search_empty_state(seeded_client):
 def test_contents_search_pagination_links(seeded_client):
     """翻页：第二页有“上一页”且只含后半段数据；第一页有“下一页”。"""
     page1 = seeded_client.get("/contents", params={"q": "批量"})
-    assert "共 25 条" in page1.text and "下一页" in page1.text
+    assert f"共 {BULK_COUNT} 条" in page1.text and "下一页" in page1.text
     assert "批量作品01" in page1.text
 
     page2 = seeded_client.get("/contents", params={"q": "批量", "page": 2})
     assert "上一页" in page2.text
-    assert "批量作品21" in page2.text and "批量作品01" not in page2.text
+    # 每页条数取自 business_pages.CONTENT_PAGE_SIZE：第 1 页装走 01 起共 page_size 条，
+    # 第 2 页只剩最后一条。断言用变量而不是写死条数，改每页条数不必回来改测试。
+    assert f"批量作品{BULK_COUNT:02d}" in page2.text and "批量作品01" not in page2.text
     # 末页：「下一页」渲染为禁用态（复用 _pager.html 分页宏，禁用项不可点）
     assert re.search(
         r'<li class="page-item disabled">\s*<a class="page-link"[^>]*>下一页</a>', page2.text
@@ -325,6 +333,41 @@ def test_index_recommends_one_per_series(tmp_path):
         assert titles.count("街角魔族") == 1 and "街角魔族 2丁目" not in titles
         assert titles.count("摇曳百合") == 1 and "摇曳百合 夏日时光！" not in titles
         assert "别当欧尼酱了！" in titles
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+
+def test_index_recommend_module_initial_fill_and_expand(tmp_path):
+    """推荐模块适配网格：取满上限 100，初始 60 铺满各行，其余收起可展开。"""
+    client, factory = _client_with_works(
+        tmp_path,
+        [(f"日常贴贴番{i:03d}", 9.0 - i * 0.01, ["日常", "百合"]) for i in range(100)],
+        "expand.db",
+    )
+    try:
+        html = client.get("/").text
+        titles = re.findall(r'work-card-title">([^<]*)', html)
+        assert len(titles) == 100                      # 模块上限 100
+        assert titles[0] == "日常贴贴番000"             # 命中数优先、评分次之，顺序稳定
+        assert html.count('class="work-card home-top-extra"') == 40  # 100 - 60：收起态
+        assert 'id="home-rec-expand"' in html          # 展开按钮
+        assert "还有 40 部" in html
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+
+def test_index_recommend_module_no_expand_button_when_short(tmp_path):
+    """不足初始条数：不渲染展开按钮，也不留收起类。"""
+    client, factory = _client_with_works(
+        tmp_path,
+        [(f"贴贴番{i:02d}", 8.0 + i * 0.1, ["日常", "百合"]) for i in range(20)],
+        "short.db",
+    )
+    try:
+        html = client.get("/").text
+        assert len(re.findall(r'work-card-title">([^<]*)', html)) == 20
+        assert "home-rec-expand" not in html
+        assert "home-top-extra" not in html
     finally:
         app.dependency_overrides.pop(get_db, None)
 

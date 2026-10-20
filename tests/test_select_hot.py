@@ -37,11 +37,19 @@ class FakeResponse:
         return False
 
 
+# Bangumi 真实条目类型编码：1 书籍（漫画/小说按 platform 拆）、2 动画、
+# 3 音乐、4 游戏、6 真人剧。**没有「6=漫画」这回事**（Archive README 写错了）。
+SUBJECT_TYPE_OF = {"anime": 2, "game": 4, "comic": 1, "novel": 1}
+
+
 def make_candidate(sid, ctype="anime", collect=0, score=0.0, title="x"):
+    # 类型显式传 resolved_type：书籍(1) 光看 subject_type 分不出漫画还是小说，
+    # 真实流程里由 resolve_content_type 从 payload 判好后落进来。
     return select_hot.Candidate(
         bangumi_id=sid,
         source_category="anime",
-        subject_type={"anime": 2, "comic": 6, "game": 4, "novel": 1}[ctype],
+        subject_type=SUBJECT_TYPE_OF[ctype],
+        resolved_type=ctype,
         collect=collect,
         score=score,
         title=title,
@@ -50,9 +58,24 @@ def make_candidate(sid, ctype="anime", collect=0, score=0.0, title="x"):
 
 
 class TestTypeMapping:
-    def test_site_types_covered(self):
-        """站点四类型都要有映射，否则 book 分区的小说/漫画收不进来。"""
-        assert select_hot.TYPE_MAPPING == {1: "novel", 2: "anime", 4: "game", 6: "comic"}
+    def test_site_types_resolvable(self):
+        """四类型都要能从 Bangumi payload 解析出来，否则 book 分区白抓。
+
+        钉住两个坑：
+        - 只看 ``type`` 不够——漫画与小说同属书籍(type=1)，得按 platform 拆；
+        - 真人剧是 type=6 而不是漫画，音乐是 type=3，两者都不收。
+        """
+        assert select_hot.resolve_content_type({"type": 2}) == "anime"
+        assert select_hot.resolve_content_type({"type": 4}) == "game"
+        assert select_hot.resolve_content_type({"type": 1, "platform": "漫画"}) == "comic"
+        assert (
+            select_hot.resolve_content_type(
+                {"type": 1, "platform": "小说", "infobox": [{"key": "出版社", "value": "集英社"}]}
+            )
+            == "novel"
+        )
+        assert select_hot.resolve_content_type({"type": 3}) is None  # 音乐
+        assert select_hot.resolve_content_type({"type": 6}) is None  # 真人剧，不是漫画
 
 
 class TestBrowserPath:
@@ -234,6 +257,37 @@ class TestCollectCandidates:
 
         assert [c.bangumi_id for c in report.candidates] == [10]
         assert report.candidates[0].content_type == "anime"
+
+    def test_book_entries_split_by_platform(self, monkeypatch):
+        """书籍(type=1)按 platform 拆成 comic/novel —— 不能整类丢掉。
+
+        曾经这里只查 TYPE_MAPPING（只有 2/4），book 分区抓回来的书全被跳过，
+        小说 18% / 漫画 12% 配额恒为 0、余额全溢出给动画。
+        """
+        monkeypatch.setattr(
+            select_hot, "fetch_category_ids", lambda *a, **k: ([30, 31, 32], 1)
+        )
+
+        def fake_detail(sid, opener=None, sleep=None):
+            data = {
+                30: {"type": 1, "platform": "漫画"},
+                31: {"type": 1, "platform": "小说"},  # 无中文出版社信号 -> 留作日本文学
+                32: {"type": 1, "platform": "画集"},  # 本站不收
+            }[sid]
+            data.update(
+                {
+                    "name_cn": f"书{sid}",
+                    "rating": {"score": 8.0},
+                    "collection": {"collect": 5000},
+                }
+            )
+            return data
+
+        report = select_hot.collect_candidates(
+            opener=object(), fetch_detail_fn=fake_detail, sleep=lambda _s: None
+        )
+
+        assert [c.content_type for c in report.candidates] == ["comic", "novel"]
 
     def test_skips_titleless_entries(self, monkeypatch):
         """标题为空（只有原名也空）的条目不入库。"""

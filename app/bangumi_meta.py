@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from sqlalchemy import func, select
 
@@ -246,7 +246,8 @@ def build_meta(
 def _api_get(path: str, *, proxy: str = "", timeout: float = 12.0,
              retries: int = 2, sleep=time.sleep):
     opener = persona._build_opener(proxy or settings.bangumi_proxy)
-    url = f"{settings.bangumi_api_base.rstrip('/')}{path}"
+    base = settings.bangumi_meta_api_base or settings.bangumi_api_base
+    url = f"{base.rstrip('/')}{path}"
     return persona._get_json(
         opener, url, settings.bangumi_user_agent, timeout, retries=retries, sleep=sleep
     )
@@ -262,6 +263,36 @@ def fetch_subject_meta(bangumi_id: int, *, proxy: str = "", timeout: float = 12.
     persons = _api_get(f"/v0/subjects/{bangumi_id}/persons", proxy=proxy,
                        timeout=timeout, retries=retries, sleep=sleep)
     return {"subject": subject, "characters": characters, "persons": persons}
+
+
+# ---------- 按需补全的调度判断（详情页只读库，不在这里发请求） ----------
+
+
+def meta_is_stale(content: Content, *, now: datetime | None = None) -> bool:
+    """这部作品现在需不需要补全（纯判断，不联网、不写库）。
+
+    三个条件缺一不可：有 Bangumi 来源、没在失败冷却期内、以及没补过或超过 TTL。
+
+    冷却为什么必须：``meta_fetched_at`` 只在成功时写入，失败时保持 NULL。
+    只按它判断的话，Bangumi 不可达期间**每次**打开详情页都会重新发起请求；
+    旧实现同步等待，线上实测每页卡 12.5 秒。失败时间单独记一列，冷却期内直接放弃。
+    """
+    if content.bangumi_id is None:
+        return False
+    now = now or datetime.now()
+    if content.meta_failed_at is not None:
+        cooldown = timedelta(hours=settings.bangumi_meta_retry_cooldown_hours)
+        if now - content.meta_failed_at < cooldown:
+            return False
+    if content.meta_fetched_at is None:
+        return True
+    return (now - content.meta_fetched_at).days >= settings.bangumi_meta_ttl_days
+
+
+def mark_meta_failed(db, content: Content, *, now: datetime | None = None) -> None:
+    """记录一次补全失败，开启冷却窗口（成功补全会清掉这一列）。"""
+    content.meta_failed_at = now or datetime.now()
+    db.commit()
 
 
 # ---------- 入库 ----------
@@ -299,6 +330,8 @@ def sync_content_meta(
     if meta["year"] and not content.year:
         content.year = meta["year"]
     content.meta_fetched_at = content.meta_fetched_at or datetime.now()
+    # 补全成功即清除失败标记：下一轮 TTL 到期前不再重复请求。
+    content.meta_failed_at = None
     db.commit()
 
     crud.replace_content_studios(db, content.id, meta["studios"])

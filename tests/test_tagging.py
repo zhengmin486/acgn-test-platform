@@ -84,18 +84,34 @@ class TestClassify:
         assert classify_tag("2011") == ("year", "2011")
 
     def test_noise_before_studio_suffix(self):
-        """「国产动画」是噪音不是公司：精确噪音匹配先于公司后缀规则。"""
+        """「国产动画」是噪音不是公司：精确噪音匹配先于公司后缀规则。
+
+        2026-10-20 改版：「剧场版」不再是噪音而是 media（形式载体要搬进
+        contents.media 供筛选用），这里改用「TV动画」之外的纯噪音词守同一条规则。
+        """
         assert classify_tag("国产动画")[0] == "noise"
-        assert classify_tag("剧场版")[0] == "noise"
+        assert classify_tag("国产")[0] == "noise"
+        assert classify_tag("剧场版")[0] == "media"  # 形式载体：从噪音改为 media
+
+    def test_form_tags_are_no_longer_noise(self):
+        """形式载体（媒介 / 原作载体）单独归类，不再与噪音混为一谈。"""
+        assert classify_tag("TV") == ("media", "TV")
+        assert classify_tag("OVA") == ("media", "OVA")
+        assert classify_tag("漫画改") == ("source", "漫画改")
+        assert classify_tag("小说原作") == ("source", "小说改")
 
     def test_new_genre_words(self):
         for name in ("智斗", "权谋", "末日", "丧尸", "转生", "复仇", "武侠", "神怪", "剧情"):
             assert classify_tag(name)[0] == "genre", name
 
     def test_unknown_defaults_to_noise(self):
+        """认不出来的词仍是噪音：人物名 / 平台 / 未知标签。
+
+        TV 与漫画原作已在 2026-10-20 改版中改判为形式载体（media / source），
+        这里用「Switch」（平台）继续守「未知即噪音」的默认分支。
+        """
         assert classify_tag("花泽香菜")[0] == "noise"
-        assert classify_tag("TV")[0] == "noise"
-        assert classify_tag("漫画原作")[0] == "noise"
+        assert classify_tag("Switch")[0] == "noise"
         assert classify_tag("")[0] == "noise"
 
     def test_split_tags_keeps_order_and_earliest_year(self):

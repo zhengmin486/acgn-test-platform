@@ -1,4 +1,4 @@
-"""阿宅画像：Bangumi 公开收藏拉取 + 规则画像 + LLM 提示词 / 调用。
+"""御宅成分检测：Bangumi 公开收藏拉取 + 规则画像 + LLM 提示词 / 调用。
 
 设计要点：
 - 只用 Bangumi 公开收藏接口（无需 OAuth），私有条目读不到；
@@ -17,9 +17,10 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta
 
-from app.models import BangumiCollection
+from app import crud
+from app.models import BangumiCollection, BilibiliFollow
 from app.tagging import (
     GENRE_TAGS,
     STUDIO_ALIASES,
@@ -286,9 +287,15 @@ def work_from_bangumi(row: BangumiCollection) -> dict | None:
     ]
     if not tags:
         tags = [str(tag) for tag in (row.user_tags or []) if str(tag).strip()]
+    title_cn = (row.name_cn or "").strip()
+    title = title_cn or (row.name or "").strip()
+    if not title:
+        return None
     return {
         "subject_id": row.subject_id,
-        "title": row.name_cn or row.name,
+        "title": title,
+        # 日文原名：title 走了中文名时才带上（搜索增强，与 ingest 同口径）
+        "title_original": (row.name or "").strip() if title_cn and row.name and row.name.strip() != title else None,
         "type": site_type,
         "type_label": SITE_TYPE_LABELS.get(site_type, site_type),
         "year": _year(row.date),
@@ -317,6 +324,81 @@ def work_from_site(content, status: str, tags: list[str]) -> dict:
         "rate": 0,
         "source": "site",
     }
+
+
+# B站追番状态 → 统一状态口径：与 Bangumi 一致——在看 / 看过都算「看过」，
+# 想看算「想看」。B站没有「抛弃」信号，避雷只能来自 Bangumi。
+# 定义在分析侧（persona）而非拉取侧（bilibili）：拉取只存原始 follow_status。
+BILIBILI_FOLLOW_STATUS = {1: "want", 2: "seen", 3: "seen"}
+
+
+def work_from_bilibili(row: BilibiliFollow) -> dict:
+    """B站追番快照转成统一作品结构（与 Bangumi / 站内同口径）。
+
+    season_type 只收 1 番剧 / 4 国创，均按动画；评分用 B站 rating（部分条目
+    没有，None 不参与均分）；热度用追番人数。在看 / 看过都按「看过」口径，
+    与 Bangumi 的 collection_type 映射一致。
+    """
+    return {
+        "title": (row.title or "").strip(),
+        "type": "anime",
+        "year": row.year,
+        "status": BILIBILI_FOLLOW_STATUS.get(int(row.follow_status or 0), "interest"),
+        "tags": [str(tag) for tag in (row.tags or []) if str(tag).strip()],
+        "score": row.rating,
+        "popularity": row.follow_count or None,
+        "rate": 0,
+        "source": "bilibili",
+    }
+
+
+# B站标题特有后缀：跨源去重时剥掉（「中文配音」「国语版」不影响作品身份）。
+_BILI_TITLE_SUFFIXES = (
+    "中文配音", "中配版", "国语版", "普通话版", "日语原声", "原版",
+    "4k修复版", "修复版", "完整版",
+)
+
+
+def _cross_source_key(title: str) -> str:
+    """跨源去重键：系列归一键（剥季/期/剧场版）再剥 B站特有后缀。
+
+    「CLANNAD 第一季 中文配音」series_title_key 剥不动末尾的「中文配音」，
+    先剥 B站 后缀再走一次系列归一，才能对上 Bangumi 的「CLANNAD」。
+    """
+    key = crud.series_title_key(title or "")
+    for _ in range(3):
+        changed = False
+        for suffix in _BILI_TITLE_SUFFIXES:
+            if key.endswith(suffix):
+                key = crud.series_title_key(key[: -len(suffix)])
+                changed = True
+                break
+        if not changed:
+            break
+    return key
+
+
+def dedupe_works_across_sources(
+    bangumi_works: list[dict], bilibili_works: list[dict]
+) -> list[dict]:
+    """跨源去重：同一作品 Bangumi 与 B站都在时只保留 Bangumi 版（标签更全）。
+
+    站内作品不参与——它们与两个外部源本就按不同主键独立，且 build_profile
+    的 _dedupe 只按 (source, title) 去重，管不到跨源。
+    """
+    merged = list(bangumi_works)
+    if not bilibili_works:
+        return merged
+    seen = {_cross_source_key(work.get("title") or "") for work in bangumi_works}
+    seen.discard("")
+    for work in bilibili_works:
+        key = _cross_source_key(work.get("title") or "")
+        if key and key in seen:
+            continue
+        if key:
+            seen.add(key)
+        merged.append(work)
+    return merged
 
 
 def _dedupe(works: list[dict]) -> list[dict]:
@@ -410,6 +492,7 @@ def build_profile(
     *,
     site_counts: dict | None = None,
     bangumi_total: int = 0,
+    bilibili_total: int = 0,
     notes: list[str] | None = None,
 ) -> dict:
     """由统一作品结构计算画像：类型、标签、避雷、时间线、六维分数、人格标签。"""
@@ -503,6 +586,7 @@ def build_profile(
         "drop": len(drops),
         "negative": len(negative),
         "bangumi_total": bangumi_total,
+        "bilibili_total": bilibili_total,
         "site_counts": site_counts,
         "type_counts": dict(type_counter),
         "type_shares": type_shares,
@@ -561,7 +645,7 @@ def build_template_report(profile: dict) -> dict:
 
     return {
         "title": title,
-        "subtitle": f"基于 {total} 部作品的口味画像",
+        "subtitle": f"基于 {total} 部作品的御宅成分",
         "entry_story": entry_story,
         "core_taste": (
             f"你的口味集中在 {'、'.join(top_names[:5]) or '暂不明显'}，"
@@ -576,12 +660,159 @@ def build_template_report(profile: dict) -> dict:
             f"看了 {total} 部，你的审美没有滑坡，只是越来越像你自己。"
         ),
         "data_note": (
-            f"Bangumi {profile['bangumi_total']} 条 + 站内收藏 "
-            f"{profile['site_counts'].get('favorites', 0)} 条；看过 {seen} / "
+            f"Bangumi {profile['bangumi_total']} 条"
+            + (f" + B站追番 {profile['bilibili_total']} 条" if profile.get("bilibili_total") else "")
+            + f" + 站内收藏 {profile['site_counts'].get('favorites', 0)} 条；看过 {seen} / "
             f"想看 {want} / 抛弃 {profile['drop']}。Bangumi 不提供首次收藏时间，"
             "入坑年份用作品发行年近似；避雷标签来自抛弃 / 低分作品。"
         ),
     }
+
+
+def recommend_from_site(
+    db, profile: dict, exclude_bangumi_ids: set[int] | None = None, limit: int = 6
+) -> list[dict]:
+    """按画像里的本命 / 避雷题材，从站内作品库挑推荐（规则算，不联网）。"""
+    positive = [
+        tag["name"] for tag in (profile.get("top_genres") or profile["top_tags"])
+    ][:8]
+    avoided = [tag["name"] for tag in profile["avoided_tags"]]
+    return crud.recommend_contents(
+        db,
+        positive_tags=positive,
+        avoided_tags=avoided,
+        exclude_bangumi_ids=exclude_bangumi_ids,
+        limit=limit,
+    )
+
+
+# 登录用户首页推荐：「站内收藏 / 标注」实时信号 vs 「成分检测画像」的切换双闸。
+# 站内条数要同时满足「≥ 画像总数 × 比例」和「≥ 画像总数 + 基数」才弃用画像走
+# 实时口径——刚同步完 Bangumi 的用户不会因为站内多收藏了两三部就翻推荐
+# （比例闸挡小涨幅，基数闸挡小基数下的百分比抖动）。
+HOME_TASTE_PROFILE_RATIO = 1.5
+HOME_TASTE_PROFILE_BASE = 10
+
+# 「总口味 / 近期口味」双象：近期 = 活动时间落在最近 HOME_TASTE_RECENT_DAYS 天内
+# 的收藏 / 标注（批量导入当晚也全算近期），不足 HOME_TASTE_RECENT_MIN 条时回落
+# 「按活动时间倒序取最近 MIN 条」——几乎没动静的用户，最近几次动作就是近期口味。
+# 近期命中的题材权重为总口味的 HOME_TASTE_RECENT_WEIGHT 倍（最近在迷什么优先）。
+# 浏览记录不进算法（浏览≠喜欢，噪音大于信号）。
+HOME_TASTE_RECENT_DAYS = 90
+HOME_TASTE_RECENT_MIN = 3
+HOME_TASTE_RECENT_GENRES = 4
+HOME_TASTE_RECENT_WEIGHT = 2.0
+
+
+def _top_genre_names(profile: dict) -> list[str]:
+    """画像的本命题材名（成分检测同款口径：题材标签优先，回落到全部标签）。"""
+    return [
+        tag["name"]
+        for tag in (profile.get("top_genres") or profile.get("top_tags") or [])
+    ]
+
+
+def build_user_home_picks(db, user_id: int, *, limit: int = 8) -> list | None:
+    """登录用户的首页推荐作品：画像口径 / 站内实时口径，总 / 近期口味双象。
+
+    与游客的站长口味（crud.list_home_recommendations）是两套独立口径；
+    没有任何可用信号时返回 None，由调用方回落站长口味，保证推荐位不空。
+
+    信号决策：
+    1. 有成分检测画像、且站内收藏数未超「基数 + 比例」双闸 → 画像口径：
+       直接复用报告里的 top_genres / avoided_tags（Bangumi + 站内合并算过，
+       含避雷与个人评分，信号最全），排除集取已同步的 Bangumi 条目；
+    2. 否则（无画像 / 画像被站内行为稀释）→ 站内实时口径：收藏 / 标注聚合
+       一整套 build_profile 当「总口味」，再按活动时间取最近 N 条聚合一套当
+       「近期口味」，两组题材加权后交给 recommend_contents；已收藏 / 标注的
+       作品不进推荐位；实时口径把旧画像的本命题材并入总口味、避雷标签原样
+       继承——站内没有抛弃 / 低分这类负向信号，跑过成分检测的用户的口味与
+       雷区不因为切实时而丢失。
+
+    显式口味（题材问卷）暂未开放：positive_weights 的合并位已留好，
+    将来问卷落地只需在加权表里并入问卷题材，下游匹配不用动。
+    """
+    rows = crud.list_user_taste_rows(db, user_id)
+    report = crud.get_persona_report(db, user_id)
+    payload = (report.payload or {}) if report else {}
+    profile = payload.get("profile") if isinstance(payload, dict) else None
+    profile = profile if isinstance(profile, dict) else None
+    profile_total = int(profile.get("total") or 0) if profile else 0
+
+    if profile and profile_total > 0:
+        site_total = len(rows)
+        stale = (
+            site_total >= profile_total * HOME_TASTE_PROFILE_RATIO
+            and site_total >= profile_total + HOME_TASTE_PROFILE_BASE
+        )
+        if not stale:
+            exclude = {
+                int(item.subject_id)
+                for item in crud.list_bangumi_collections(db, user_id)
+            }
+            picks = recommend_from_site(
+                db, profile, exclude, limit=max(limit * 4, limit)
+            )
+            if picks:
+                return crud.dedupe_series_picks(db, picks, limit=limit)
+            # 画像口径零命中（口味太窄）：先试实时口径，不急着回落站长口味
+
+    if not rows:
+        return None
+
+    # 总口味：全部收藏 / 标注聚合一整套画像（与成分检测同一 build_profile 口径）
+    ordered_rows = sorted(
+        rows, key=lambda row: row[4] or datetime.min, reverse=True
+    )
+    total_works = [
+        work_from_site(content, status, tags)
+        for content, tags, status, _favorited, _activity in ordered_rows
+    ]
+    total_profile = build_profile(total_works)
+    weighted: dict[str, float] = {}
+    # 旧画像（被稀释但仍有参考价值）的本命题材并入总口味，权重 1.0
+    if profile:
+        for tag in _top_genre_names(profile)[:8]:
+            weighted.setdefault(tag, 1.0)
+    for tag in _top_genre_names(total_profile)[:8]:
+        weighted.setdefault(tag, 1.0)
+    # 近期口味：时间窗内的活动聚合第二套画像，命中的题材权重抬高
+    cutoff = datetime.now() - timedelta(days=HOME_TASTE_RECENT_DAYS)
+    recent_rows = [
+        row for row in ordered_rows if (row[4] or datetime.min) >= cutoff
+    ]
+    if len(recent_rows) < HOME_TASTE_RECENT_MIN:
+        recent_rows = ordered_rows[:HOME_TASTE_RECENT_MIN]
+    if len(recent_rows) >= HOME_TASTE_RECENT_MIN:
+        recent_profile = build_profile(
+            [
+                work_from_site(content, status, tags)
+                for content, tags, status, _favorited, _activity in recent_rows
+            ]
+        )
+        for tag in _top_genre_names(recent_profile)[:HOME_TASTE_RECENT_GENRES]:
+            weighted[tag] = HOME_TASTE_RECENT_WEIGHT
+    if not weighted:
+        return None
+
+    avoided = [tag["name"] for tag in (profile or {}).get("avoided_tags") or []]
+    exclude = {
+        int(content.bangumi_id)
+        for content, _tags, _status, _favorited, _activity in rows
+        if content.bangumi_id is not None
+    }
+    picks = crud.recommend_contents(
+        db,
+        positive_tags=list(weighted),
+        avoided_tags=avoided,
+        exclude_bangumi_ids=exclude,
+        limit=max(limit * 4, limit),
+        positive_weights=weighted,
+    )
+    if not picks:
+        return None
+    skip = {content.id for content, _t, _s, _f, _a in rows}
+    return crud.dedupe_series_picks(db, picks, limit=limit, skip_content_ids=skip)
 
 
 def build_llm_prompt(
@@ -589,6 +820,7 @@ def build_llm_prompt(
     tone: str = "sharp",
     tone_prompt: str = "",
     extra_prompt: str = "",
+    recommendations: list | None = None,
 ) -> str:
     """把事实清单与输出要求拼成可直接粘贴给 LLM 的提示词。
 
@@ -629,8 +861,14 @@ def build_llm_prompt(
         "代表作": profile["representative"],
         "站内收藏数": profile["site_counts"].get("favorites", 0),
     }
+    if recommendations:
+        # 让 LLM 的「建议 / 推荐」围绕规则筛好的候选展开，不要自己编片单
+        facts["站内推荐候选(按本命题材命中筛出，优先推荐这些)"] = [
+            f"{item['title']}（命中：{'、'.join(item['matched'][:3])}）"
+            for item in recommendations[:8]
+        ]
     return (
-        "你是一个懂 ACGN 的「阿宅画像分析师」。请根据下面的事实清单，用中文写一份人格报告。\n\n"
+        "你是一个懂 ACGN 的「御宅成分分析师」。请根据下面的事实清单，用中文写一份人格报告。\n\n"
         f"语气要求：{tone_text}\n\n"
         "必须包含这些部分，用「## 部分名」分段：\n"
         "1. 称号（两个词组组合，例如「美少女动物园园长」兼「扭曲情感研究学者」）\n"
@@ -812,14 +1050,18 @@ def call_llm(
     proxy: str = "",
     timeout: float = 90.0,
     max_tokens: int = 0,
+    temperature: float = 0.8,
 ) -> str:
-    """调用 OpenAI 兼容的 /chat/completions 接口；失败时抛 PersonaError。"""
+    """调用 OpenAI 兼容的 /chat/completions 接口；失败时抛 PersonaError。
+
+    temperature 默认 0.8（画像文案要有点人味）；资讯翻译这类要求稳定的场景传低值。
+    """
     base = base_url.rstrip("/")
     url = base if base.endswith("/chat/completions") else base + "/chat/completions"
     body: dict = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.8,
+        "temperature": temperature,
         "stream": False,
     }
     if max_tokens > 0:

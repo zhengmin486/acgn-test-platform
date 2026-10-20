@@ -3,7 +3,7 @@
 为什么需要它（2026-10-18 定型）：
     服务器（Lighthouse，ap-beijing-3）**没有境外出网**，api.bgm.tv / bgm.tv
     在服务器上直接 Network is unreachable（国内源如 yuc.wiki、news.aniplex.co.jp
-    则可达，已实测）。所以词条这一类必须「本机有代理时抓取，服务器负责入库」。
+    则可达，已实测）。所以作品数据这一类必须「本机有代理时抓取，服务器负责入库」。
 
 设计要点：
 - **传 payload 而不是传 id**：抓取端（本机）已把 Bangumi 原始 JSON 拿到手，直接 POST

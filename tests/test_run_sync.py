@@ -1,15 +1,15 @@
 """定时同步 CLI 测试：scripts/run_sync.py 的参数编排与运行记录。
 
 覆盖：
-- 默认数据源：新番档期（当前档期）+ 官方资讯，trigger=scheduled；
+- 默认数据源：新番档期（Atom 最新一期）+ 多源每日资讯，trigger=scheduled；
 - --task / --season / --scope / --limit / --preview 的参数分发；
 - 用法错误（未知数据源、bangumi 缺 ID）退出码 2；
 - ScopeError / TaskBusyError / 意外异常：该数据源跳过、退出码 1；
 - 部分成功（有失败项）同样退出码 1；
 - 运行记录落库：sync_task_runs.trigger=scheduled、mode 与状态正确。
 
-网络与同步实现全部打桩（patch app.sync_tasks 的入口），不访问外网；
-数据库用独立临时 SQLite（tmp_path），与 local_dev.db 隔离。
+网络与同步实现全部打桩（patch app.sync_tasks 的入口与 resolve_latest_season），
+不访问外网；数据库用独立临时 SQLite（tmp_path），与 local_dev.db 隔离。
 """
 
 import importlib.util
@@ -25,6 +25,7 @@ from app import crud, sync_tasks
 from app.database import build_engine
 from app.models import SyncTaskRun
 from scripts.import_articles import ArticleImportSummary
+from scripts.news_daily import DailyNewsSummary
 from scripts.sync_yuc_schedule import SyncSummary
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -87,19 +88,26 @@ def fake_run_task(monkeypatch):
 # ---------- 参数编排 ----------
 
 
+@pytest.fixture
+def fake_latest_season(monkeypatch):
+    """档期「取最新」不触网：固定返回 202610。"""
+    monkeypatch.setattr(run_sync, "resolve_latest_season", lambda **kwargs: "202610")
+    return "202610"
+
+
 class TestArgumentDispatch:
-    def test_default_runs_yuc_and_articles(self, factory, fake_run_task):
+    def test_default_runs_yuc_and_news(self, factory, fake_run_task, fake_latest_season):
         code = run_sync.main([], session_factory=factory)
         assert code == 0
         assert [call["task_key"] for call in fake_run_task.calls] == [
             sync_tasks.TASK_YUC,
-            sync_tasks.TASK_ARTICLES,
+            sync_tasks.TASK_NEWS,
         ]
         yuc_call = fake_run_task.calls[0]
-        assert yuc_call["scope"] == datetime.now().strftime("%Y%m")  # 当前档期
+        assert yuc_call["scope"] == "202610"  # Atom 最新一期（打桩固定值）
         assert yuc_call["apply"] is True
         assert yuc_call["trigger"] == sync_tasks.TRIGGER_SCHEDULED
-        assert fake_run_task.calls[1]["scope"] == ""  # 资讯默认全部栏目
+        assert fake_run_task.calls[1]["scope"] == ""  # 配额由配置决定，无范围
 
     def test_task_bangumi_requires_scope(self, factory, fake_run_task):
         code = run_sync.main(["--task", "bangumi"], session_factory=factory)
@@ -149,12 +157,12 @@ class TestArgumentDispatch:
         assert code == run_sync.EXIT_USAGE
         assert fake_run_task.calls == []
 
-    def test_all_keyword_equals_default(self, factory, fake_run_task):
+    def test_all_keyword_equals_default(self, factory, fake_run_task, fake_latest_season):
         code = run_sync.main(["--task", "all"], session_factory=factory)
         assert code == 0
         assert [call["task_key"] for call in fake_run_task.calls] == [
             sync_tasks.TASK_YUC,
-            sync_tasks.TASK_ARTICLES,
+            sync_tasks.TASK_NEWS,
         ]
 
 
@@ -162,7 +170,7 @@ class TestArgumentDispatch:
 
 
 class TestFailureHandling:
-    def test_scope_error_skips_and_fails(self, factory, fake_run_task, capsys):
+    def test_scope_error_skips_and_fails(self, factory, fake_run_task, fake_latest_season, capsys):
         fake_run_task._script[sync_tasks.TASK_YUC] = sync_tasks.ScopeError("档期不存在")
         code = run_sync.main([], session_factory=factory)
         assert code == run_sync.EXIT_TASK_FAILED
@@ -170,26 +178,26 @@ class TestFailureHandling:
         # 失败不中断：资讯仍然执行了
         assert len(fake_run_task.calls) == 2
 
-    def test_busy_error_fails(self, factory, fake_run_task, capsys):
-        fake_run_task._script[sync_tasks.TASK_ARTICLES] = sync_tasks.TaskBusyError("正在执行")
+    def test_busy_error_fails(self, factory, fake_run_task, fake_latest_season, capsys):
+        fake_run_task._script[sync_tasks.TASK_NEWS] = sync_tasks.TaskBusyError("正在执行")
         code = run_sync.main([], session_factory=factory)
         assert code == run_sync.EXIT_TASK_FAILED
         assert "正在执行" in capsys.readouterr().out
 
-    def test_unexpected_exception_fails(self, factory, fake_run_task, capsys):
+    def test_unexpected_exception_fails(self, factory, fake_run_task, fake_latest_season, capsys):
         fake_run_task._script[sync_tasks.TASK_YUC] = RuntimeError("网络炸了")
         code = run_sync.main([], session_factory=factory)
         assert code == run_sync.EXIT_TASK_FAILED
         assert "网络炸了" in capsys.readouterr().out
 
-    def test_partial_result_counts_as_failure(self, factory, fake_run_task):
+    def test_partial_result_counts_as_failure(self, factory, fake_run_task, fake_latest_season):
         fake_run_task._script[sync_tasks.TASK_YUC] = make_result(
             sync_tasks.TASK_YUC, failed=2
         )
         code = run_sync.main([], session_factory=factory)
         assert code == run_sync.EXIT_TASK_FAILED
 
-    def test_all_success_exit_zero(self, factory, fake_run_task):
+    def test_all_success_exit_zero(self, factory, fake_run_task, fake_latest_season):
         code = run_sync.main([], session_factory=factory)
         assert code == run_sync.EXIT_OK
 
@@ -198,10 +206,10 @@ class TestFailureHandling:
 
 
 class TestRunRecords:
-    def test_records_land_with_scheduled_trigger(self, factory, monkeypatch):
+    def test_records_land_with_scheduled_trigger(self, factory, monkeypatch, fake_latest_season):
         """打桩叶子同步函数，让 run_task 真跑：记录落库且 trigger=scheduled。"""
         yuc_calls: list[str] = []
-        article_calls: list[dict] = []
+        news_calls: list[dict] = []
 
         def fake_run_sync(season_code, *, session_factory, apply=False, **kwargs):
             yuc_calls.append(season_code)
@@ -214,18 +222,19 @@ class TestRunRecords:
                 unchanged=2,
             )
 
-        def fake_run_articles(session_factory, *, apply=False, category=None, limit=None, **kwargs):
-            article_calls.append({"apply": apply, "category": category, "limit": limit})
-            return ArticleImportSummary(mode="apply" if apply else "preview",
-                                        requested=5, added=3, existing=2)
+        def fake_run_daily(session_factory, *, apply=False, **kwargs):
+            news_calls.append({"apply": apply})
+            return DailyNewsSummary(
+                mode="apply" if apply else "preview", quota=20, added=3, existing=2
+            )
 
         monkeypatch.setattr(sync_tasks, "run_sync", fake_run_sync)
-        monkeypatch.setattr(sync_tasks, "run_import_articles", fake_run_articles)
+        monkeypatch.setattr(sync_tasks, "run_import_daily", fake_run_daily)
 
         code = run_sync.main([], session_factory=factory)
         assert code == 0
-        assert yuc_calls == [datetime.now().strftime("%Y%m")]
-        assert article_calls == [{"apply": True, "category": None, "limit": None}]
+        assert yuc_calls == ["202610"]
+        assert news_calls == [{"apply": True}]
 
         db = factory()
         try:
@@ -233,7 +242,7 @@ class TestRunRecords:
             assert len(runs) == 2
             assert [run.task_key for run in runs] == [
                 sync_tasks.TASK_YUC,
-                sync_tasks.TASK_ARTICLES,
+                sync_tasks.TASK_NEWS,
             ]
             for run in runs:
                 assert run.trigger == "scheduled"
@@ -243,7 +252,7 @@ class TestRunRecords:
         finally:
             db.close()
 
-    def test_preview_records_mode_preview(self, factory, monkeypatch):
+    def test_preview_records_mode_preview(self, factory, monkeypatch, fake_latest_season):
         def fake_run_sync(season_code, *, session_factory, apply=False, **kwargs):
             return SyncSummary(
                 mode="dry-run", season_code=season_code, season_title="t",
@@ -253,8 +262,10 @@ class TestRunRecords:
         monkeypatch.setattr(sync_tasks, "run_sync", fake_run_sync)
         monkeypatch.setattr(
             sync_tasks,
-            "run_import_articles",
-            lambda factory_, **kwargs: ArticleImportSummary(mode="preview", requested=2),
+            "run_import_daily",
+            lambda factory_, **kwargs: DailyNewsSummary(
+                mode="preview", quota=20, added=2, requested=5
+            ),
         )
 
         code = run_sync.main(["--preview"], session_factory=factory)
@@ -284,9 +295,9 @@ class TestHelpers:
         with pytest.raises(ValueError):
             run_sync.resolve_tasks("nope")
 
-    def test_build_scope_yuc_defaults_to_current_season(self):
+    def test_build_scope_yuc_uses_latest_season(self, monkeypatch, fake_latest_season):
         args = run_sync.build_parser().parse_args([])
-        assert run_sync.build_scope("yuc_schedule", args) == datetime.now().strftime("%Y%m")
+        assert run_sync.build_scope("yuc_schedule", args) == "202610"
 
     def test_build_scope_bangumi_requires_ids(self):
         args = run_sync.build_parser().parse_args(["--task", "bangumi"])

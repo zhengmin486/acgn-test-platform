@@ -35,6 +35,10 @@ TAG_GENRE = "genre"
 TAG_STUDIO = "studio"
 TAG_YEAR = "year"
 TAG_NOISE = "noise"
+# 形式载体：放送形态（TV / 剧场版…）与原作载体（漫画改 / 小说改…）。
+# 与「丢弃」的区别：这两类有浏览价值，清洗时搬进 contents 的对应列。
+TAG_MEDIA = "media"
+TAG_SOURCE = "source"
 
 # 题材簇：用标签命中数归到一个人格母题
 TAG_CLUSTERS = {
@@ -247,10 +251,68 @@ NOISE_TAGS = {
     "好看", "安利", "收藏", "待看", "已看",
 }
 
+# ---- 形式载体：清洗时搬进 contents.media / contents.source_material ----
+# 这两类词此前一律按噪音丢弃，但「我要 TV 动画、不要剧场版」「只看漫画改」
+# 是真实浏览需求，且模型里 media / source_material 两列本就是为它们准备的
+# （见 models.Content 注释：客观信息单独成列）。现在从噪音里识别出来，
+# 由清洗脚本搬进列，标签云只留题材。
+MEDIA_TAGS: dict[str, str] = {
+    "tv": "TV",
+    "tv版": "TV",
+    "tv动画": "TV",
+    "电视动画": "TV",
+    "tvアニメ": "TV",
+    "剧场版": "剧场版",
+    "剧场": "剧场版",
+    "映画": "剧场版",
+    "动画电影": "剧场版",
+    "ova": "OVA",
+    "oad": "OAD",
+    "web": "WEB",
+    "web动画": "WEB",
+    "网络动画": "WEB",
+}
+
+SOURCE_MATERIAL_TAGS: dict[str, str] = {
+    "漫画改": "漫画改",
+    "漫画改编": "漫画改",
+    "漫改": "漫画改",
+    "漫画原作": "漫画改",
+    "小说改": "小说改",
+    "小说原作": "小说改",
+    "轻改": "小说改",
+    "游戏改": "游戏改",
+    "游戏原作": "游戏改",
+    "原创": "原创",
+    "原创动画": "原创",
+    "多媒体企划": "多媒体企划",
+}
+
+# 类型专属标签：只在对应类型下才有浏览价值（游戏类型词进不了动画筛选栏）。
+# 与 GENRE_TAGS 有交集，但展示时单独成组，避免 RPG / 视觉小说挤掉动画题材。
+TYPE_SPECIFIC_TAGS: dict[str, frozenset[str]] = {
+    "game": frozenset(
+        {
+            "RPG", "ARPG", "JRPG", "ACT", "AVG", "ADV", "SLG", "FTG", "STG",
+            "RTS", "FPS", "TPS", "MOBA", "Roguelike", "开放世界", "沙盒",
+            "塔防", "卡牌", "解谜", "益智", "棋牌", "竞速", "音游", "音乐游戏",
+            "视觉小说", "Galgame", "美少女游戏", "乙女游戏", "模拟经营",
+            "模拟", "策略", "动作", "射击", "格斗游戏", "平台跳跃",
+            "银河恶魔城", "建造", "同人游戏", "文字冒险", "生存游戏",
+        }
+    ),
+    "novel": frozenset({"文库", "轻小说", "文学", "小说", "短篇集", "连载"}),
+}
+
 _YEAR_RE = re.compile(r"^(19|20)\d{2}$")
 _SUMMARY_YEAR_RE = re.compile(r"(19|20)\d{2}(?=\s*年)")
 # 季度标签（2011年10月 / 2021年1月）：Bangumi 常见写法，发行年由 date 承载。
 _SEASON_TAG_RE = re.compile(r"^(19|20)\d{2}年")
+
+# 媒介 / 载体根词：含于其中的标签描述的是「这是什么作品」（漫画 / 小说 / 游戏 /
+# 动画 / 动漫），属作品信息而非题材，不应进题材标签云。用子串匹配覆盖
+# 「轻小说」「漫画改」「游戏改」「小说改」等白名单未逐条枚举的变体写法。
+_CARRIER_ROOTS = ("漫画", "小说", "游戏", "动画", "动漫")
 
 
 def _norm_key(name: str) -> str:
@@ -259,6 +321,58 @@ def _norm_key(name: str) -> str:
     让 `ＳＦ`、`sf`、`Sf` 都能命中同一个规范名；日文假名不受 casefold 影响。
     """
     return unicodedata.normalize("NFKC", (name or "").strip()).casefold()
+
+
+# 常见繁→简汉字映射：Bangumi 的 infobox 主创名常用繁体（川井**憲**次），而 tags
+# 里常是简体（川井**宪**次），精确匹配会漏。这里只列人名/译名里高频的几组，
+# 足够覆盖绝大多数「同一个人、两种写法」的情况。
+_TRAD_TO_SIMP = {
+    "憲": "宪", "魯": "鲁", "裏": "里", "繪": "绘", "絵": "绘", "澤": "泽",
+    "岡": "冈", "縣": "县", "廣": "广", "島": "岛", "鐵": "铁", "體": "体",
+    "國": "国", "圖": "图", "細": "细", "愛": "爱", "學": "学", "與": "与",
+    "產": "产", "門": "门", "華": "华", "萬": "万", "豐": "丰", "雲": "云",
+    "戰": "战", "時": "时", "會": "会", "東": "东", "車": "车", "飛": "飞",
+    "風": "风", "龍": "龙", "現": "现", "電": "电", "話": "话", "語": "语",
+    "讀": "读", "兒": "儿", "兩": "两", "來": "来", "員": "员", "報": "报",
+    "場": "场", "復": "复", "處": "处", "實": "实", "監": "监", "劇": "剧",
+    "際": "际", "關": "关", "點": "点", "歡": "欢", "無": "无", "經": "经",
+    "繼": "继", "續": "续", "張": "张", "強": "强", "斷": "断", "遺": "遗",
+    "遠": "远", "專": "专", "從": "从", "豐": "丰", "畫": "画", "題": "题",
+    "間": "间", "對": "对", "開": "开", "閉": "闭", "隊": "队", "際": "际",
+    "達": "达", "邊": "边", "題": "题", "類": "类", "聲": "声", "響": "响",
+}
+
+# 译名/主创名匹配时要剥掉的尾缀与标点（反逆のルルーシュR2 -> 反逆のルルーシュ）。
+_LOOSE_SUFFIX_RE = re.compile(
+    r"(r2|第.季|剧场版|总集篇|总篇|ova|oad|特别篇|sp|篇|第二季|第三季|第四季)$",
+    re.IGNORECASE,
+)
+
+
+def _loose_key(name: str) -> str:
+    """模糊匹配键：NFKC + 繁→简 + 去标点/空格/季后缀，用于人名/译名包含判定。
+
+    让「川井憲次」与「川井宪次」、「反逆のルルーシュR2」与「反逆のルルーシュ」
+    归一到同一键，从而把导演/作曲/自身译名从题材标签里排掉。
+    """
+    s = unicodedata.normalize("NFKC", (name or "").strip()).casefold()
+    s = "".join(_TRAD_TO_SIMP.get(ch, ch) for ch in s)
+    s = re.sub(r"[\s\-_·、，。！？（）()【】\[\]“”\"'/]", "", s)
+    return _LOOSE_SUFFIX_RE.sub("", s)
+
+
+# 高频人物 / 译名黑名单：结构排除（infobox 主创 + 自身标题）仍抓不到的极少数——
+# 笔名（痞子蔡≠蔡智恒）、罗马音（codegeass）、译名异体（鲁鲁修/鲁路修）——直接兜底。
+# 运营中可按实际泄漏持续扩充；命中即不进题材标签云。
+_PERSON_TITLE_BLOCKLIST = (
+    "痞子蔡", "蔡智恒", "codegeass", "叛逆的鲁鲁修", "叛逆的鲁路修",
+    "反逆のルルーシュ", "鲁鲁修", "鲁路修",
+)
+_PERSON_TITLE_BLOCKLIST_NORM = {_loose_key(name) for name in _PERSON_TITLE_BLOCKLIST}
+
+# 常见工作室 / 厂牌 / 公司黑名单（见上方元组说明），同样经模糊归一，避免
+# 「Production I.G」/「Production_I.G」/「ProductionI.G」因空格/下划线写法不一而漏网。
+# （其 NORM 集合在下方元组定义之后构建，见 _STUDIO_BRAND_BLOCKLIST 下方。）
 
 
 # 规范名查找表：规范名自身 + 全部别名，键为 _norm_key。
@@ -272,11 +386,31 @@ for _canonical, _aliases in GENRE_ALIASES.items():
 
 _NOISE_LOOKUP = {_norm_key(name) for name in NOISE_TAGS}
 
+# 形式载体查找表：键为归一写法（全角 / 大小写不敏感），值为展示用规范名。
+_MEDIA_LOOKUP = {_norm_key(key): value for key, value in MEDIA_TAGS.items()}
+_SOURCE_LOOKUP = {
+    _norm_key(key): value for key, value in SOURCE_MATERIAL_TAGS.items()
+}
+
 _STUDIO_LOOKUP = {
     _norm_key(alias): canonical
     for canonical, aliases in STUDIO_ALIASES.items()
     for alias in aliases
 }
+
+# 常见工作室 / 厂牌 / 公司标签：Bangumi 用户常把它们当 tag 打，但属「作品信息」
+# 而非题材；且变体写法多（Production I.G / ProductionI.G / ProductionIG / IG），
+# 单靠前文 infobox 取到的本作主创名抓不全，这里再兜一层常见词。运营中可按
+# 实际泄漏持续扩充；命中即不进题材标签云（与「作者声优公司不进标签」一致）。
+_STUDIO_BRAND_BLOCKLIST = (
+    "Production I.G", "ProductionI.G", "ProductionIG", "Production.I.G", "Production_I.G", "IG",
+    "SNK", "Infinity Ward", "InfinityWard", "Activision", "Activision Blizzard", "Actvision",
+    "Key", "CLAMP", "CLMAP",
+    "京都动画", "Kyoto Animation", "ufotable", "MAPPA", "BONES",
+    "A-1 Pictures", "J.C.STAFF", "Studio Pierrot", "WIT STUDIO", "动画工房",
+)
+# 经模糊归一（与 is_genre_candidate 中的 key 同口径），避免空格/下划线写法不一而漏网。
+_STUDIO_BRAND_BLOCKLIST_NORM = {_loose_key(name) for name in _STUDIO_BRAND_BLOCKLIST}
 
 
 def canonical_genre(name: str) -> str | None:
@@ -381,16 +515,68 @@ def year_of(tag: str) -> int | None:
     return None
 
 
+def media_of(tag: str) -> str | None:
+    """标签若是放送形态 / 媒介，返回归一展示名（TV / 剧场版 / OVA / OAD / WEB）。"""
+    name = (tag or "").strip()
+    if not name:
+        return None
+    return _MEDIA_LOOKUP.get(_norm_key(name))
+
+
+def source_material_of(tag: str) -> str | None:
+    """标签若是原作载体，返回归一展示名（漫画改 / 小说改 / 游戏改 / 原创…）。"""
+    name = (tag or "").strip()
+    if not name:
+        return None
+    return _SOURCE_LOOKUP.get(_norm_key(name))
+
+
+def is_form_tag(tag: str) -> bool:
+    """是否「形式载体」类标签：不进题材标签云，由 contents 的 media /
+    source_material 列承载并单独成组展示。"""
+    return media_of(tag) is not None or source_material_of(tag) is not None
+
+
+def form_tag_names() -> frozenset[str]:
+    """已知形式载体标签的全部写法（词表键 + 规范名），供 SQL 侧排除。
+
+    标签云与题材筛选要的是题材，形式载体已由 contents.media /
+    source_material 承载；排除发生在 SQL 层而不是取回后过滤——否则取前 N 个
+    时会被 TV / 漫画改这类高频形式词占满名额。
+    """
+    names: set[str] = set()
+    for table in (MEDIA_TAGS, SOURCE_MATERIAL_TAGS):
+        names.update(table)
+        names.update(table.values())
+    return frozenset(names)
+
+
+def is_type_specific_tag(tag: str, content_type: str | None) -> bool:
+    """是否当前类型的专属标签（游戏类型词 / 书籍形态词）。
+
+    非专属类型（动画 / 漫画）恒为 False；未收录在词表里的词也返回 False
+    ——宁可让它留在题材组，也不要凭空造一个空分类。
+    """
+    if not content_type:
+        return False
+    names = TYPE_SPECIFIC_TAGS.get(content_type)
+    if not names:
+        return False
+    return (tag or "").strip() in names
+
+
 def classify_tag(tag: str) -> tuple[str, str]:
     """把单个标签归类：返回 (kind, 值)。
 
-    kind 为 ``genre`` / ``studio`` / ``year`` / ``noise``；
-    ``year`` 的值是四位数字符串，``studio`` 是规范名，genre 命中同义词表时
-    返回规范名（否则原样），其余原样（已 strip）。
+    kind 为 ``genre`` / ``studio`` / ``year`` / ``media`` / ``source`` /
+    ``noise``；``year`` 的值是四位数字符串，``studio`` 是规范名，genre 命中
+    同义词表时返回规范名（否则原样），形式载体返回归一展示名，其余原样（已 strip）。
 
-    顺序即优先级：年份 -> 明确噪音（平台/地区/季度/元标签，精确命中）-> 公司
-    -> 题材 -> 噪音。噪音精确匹配放在公司之前：否则「国产动画」这类词会被
-    公司后缀规则误收成制作方。
+    顺序即优先级：年份 -> 形式载体 -> 明确噪音（平台/地区/季度/元标签，精确命中）
+    -> 公司 -> 题材 -> 噪音。形式载体必须排在噪音精确匹配之前：TV / 剧场版 /
+    漫画改 等词都同时躺在 ``NOISE_TAGS`` 里（它们确实不是题材），但清洗时要
+    搬进 contents 的列而不是丢掉。噪音精确匹配放在公司之前：否则「国产动画」
+    这类词会被公司后缀规则误收成制作方。
     """
     name = (tag or "").strip()
     if not name:
@@ -398,6 +584,12 @@ def classify_tag(tag: str) -> tuple[str, str]:
     year = year_of(name)
     if year is not None:
         return TAG_YEAR, str(year)
+    media = media_of(name)
+    if media:
+        return TAG_MEDIA, media
+    source = source_material_of(name)
+    if source:
+        return TAG_SOURCE, source
     key = _norm_key(name)
     if key in _NOISE_LOOKUP or _SEASON_TAG_RE.match(name):
         return TAG_NOISE, name
@@ -412,17 +604,68 @@ def classify_tag(tag: str) -> tuple[str, str]:
     return TAG_NOISE, name
 
 
-def split_tags(tags) -> tuple[list[str], list[str], int | None]:
-    """把标签列表拆成 (题材, 公司, 年份)。
+def is_genre_candidate(name: str, exclude: set[str] | None = None) -> bool:
+    """标签是否应作为题材标签保留（导入 / 清洗 / 同步共用的收口口径）。
+
+    排除「作品信息」与「已知噪音」，其余一律保留为题材标签——导入时按标注数
+    取前 N 个（宁多勿少），标签云只承载题材浏览：
+
+    - 作品信息：制作公司（落 ``content_studios``）、四位年份 / 季度（落 ``contents.year``）；
+    - 已知噪音：媒介 / 载体 / 平台 / 地区 / 元标签（见 ``NOISE_TAGS`` 与季度正则）；
+    - 其余（含未在白名单内、但明显是主题的词）保留——放宽原先 ``classify_tag``
+      严格白名单导致的「很多作品标签不够」问题，又不让公司 / 年份 / 媒介回流标签云；
+    - ``exclude``：调用方可显式排除一组词（如本作真实的声优 / 主创名），避免作者 /
+      声优误入标签云——Bangumi 的 ``tags`` 字段本不含人物名（声优在 ``characters`` /
+      ``persons`` 接口），导入路径无需传；回源同步路径持有真实人名，应传入以兜底。
+
+    注意与 ``classify_tag`` 的分工：``classify_tag`` 负责把标签路由到
+    公司 / 年份 / 题材 / 噪音四个归宿；本函数只做「题材 or 否」的二值收口，
+    未知主题词不再被当成噪音丢弃。
+    """
+    if not name:
+        return False
+    key = _loose_key(name)
+    # 显式排除集（本作主创 / 公司 / 自身译名）：精确 + 模糊（繁简、标点、季后缀、
+    # 双向包含）双判定，避免「川井憲次 vs 川井宪次」「反逆のルルーシュR2 vs 反逆の
+    # ルルーシュ」这类写法差异导致导演 / 作曲 / 自身标题漏进标签云。
+    if exclude:
+        for ex in exclude:
+            ek = _loose_key(ex)
+            if key == ek or (len(key) >= 2 and key in ek) or (len(ek) >= 2 and ek in key):
+                return False
+    if key in _PERSON_TITLE_BLOCKLIST_NORM:
+        return False
+    if key in _STUDIO_BRAND_BLOCKLIST_NORM:
+        return False
+    if _SEASON_TAG_RE.match(name) or _norm_key(name) in _NOISE_LOOKUP:
+        return False
+    # 媒介 / 载体根词（轻小说 / 漫画 / 游戏 / 动画 …）属作品信息，不入题材标签；
+    # 但「X改」（小说改 / 漫画改 / 游戏改）是合法的改编来源题材，放行。
+    norm = _norm_key(name)
+    if any(root in norm for root in _CARRIER_ROOTS) and not norm.endswith("改"):
+        return False
+    kind, _ = classify_tag(name)
+    if kind in (TAG_STUDIO, TAG_YEAR):
+        return False
+    return True
+
+
+def split_tags_full(
+    tags,
+) -> tuple[list[str], list[str], int | None, str | None, str | None]:
+    """把标签列表拆成 (题材, 公司, 年份, 媒介, 原作载体)。
 
     - 题材与公司保序去重（题材命中同义词表时写规范名）；
-    - 年份取先出现的那个；
-    - 噪音（声优 / 载体 / 平台 / 季度）直接丢弃；
-    - 年份如果同时有多个，取最早的一个（作品首播年更接近事实）。
+    - 年份取最早的（作品首播年更接近事实）；
+    - 媒介 / 原作载体取先出现的那个：一部作品可能同时挂着「TV」与「剧场版」
+      （本篇 + 剧场版合并条目），以标签顺序里靠前的为准；
+    - 纯噪音（声优 / 平台 / 地区 / 季度 / 元标签）丢弃。
     """
     genres: list[str] = []
     studios: list[str] = []
     years: list[int] = []
+    media: str | None = None
+    source: str | None = None
     for tag in tags or []:
         kind, value = classify_tag(str(tag))
         if kind == TAG_GENRE and value not in genres:
@@ -431,7 +674,20 @@ def split_tags(tags) -> tuple[list[str], list[str], int | None]:
             studios.append(value)
         elif kind == TAG_YEAR and value:
             years.append(int(value))
-    return genres, studios, (min(years) if years else None)
+        elif kind == TAG_MEDIA and media is None:
+            media = value
+        elif kind == TAG_SOURCE and source is None:
+            source = value
+    return genres, studios, (min(years) if years else None), media, source
+
+
+def split_tags(tags) -> tuple[list[str], list[str], int | None]:
+    """把标签列表拆成 (题材, 公司, 年份)：``split_tags_full`` 的三元组视图。
+
+    历史调用方只要题材 / 公司 / 年份；形式载体另走 ``split_tags_full``。
+    """
+    genres, studios, year, _media, _source = split_tags_full(tags)
+    return genres, studios, year
 
 
 def year_from_date(date: str | None) -> int | None:

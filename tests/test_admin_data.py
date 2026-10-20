@@ -426,7 +426,7 @@ def test_content_platform_nav_collapses_into_user_menu(data_env):
     assert 'href="/manage"' in body and "内容管理" in body
     assert 'href="/admin"' in body and "站点设置" in body
     assert 'href="/testcases"' in body and "测试平台" in body
-    # 画像与个人空间同理：菜单内可达，不再并列成两个一级入口
+    # 成分检测与个人空间同理：菜单内可达，不再并列成两个一级入口
     assert 'href="/me"' in body and 'href="/me/persona"' in body
 
 
@@ -437,7 +437,7 @@ def test_guest_nav_shows_only_public_items(data_env):
     assert 'href="/manage"' not in body
     assert 'href="/admin"' not in body
     assert 'href="/register"' in body and 'href="/login"' in body
-    # 画像引流卡对游客链到免登录试算页
+    # 成分检测引流卡对游客链到免登录试算页
     assert 'href="/persona"' in body
 
 

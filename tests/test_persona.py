@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
-from app import crud, persona, persona_pages
+from app import bilibili, crud, persona, persona_pages, security
 from app.config import settings
 from app.database import Base, get_db
 from app.main import app
@@ -83,6 +83,24 @@ COLLECTIONS = [
         "updated_at": None,
     },
 ]
+
+
+def _bili_item(season_id, title, tags, *, status=2):
+    """B站追番归一化条目（fetch_user_follows 的输出结构，游客试算测试用）。"""
+    return {
+        "season_id": season_id,
+        "title": title,
+        "season_type": 1,
+        "season_type_name": "番剧",
+        "follow_status": status,
+        "rating": 8.0,
+        "follow_count": 1000,
+        "year": 2024,
+        "tags": list(tags),
+        "series_title": None,
+        "season_title": "第一季",
+        "is_finish": False,
+    }
 
 
 @pytest.fixture
@@ -607,8 +625,11 @@ class TestLlmTestRoute:
         _seed_collections(persona_env.session_factory)
         _generate(persona_env)
         page = persona_env.client.get("/me/persona")
+        # 未配接口：提示走网页版手动贴回，并给出用户级 Key 表单（不再教用户改 env）
         assert "千问 / 豆包 / DeepSeek 网页版" in page.text
-        assert "PERSONA_LLM_PROVIDER=deepseek|doubao|glm" in page.text
+        assert "保存 Key" in page.text
+        assert "API Key" in page.text
+        assert "用已配置的 LLM 生成文案" not in page.text
 
 
 class TestSiteSync:
@@ -873,8 +894,12 @@ class TestGuestPreview:
     @pytest.fixture(autouse=True)
     def _reset_cooldown(self):
         persona_pages._guest_hits.clear()
+        persona_pages._guest_device_hits.clear()
+        persona_pages._guest_ip_hits.clear()
         yield
         persona_pages._guest_hits.clear()
+        persona_pages._guest_device_hits.clear()
+        persona_pages._guest_ip_hits.clear()
 
     def test_landing_open_to_guests(self):
         client = TestClient(app, follow_redirects=False)
@@ -915,11 +940,167 @@ class TestGuestPreview:
         finally:
             db.close()
 
-    def test_preview_requires_username(self, persona_env):
+    def test_preview_requires_any_source(self, persona_env):
         client = TestClient(app, follow_redirects=False)
-        resp = client.post("/persona/preview", data={"username": "  "})
+        resp = client.post("/persona/preview", data={"username": "  ", "mid": "  "})
         assert resp.status_code == 200
-        assert "请先填写 Bangumi 用户名" in resp.text
+        assert "请填写 Bangumi 用户名或 B站 UID" in resp.text
+
+    def test_preview_bilibili_only(self, persona_env, monkeypatch):
+        """只填 B站 UID：读追番表算画像（不写库）。"""
+        monkeypatch.setattr(
+            persona_pages.bilibili,
+            "fetch_user_follows",
+            lambda mid, **kwargs: (
+                [
+                    _bili_item(1, "日常追番", ["日常", "百合"], status=2),
+                    _bili_item(2, "科幻追番", ["科幻"], status=1),
+                ],
+                2,
+            ),
+        )
+        client = TestClient(app, follow_redirects=False)
+        resp = client.post("/persona/preview", data={"mid": "2"})
+        assert resp.status_code == 200
+        assert "B站 UID 2" in resp.text
+        assert "B站追番 2 条" in resp.text
+        assert "本命类型" in resp.text
+
+    def test_preview_merges_both_sources(self, persona_env, monkeypatch):
+        """双源合并：同作品只计一次，画像注脚显示两边条数。"""
+        monkeypatch.setattr(
+            persona_pages.persona,
+            "fetch_user_collections",
+            lambda *args, **kwargs: (
+                [
+                    {
+                        "subject_id": 10,
+                        "subject_type": 2,
+                        "name": "CLANNAD",
+                        "name_cn": "CLANNAD",
+                        "date": "2007-10-04",
+                        "score": 8.0,
+                        "rank": 100,
+                        "collection_total": 1000,
+                        "rate": 9,
+                        "collection_type": 3,
+                        "private": False,
+                        "subject_tags": [{"name": "日常", "count": 5}],
+                        "user_tags": [],
+                        "updated_at": None,
+                    }
+                ],
+                1,
+            ),
+        )
+        monkeypatch.setattr(
+            persona_pages.bilibili,
+            "fetch_user_follows",
+            lambda mid, **kwargs: (
+                [_bili_item(20, "CLANNAD 第一季 中文配音", ["剧情"], status=3)],
+                1,
+            ),
+        )
+        client = TestClient(app, follow_redirects=False)
+        text = client.post(
+            "/persona/preview", data={"username": "sai", "mid": "2"}
+        ).text
+        assert "Bangumi 收藏 1 条" in text and "B站追番 1 条" in text
+        assert "Bangumi 1 条 + B站追番 1 条" in text  # data_note 三源计数
+
+    def test_preview_partial_failure_keeps_working_source(self, persona_env, monkeypatch):
+        """单源失败不致命：成功的源照算，失败原因以 notes 提示。"""
+        monkeypatch.setattr(
+            persona_pages.persona,
+            "fetch_user_collections",
+            lambda *args, **kwargs: (COLLECTIONS, len(COLLECTIONS)),
+        )
+
+        def bili_fail(mid, **kwargs):
+            raise persona.PersonaError("该用户的追番列表未公开")
+
+        monkeypatch.setattr(persona_pages.bilibili, "fetch_user_follows", bili_fail)
+        client = TestClient(app, follow_redirects=False)
+        text = client.post(
+            "/persona/preview", data={"username": "sai", "mid": "2"}
+        ).text
+        assert "本命类型" in text  # Bangumi 结果照常渲染
+        assert "B站追番表读取失败" in text  # notes 提示
+        assert "已跳过" in text
+
+    def test_preview_bilibili_cap_is_100(self, persona_env, monkeypatch):
+        captured = {}
+
+        def fake_fetch(mid, **kwargs):
+            captured.update(kwargs)
+            return ([_bili_item(1, "追番", ["日常"], status=2)], 1)
+
+        monkeypatch.setattr(persona_pages.bilibili, "fetch_user_follows", fake_fetch)
+        client = TestClient(app, follow_redirects=False)
+        client.post("/persona/preview", data={"mid": "2"})
+        assert captured["max_items"] == 100
+
+    def test_device_cookie_issued_on_first_trial(self, persona_env, monkeypatch):
+        """首次试算：发放 HttpOnly 设备 Cookie（签名令牌）。"""
+        monkeypatch.setattr(
+            persona_pages.persona,
+            "fetch_user_collections",
+            lambda *args, **kwargs: (COLLECTIONS, len(COLLECTIONS)),
+        )
+        client = TestClient(app, follow_redirects=False)
+        resp = client.post("/persona/preview", data={"username": "sai"})
+        assert resp.status_code == 200
+        token = client.cookies.get("guest_trial")
+        assert token and security.read_device_token(token, settings.auth_secret_key)
+
+    def test_device_limit_three_per_day(self, persona_env, monkeypatch):
+        """设备闸：同一设备 24 小时最多 3 次，第 4 次拦截。"""
+        monkeypatch.setattr(
+            persona_pages.persona,
+            "fetch_user_collections",
+            lambda *args, **kwargs: (COLLECTIONS, len(COLLECTIONS)),
+        )
+        client = TestClient(app, follow_redirects=False)
+        for _ in range(3):
+            persona_pages._guest_hits.clear()  # 跳过 20s 防抖，只测日限
+            resp = client.post("/persona/preview", data={"username": "sai"})
+            assert "御宅成分试算" in resp.text
+        persona_pages._guest_hits.clear()
+        blocked = client.post("/persona/preview", data={"username": "sai"})
+        assert "这个设备今天已经试算 3 次" in blocked.text
+        assert "登录后不受限制" in blocked.text
+
+    def test_ip_limit_wider_than_device(self, persona_env, monkeypatch):
+        """IP 闸：清 Cookie 换"设备"也拦得住，额度 10 次/天。"""
+        monkeypatch.setattr(
+            persona_pages.persona,
+            "fetch_user_collections",
+            lambda *args, **kwargs: (COLLECTIONS, len(COLLECTIONS)),
+        )
+        client = TestClient(app, follow_redirects=False)
+        for _ in range(10):
+            persona_pages._guest_hits.clear()
+            client.cookies.clear()  # 每次换一台"设备"
+            resp = client.post("/persona/preview", data={"username": "sai"})
+            assert "御宅成分试算" in resp.text
+        persona_pages._guest_hits.clear()
+        client.cookies.clear()
+        blocked = client.post("/persona/preview", data={"username": "sai"})
+        assert "当前网络今天已试算 10 次" in blocked.text
+
+    def test_logged_in_user_not_limited(self, persona_env, monkeypatch):
+        """登录用户不受游客日限约束（游走路）。"""
+        monkeypatch.setattr(
+            persona_pages.persona,
+            "fetch_user_collections",
+            lambda *args, **kwargs: (COLLECTIONS, len(COLLECTIONS)),
+        )
+        client = persona_env.client  # 已登录
+        for _ in range(5):  # 超过设备日限 3 次
+            persona_pages._guest_hits.clear()
+            resp = client.post("/persona/preview", data={"username": "sai"})
+            assert "御宅成分试算" in resp.text
+            assert "今天已经试算" not in resp.text
 
     def test_preview_cooldown(self, persona_env, monkeypatch):
         monkeypatch.setattr(

@@ -146,22 +146,26 @@ def make_db(tmp_path, name: str = "covers.db"):
 
 
 class TestExtractCoverUrl:
-    def test_prefers_medium_for_bandwidth(self):
-        """优先 medium(r/800) 而非 large 原图：实测小 12–30%，最终都要压到 ≤400KB WebP。"""
+    def test_prefers_large_original(self):
+        """优先 large 原图：镜像 bgmimg.anibt.net 只放行原图，/r/<像素>/ 缩略路径全 403。
+
+        改成 medium 优先时每条都下载失败（线上 4449 部作品因此没有封面），
+        所以这里钉住「原图优先」这条实测结论。
+        """
         url = import_bangumi.extract_cover_url(
             {"images": {"large": "https://x/l.jpg", "common": "https://x/c.jpg",
                         "medium": "https://x/m.jpg"}}
         )
-        assert url == "https://x/m.jpg"
+        assert url == "https://x/l.jpg"
 
-    def test_falls_back_to_common_then_large(self):
-        """medium 缺失时依次退到 common、large。"""
+    def test_falls_back_to_common_then_medium(self):
+        """large 缺失时依次退到 common、medium（顺序即 COVER_SIZE_PREFERENCE）。"""
         assert import_bangumi.extract_cover_url(
-            {"images": {"large": "https://x/l.jpg", "common": "https://x/c.jpg"}}
+            {"images": {"common": "https://x/c.jpg", "medium": "https://x/m.jpg"}}
         ) == "https://x/c.jpg"
         assert import_bangumi.extract_cover_url(
-            {"images": {"large": "https://x/l.jpg"}}
-        ) == "https://x/l.jpg"
+            {"images": {"medium": "https://x/m.jpg"}}
+        ) == "https://x/m.jpg"
 
     def test_falls_back_to_medium(self):
         url = import_bangumi.extract_cover_url({"images": {"medium": "https://x/m.jpg"}})

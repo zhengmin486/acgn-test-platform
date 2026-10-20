@@ -259,6 +259,20 @@ class TestFieldExtraction:
         assert sync_yuc.normalize_title_key("赛博朋克 边缘行者2 ") == "赛博朋克边缘行者2"
         assert sync_yuc.normalize_title_key(None) is None
 
+    def test_class_token_normalization(self):
+        """站点给同类名追加数字序号（title_cn_r1…），且 2020 老页面无 _r 后缀。
+
+        title_cn_r1 / title_cn_r / title_cn 三种写法必须归一为同一个类名。
+        """
+        assert sync_yuc.normalize_class_token("title_cn_r") == "title_cn"
+        assert sync_yuc.normalize_class_token("title_cn_r1") == "title_cn"
+        assert sync_yuc.normalize_class_token("title_jp_r23") == "title_jp"
+        assert sync_yuc.normalize_class_token("title_cn") == "title_cn"
+        assert sync_yuc.normalize_class_token("broadcast") == "broadcast"
+        assert sync_yuc.class_tokens({"class": "title_cn_r2 foo"}) == {"title_cn", "foo"}
+        # 2020 老模板：无 _r 后缀、无序号
+        assert sync_yuc.class_tokens({"class": "link_b"}) == {"link_b"}
+
     @pytest.mark.parametrize(
         ("text", "weekday", "clock"),
         [
@@ -328,6 +342,30 @@ class TestEntryParsing:
         assert entry.image_url is None
         assert entry.platforms == [{"name": "爱奇艺", "url": "https://www.iqiyi.com/"}]
 
+    def test_work_type_and_tags_extracted(self):
+        """作品类型与题材标签从 td.type_*_r / td.type_tag_r 提取。"""
+        chunks = sync_yuc.split_entries(SEASON_HTML)
+        entry = sync_yuc.parse_entry_chunk(chunks[0].html)
+        assert entry.work_type == "原创动画"
+        assert entry.work_tags == "科幻"
+
+    def test_suffixed_class_variants_still_parse(self):
+        """站点同款类名带数字序号（title_cn_r1/r2、staff_r2、type_b_r 等）也必须解析。"""
+        chunk = (
+            '<p class="title_cn_r1">JOJO奇妙冒险<br>飙马野郎</p>'
+            '<p class="title_jp_r2">スティール・ボール・ラン</p>'
+            '<td class="type_b_r">漫画改编动画</td>'
+            '<td class="type_tag_r1">战斗/冒险/赛马</td>'
+            '<td class="staff_r2">原作：荒木飞吕彦</td>'
+            '<p class="broadcast_r">10/3周六深夜</p>'
+        )
+        entry = sync_yuc.parse_entry_chunk(chunk)
+        assert entry.title_cn == "JOJO奇妙冒险 飙马野郎"
+        assert entry.title_jp == "スティール・ボール・ラン"
+        assert entry.work_type == "漫画改编动画"
+        assert entry.work_tags == "战斗/冒险/赛马"
+        assert entry.weekday == 6
+
     def test_malformed_html_chunk_still_yields_title(self):
         """未闭合标签的畸形块：容忍并取到已出现的字段，不抛异常。
 
@@ -360,6 +398,124 @@ class TestEntryParsing:
         )
         assert entry.title_main == "顶点武装"
         assert entry.image_url == "https://img.example/poster1.jpg"
+
+
+# ---------- 星期区播出位（具体时间来源） ----------
+
+
+def build_weekday_block(
+    *,
+    time: str | None = "20:30~",
+    poster: str = "https://img.example/poster9.jpg",
+    title: str = "某作品",
+    slot_class: str = "div_date",
+    time_class: str = "imgtext4",
+    title_class: str = "date_title_",
+    region_links=(("港台", "https://acg.gamer.com.tw/acgDetail.php?s=150292"),),
+) -> str:
+    """按真实页面结构构造一个星期区播出位块。"""
+    time_html = f'<p class="{time_class}">{time}</p>' if time else ""
+    links_html = "".join(
+        f'<a href="{href}" target="_blank"><img data-src="https://img.example/area.jpg">'
+        f"<br><p class=\"area\">{area}</p></a>"
+        for area, href in region_links
+    )
+    return (
+        f'<div style="float:left"><div class="{slot_class}">{time_html}'
+        f'<img width="120px" data-src="{poster}" referrerPolicy="no-referrer"></div>'
+        f'<div><table width="120px"><tr><td colspan="3" class="{title_class}">{title}</td></tr>'
+        f'<tr class="tr_area">{links_html}</tr></table></div></div>'
+    )
+
+
+class TestWeekdaySlots:
+    def test_slots_extracted_with_time_poster_title(self):
+        page = PAGE_HEADER + build_weekday_block(time="24:35~", title="天是红河岸")
+        slots = sync_yuc.parse_weekday_slots(page)
+        # PAGE_HEADER 头部日历卡（div_date_）也算一个无时间播出位
+        assert len(slots) == 2
+        slot = slots[-1]
+        assert slot.time == "24:35"
+        assert slot.poster_url == "https://img.example/poster9.jpg"
+        assert slot.title == "天是红河岸"
+        assert slot.platforms == [
+            {"name": "港台", "url": "https://acg.gamer.com.tw/acgDetail.php?s=150292"}
+        ]
+
+    def test_platform_card_div_date_has_platforms_but_no_time(self):
+        """div_date_（尾部多一个下划线）是纯平台卡片：没时间，但有平台链接。"""
+        page = PAGE_HEADER + build_weekday_block(
+            time=None,
+            slot_class="div_date_",
+            title_class="date_title__",
+            title="赛博朋克 边缘行者2",
+            region_links=(("环大陆", "https://www.netflix.com/title/81054853"),),
+        )
+        slots = sync_yuc.parse_weekday_slots(page)
+        assert len(slots) == 2  # 头部日历卡 + 平台卡片
+        slot = slots[-1]
+        assert slot.time is None
+        assert slot.platforms == [
+            {"name": "环大陆", "url": "https://www.netflix.com/title/81054853"}
+        ]
+
+    def test_slot_without_time_is_still_indexed_for_platforms(self):
+        """无时间的播出位仍进索引（供平台关联），但时间查询返回 None。"""
+        page = PAGE_HEADER + build_weekday_block(time=None, title="网络放送作品")
+        index = sync_yuc.build_slot_index(sync_yuc.parse_weekday_slots(page))
+        assert sync_yuc.slot_time_for(index, poster_url=None, title="网络放送作品") is None
+        slot = sync_yuc.lookup_slot(index, poster_url=None, title="网络放送作品")
+        assert slot is not None and slot.platforms
+
+    def test_slot_time_matches_by_poster_then_title(self):
+        slots = [
+            sync_yuc.WeekdaySlot(time="23:45", poster_url="https://img.example/p1.jpg", title="作品甲"),
+            sync_yuc.WeekdaySlot(time="26:10", poster_url=None, title="作品乙"),
+        ]
+        index = sync_yuc.build_slot_index(slots)
+        assert sync_yuc.slot_time_for(index, poster_url="https://img.example/p1.jpg", title=None) == "23:45"
+        # 海报缺失（如条目无海报）时按规范化标题兜底
+        assert sync_yuc.slot_time_for(index, poster_url=None, title="作品 乙") == "26:10"
+        # 关联不上不猜
+        assert sync_yuc.slot_time_for(index, poster_url=None, title="不存在的作品") is None
+
+    def test_slot_platforms_merged_into_entry(self):
+        """条目没有平台链接时，合并星期区区域平台；非平台域名仍被过滤。"""
+        index = sync_yuc.build_slot_index(
+            [
+                sync_yuc.WeekdaySlot(
+                    time="23:45",
+                    poster_url="https://img.example/p1.jpg",
+                    title=None,
+                    platforms=[{"name": "港台", "url": "https://acg.gamer.com.tw/d?s=1"}],
+                )
+            ]
+        )
+        chunk = (
+            '<img width="180px" data-src="https://img.example/p1.jpg">'
+            '<p class="title_cn_r">作品甲</p>'
+            '<p class="broadcast_r">10/3周六深夜</p>'
+        )
+        entry = sync_yuc.parse_entry_chunk(chunk, slot_index=index)
+        assert entry.broadcast_time == "23:45"
+        assert entry.platforms == [{"name": "港台", "url": "https://acg.gamer.com.tw/d?s=1"}]
+
+    def test_note_time_takes_priority_over_slot(self):
+        """条目说明自带 HH:MM 时以条目为准，星期区时间只作回退。"""
+        index = sync_yuc.build_slot_index(
+            [sync_yuc.WeekdaySlot(time="23:45", poster_url="https://img.example/p1.jpg", title=None)]
+        )
+        chunk = (
+            '<img width="180px" data-src="https://img.example/p1.jpg">'
+            '<p class="title_cn_r">作品甲</p>'
+            '<p class="broadcast_r">每周六 24:30 网络放送</p>'
+        )
+        entry = sync_yuc.parse_entry_chunk(chunk, slot_index=index)
+        assert entry.broadcast_time == "24:30"
+
+        chunk_without_note_time = chunk.replace("每周六 24:30 网络放送", "10/3周六深夜")
+        entry = sync_yuc.parse_entry_chunk(chunk_without_note_time, slot_index=index)
+        assert entry.broadcast_time == "23:45"
 
 
 # ---------- 同步流程：dry-run / apply / 幂等 ----------
@@ -444,6 +600,43 @@ class TestRunSync:
             assert [(c.id, c.title) for c in content_after] == [
                 (c.id, c.title) for c in content_before
             ]
+        finally:
+            db.close()
+
+    def test_apply_backfills_time_and_work_info_from_weekday_section(self, tmp_path):
+        """整页同步：具体时间从星期区播出位回填，作品类型/题材标签入库。
+
+        无对应播出位的作品（如纯网络放送）时间保持 NULL，不猜测。
+        """
+        factory = make_db(tmp_path)
+        page = (
+            PAGE_HEADER
+            + build_entry(1, cn="顶点武装", jp="VERTEX FORCE", broadcast="10/3周六深夜")
+            + build_entry(6, cn="银翼骑士", jp="銀翼のナイト", broadcast="10/3周六深夜")
+            + build_weekday_block(
+                poster="https://img.example/poster1.jpg", title="顶点武装", time="23:45~"
+            )
+            + "</body></html>"
+        )
+        fetch = make_stub_fetch({ATOM_URL: ATOM_XML, SEASON_URL: page})
+        summary = sync_yuc.run_sync(None, session_factory=factory, apply=True, fetch=fetch)
+
+        # 头部日历卡（div_date_）+ 1 个真实播出位
+        assert summary.weekday_slots == 2
+        assert summary.added == 2
+
+        db = factory()
+        try:
+            rows = {row.title_main: row for row in db.query(AnimeSchedule).all()}
+            a01 = rows["顶点武装"]
+            assert a01.broadcast_time == "23:45"
+            assert a01.work_type == "原创动画"
+            assert a01.work_tags == "科幻"
+            # 条目自身没有平台链接：星期区区域平台（港台）合并进来
+            assert a01.platforms == [
+                {"name": "港台", "url": "https://acg.gamer.com.tw/acgDetail.php?s=150292"}
+            ]
+            assert rows["银翼骑士"].broadcast_time is None
         finally:
             db.close()
 
@@ -566,6 +759,41 @@ class TestRunSync:
         finally:
             db.close()
 
+    def test_cross_language_duplicate_merged(self, tmp_path):
+        """同作品一条中文主、一条日文主（title_jp 相同）：合并为一条并保留中文。
+
+        复现线上 bug：yuc.wiki 档期页同一部作品被列两次，一次只有日文原名
+        （title_cn 为空），一次带中文译名；两条 title_jp 相同、title_main 一中
+        一日，旧逻辑按主标题去重挡不住而重复入库。修复后按日文名归组合并，并
+        优先保留带中文译名的条目。
+        """
+        factory = make_db(tmp_path)
+        # 在固定 4 条 fixture 之外，额外注入一对中日文重复（jp 相同、main 不同）。
+        extra = (
+            build_entry(5, cn="转生成哥布林有什么问题吗", jp="転生ゴブリンだけど質問ある？", broadcast="周一 25:00")
+            + build_entry(6, cn=None, jp="転生ゴブリンだけど質問ある？", broadcast="周一 25:00")
+        )
+        html = build_season_page(extra_entry=extra)
+        fetch = make_stub_fetch({ATOM_URL: ATOM_XML, SEASON_URL: html})
+
+        summary = sync_yuc.run_sync(None, session_factory=factory, apply=True, fetch=fetch)
+
+        # 固定 fixture 内 A01/A04 同主标题重复 -> 4 条解析合并为 3；
+        # 额外一对中日文重复 -> 合并为 1；合计 4 条有效、2 条重复。
+        assert summary.valid == 4
+        assert summary.duplicates == 2
+        assert summary.added == 4
+
+        db = factory()
+        try:
+            rows = db.query(AnimeSchedule).all()
+            goblin = [r for r in rows if r.title_jp == "転生ゴブリンだけど質問ある？"]
+            assert len(goblin) == 1
+            assert goblin[0].title_cn == "转生成哥布林有什么问题吗"
+            assert goblin[0].title_main == "转生成哥布林有什么问题吗"
+        finally:
+            db.close()
+
     def test_atom_fetch_failure_propagates(self, tmp_path):
         """Atom 都拿不到：抛出明确网络错误，且不产生任何数据库写入。"""
         factory = make_db(tmp_path)
@@ -644,7 +872,8 @@ class TestScheduleApi:
         db = factory()
         try:
             upsert_sample(db, season="202610", source_key="银翼骑士", title_main="银翼骑士",
-                          title_cn="银翼骑士", title_jp="銀翼のナイト", weekday=6)
+                          title_cn="银翼骑士", title_jp="銀翼のナイト", weekday=6,
+                          work_type="漫画改编动画", work_tags="科幻/机战")
             upsert_sample(db, season="202610", source_key="无星期作品", title_main="无星期作品",
                           title_cn="无星期作品", title_jp=None, weekday=None,
                           broadcast_time=None, broadcast_note=None, image_url=None,
@@ -741,7 +970,8 @@ class TestSchedulePages:
         db = factory()
         try:
             upsert_sample(db, season="202610", source_key="银翼骑士", title_main="银翼骑士",
-                          title_cn="银翼骑士", title_jp="銀翼のナイト", weekday=6)
+                          title_cn="银翼骑士", title_jp="銀翼のナイト", weekday=6,
+                          work_type="漫画改编动画", work_tags="科幻/机战")
             upsert_sample(db, season="202607", source_key="旧档期作品", title_main="旧档期作品",
                           title_cn="旧档期作品", weekday=1)
             run = crud.create_sync_run(db, season_code="202610", mode="dry-run")
@@ -785,6 +1015,72 @@ class TestSchedulePages:
         assert "银翼骑士" in search.text
         assert "样例作品" not in search.text
 
+    def test_schedule_page_weekday_filter_and_empty_value(self, seeded):
+        """星期筛选可用；空值/非数字宽容忽略不 422（模板「全部」与分页链接会发 weekday=）。"""
+        by_weekday = seeded.get("/schedule", params={"season": "202610", "weekday": 6})
+        assert by_weekday.status_code == 200
+        assert "银翼骑士" in by_weekday.text
+        assert "无星期作品" not in by_weekday.text
+
+        for bad in ("", "abc", "9"):
+            resp = seeded.get("/schedule", params={"season": "202610", "weekday": bad})
+            assert resp.status_code == 200, f"weekday={bad!r} 应宽容忽略"
+            assert "银翼骑士" in resp.text  # 回落到无筛选分组视图
+
+    def test_schedule_pagination_link_encodes_q(self, tmp_path):
+        """分页链接的 q/season 必须 URL 编码：q 含 & 不断链（回归 2026-10-19）。"""
+        import html
+        import re
+
+        from app.models import AnimeSchedule
+
+        factory = make_db(tmp_path)
+        create_accounts(factory, admin=True, user=False)
+        db = factory()
+        try:
+            for i in range(1, 22):  # 21 条 > SCHEDULE_PAGE_SIZE(20)，触发翻页
+                upsert_sample(
+                    db,
+                    source_key=f"A&B作品{i:02d}",
+                    title_main=f"A&B作品{i:02d}",
+                    title_cn=f"A&B作品{i:02d}",
+                    title_jp=None,
+                    weekday=6,
+                    image_url=None,
+                    platforms=[],
+                )
+        finally:
+            db.close()
+
+        def override_get_db():
+            session = factory()
+            try:
+                yield session
+            finally:
+                session.close()
+
+        client = TestClient(app)
+        app.dependency_overrides[get_db] = override_get_db
+        login_as_admin(client)
+        try:
+            resp = client.get(
+                "/schedule", params={"season": "202610", "q": "A&B", "weekday": 6}
+            )
+            assert resp.status_code == 200
+            # q 已编码（A%26B），链接里不再出现裸的 A&B；翻页后仍能命中
+            assert "q=A%26B" in resp.text
+            assert "q=A&B" not in resp.text
+            match = re.search(r'href="(/schedule\?[^"]*page=2)"', resp.text)
+            assert match, "应存在第二页链接"
+            # HTML 属性里的 & 被转义为 &amp;（正确行为），请求前先还原成浏览器语义
+            page2 = client.get(html.unescape(match.group(1)))
+            assert page2.status_code == 200
+            assert "第 2" in page2.text  # 真的翻到了第二页
+            # Jinja 自动转义：标题里的 & 渲染为 &amp;
+            assert "A&amp;B作品" in page2.text  # 翻页后筛选条件仍然生效
+        finally:
+            app.dependency_overrides.pop(get_db, None)
+
     def test_schedule_page_empty_database(self, tmp_path):
         factory = make_db(tmp_path)
         create_accounts(factory, admin=True, user=False)  # 同步历史页面仅管理员可访问
@@ -810,6 +1106,18 @@ class TestSchedulePages:
             assert "暂无同步记录" in runs.text
         finally:
             app.dependency_overrides.pop(get_db, None)
+
+    def test_schedule_page_shows_work_type_and_tags(self, seeded):
+        """作品类型与题材标签在档期页与 API 都能读到。"""
+        body = seeded.get("/api/schedule", params={"season": "202610"}).json()
+        item = next(i for i in body["items"] if i["title_main"] == "银翼骑士")
+        assert item["work_type"] == "漫画改编动画"
+        assert item["work_tags"] == "科幻/机战"
+
+        page = seeded.get("/schedule", params={"season": "202610"})
+        assert page.status_code == 200
+        assert "漫画改编动画" in page.text
+        assert "科幻/机战" in page.text
 
     def test_runs_page_lists_history(self, seeded):
         resp = seeded.get("/manage/sync/runs")
@@ -843,8 +1151,8 @@ class TestScheduleModels:
             assert item["platforms"] == [{"name": "bilibili", "url": "https://www.bilibili.com/"}]
             assert set(item) == {
                 "id", "season_code", "source_key", "title_main", "title_cn", "title_jp",
-                "weekday", "broadcast_time", "broadcast_note", "image_url", "platforms",
-                "source_url", "last_synced_at",
+                "weekday", "broadcast_time", "broadcast_note", "work_type", "work_tags",
+                "image_url", "platforms", "source_url", "last_synced_at",
             }
         finally:
             db.close()

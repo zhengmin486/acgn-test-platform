@@ -252,10 +252,11 @@ def test_season_form_offers_local_seasons(sync_env):
 def test_season_form_allows_typing_new_season(sync_env):
     """档期不能只给「本地已同步」的下拉：那会让页面有数据后只剩老选项。"""
     body = sync_env.admin.get(SYNC_PATH, params={"task": "yuc_schedule"}).text
-    # 自由输入框 + 建议列表，而不是只能选的 select
+    # 自由输入框 + 建议列表，而不是只能选的 select（只针对档期控件本身，
+    # 页面其它地方——如导航的类型筛选——本来就有 select）
     assert '<input class="form-control form-control-sm" id="sync-scope" name="scope"' in body
     assert 'list="season-suggestions"' in body
-    assert "<select" not in body
+    assert '<select class="form-select form-select-sm" id="sync-scope"' not in body
     assert "也可直接填任意 YYYYMM" in body
 
 

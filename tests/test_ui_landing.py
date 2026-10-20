@@ -181,7 +181,8 @@ def today_client(tmp_path):
     _seed_schedule(TestingSession, source_key="early", title_main="早晨番",
                    weekday=today, broadcast_time="12:00")
     _seed_schedule(TestingSession, source_key="late", title_main="深夜番",
-                   weekday=today, broadcast_time="23:00")
+                   weekday=today, broadcast_time="23:00",
+                   image_url="https://example.com/cover.jpg")
     _seed_schedule(TestingSession, source_key="notime", title_main="无时间番",
                    weekday=today, broadcast_time=None)
     _seed_schedule(TestingSession, source_key="othertab", title_main="别天番",
@@ -206,6 +207,20 @@ def test_home_today_schedule_filtered_and_sorted(today_client):
     assert "12:00 更新" in html and "23:00 更新" in html
     # 更新时间徽标（HH:MM）随卡片渲染
     assert "schedule-time-badge" in html
+    # 卡片结构（2026-10-19 修）：时间徽标浮在封面区内、标题在封面区外，
+    # 封面图片只铺封面区——杜绝有图时把标题/时间压在图片下（无名字无时间）。
+    import re
+
+    cards = re.findall(r'<a class="spotlight-card".*?</a>', html, re.S)
+    assert cards
+    for card in cards:
+        assert card.index("spotlight-cover") < card.index("spotlight-meta")
+        title = re.search(r'<span class="spotlight-title"[^>]*>([^<]+)</span>', card)
+        assert title and title.group(1).strip()
+    if "12:00 更新" in html:
+        card = next(c for c in cards if "12:00 更新" in c)
+        assert card.index("schedule-time-badge") < card.index("spotlight-meta")
+    assert 'class="spotlight-img"' in html
 
 
 def test_nav_search_has_type_select(today_client):
