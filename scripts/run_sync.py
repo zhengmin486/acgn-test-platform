@@ -9,15 +9,17 @@
   程序告警。
 
 用法示例：
-    # 每天跑一次：新番档期（当前档期）+ 官方资讯（推荐 cron 默认行为）
+    # 每天跑一次：新番档期（Atom 里的最新一期）+ 多源资讯（按自然日配额）
     python scripts/run_sync.py
-    # 只同步新番档期（当前档期）
+    # 只同步新番档期（自动取最新一期）
     python scripts/run_sync.py --task yuc_schedule
     # 指定档期
     python scripts/run_sync.py --task yuc_schedule --season 202610
+    # 同步多源资讯（每日 30 条配额，日语源优先 + 题材优先级，跨次累计）
+    python scripts/run_sync.py --task news
     # 同步指定 Bangumi 条目（必须显式给 ID，没有"默认导哪些"的猜测）
     python scripts/run_sync.py --task bangumi --scope "265 975"
-    # 同步官方资讯（可指定栏目与条数）
+    # 同步官方资讯（Aniplex 单源，可指定栏目与条数）
     python scripts/run_sync.py --task articles --scope "TVアニメ" --limit 10
     # 只预览不写库（仍会写一条 mode=preview 的运行记录，便于审计）
     python scripts/run_sync.py --preview
@@ -43,9 +45,10 @@ from app import sync_tasks  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.database import build_engine  # noqa: E402
 
-# 默认同步的数据源：新番档期（当前档期）+ 官方资讯。
-# Bangumi 条目没有「默认导哪些」的合理猜测，必须显式 --task bangumi --scope "ID..."。
-DEFAULT_TASK_KEYS = (sync_tasks.TASK_YUC, sync_tasks.TASK_ARTICLES)
+# 默认同步的数据源：新番档期（自动取最新档期）+ 多源资讯（按自然日配额）。
+# Bangumi 条目没有「默认导哪些」的合理猜测，必须显式 --task bangumi --scope "ID..."，
+# 也不能进 cron——「作品不自动」是既定口径。
+DEFAULT_TASK_KEYS = (sync_tasks.TASK_YUC, sync_tasks.TASK_NEWS)
 TASK_ALL = "all"
 
 # 退出码：0 全部成功；1 有数据源失败 / 报错；2 用法错误（参数不合法等）。
@@ -69,16 +72,46 @@ def resolve_tasks(task_arg: str | None) -> list[str]:
         return [sync_tasks.TASK_YUC]
     if task_arg == sync_tasks.TASK_ARTICLES:
         return [sync_tasks.TASK_ARTICLES]
+    if task_arg == sync_tasks.TASK_NEWS:
+        return [sync_tasks.TASK_NEWS]
     raise ValueError(
         f"未知的数据源：{task_arg}（可选：{TASK_ALL} / {sync_tasks.TASK_BANGUMI} / "
-        f"{sync_tasks.TASK_YUC} / {sync_tasks.TASK_ARTICLES}）"
+        f"{sync_tasks.TASK_YUC} / {sync_tasks.TASK_ARTICLES} / {sync_tasks.TASK_NEWS}）"
     )
 
 
+def resolve_latest_season(*, timeout: float = 15.0) -> str:
+    """从 Atom 取最新档期码（如 202610）；取不到时退回当前年月。
+
+    不能用「当前年月」当档期：yuc.wiki 只在 1/4/7/10 月出表，
+    11、12 月算出来的 202611 并不存在，同步会天天失败。
+    """
+    from scripts.sync_yuc_schedule import (  # 局部导入：避免脚本启动即建 opener
+        ATOM_URL,
+        build_opener,
+        fetch_url,
+        parse_atom,
+        resolve_insecure,
+    )
+
+    try:
+        text = fetch_url(
+            ATOM_URL, opener=build_opener(None, resolve_insecure(None)), timeout=timeout
+        )
+        seasons = parse_atom(text)
+        if seasons:
+            return seasons[0].code
+    except Exception:  # noqa: BLE001 - 取不到就退回当前年月，让同步自己去报错
+        pass
+    return current_season_code()
+
+
 def build_scope(task_key: str, args) -> str:
-    """按数据源拼出 scope_text（yuc 缺省自动算当前档期）。"""
+    """按数据源拼出 scope_text（yuc 缺省取 Atom 里的最新档期）。"""
     if task_key == sync_tasks.TASK_YUC:
-        return args.season or current_season_code()
+        return args.season or resolve_latest_season()
+    if task_key == sync_tasks.TASK_NEWS:
+        return ""  # 配额由配置决定，无需范围
     if task_key == sync_tasks.TASK_BANGUMI:
         if not (args.scope or "").strip():
             raise ValueError(
@@ -101,16 +134,16 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="KEY",
         help=(
-            f"数据源：{TASK_ALL}（默认，等价于 {sync_tasks.TASK_YUC}+{sync_tasks.TASK_ARTICLES}）、"
+            f"数据源：{TASK_ALL}（默认，等价于 {sync_tasks.TASK_YUC}+{sync_tasks.TASK_NEWS}）、"
             f"{sync_tasks.TASK_BANGUMI}（需配 --scope ID）、{sync_tasks.TASK_YUC}、"
-            f"{sync_tasks.TASK_ARTICLES}"
+            f"{sync_tasks.TASK_NEWS}（多源每日资讯）、{sync_tasks.TASK_ARTICLES}（Aniplex 单源）"
         ),
     )
     parser.add_argument(
         "--season",
         default=None,
         metavar="YYYYMM",
-        help="新番档期码；仅 --task yuc_schedule 有效，缺省取当前档期",
+        help="新番档期码；仅 --task yuc_schedule 有效，缺省取 Atom 里的最新一期",
     )
     parser.add_argument(
         "--scope",

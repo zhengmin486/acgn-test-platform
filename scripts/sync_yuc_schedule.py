@@ -12,6 +12,13 @@
   不删除本地已有记录，也不触碰 Content、Article 等其他模块。
 - 档期识别依据 Atom 条目链接中的 /YYYYMM/ 路径（如 /202610/），
   按“年-月”数值比较选最新，不依赖条目更新时间。
+- 站点会给同类名追加数字序号区分样式变体（title_cn_r1/r2、title_jp_r3、
+  staff_r2 等），类名匹配前统一去掉尾部数字，见 normalize_class_token。
+- 具体播出时间（HH:MM）不在条目里，而在页面下方星期区播出位
+  （div_date 块的 imgtext4/imgtext5，如 "24:35~"）；按海报 URL 关联、
+  标题规范化匹配兜底回填到 broadcast_time；关联不上保持 NULL，不猜测。
+- 播放平台链接同理也可能只在星期区 tr_area（分区域平台，如“港台”）：
+  按同一关联合并进 platforms，条目自带平台优先，域名仍走白名单。
 - 只保存经确认的图片 URL 和播放平台链接，不下载文件、不猜测字段。
 
 用法示例：
@@ -84,7 +91,7 @@ ATOM_NS = "{http://www.w3.org/2005/Atom}"
 SEASON_PATH_RE = re.compile(r"/(20\d{2})(0[1-9]|1[0-2])(?:/|$)")
 # 档期页详情条目以 HTML 注释 <!--#A01--> 等分块（站点模板约定）。
 ENTRY_MARKER_RE = re.compile(r"<!--\s*#\s*[A-Za-z]+\d+\s*-->")
-TITLE_MAIN_ANCHOR_RE = re.compile(r"class=[\"']title_main_r[\"']")
+TITLE_MAIN_ANCHOR_RE = re.compile(r"class=[\"']title_main(?:_r\d*)?[\"']")
 POSTER_IMG_RE = re.compile(r"<img[^>]*>", re.I)
 DATA_SRC_RE = re.compile(r"""data-src=["']([^"']+)["']""", re.I)
 
@@ -159,6 +166,8 @@ class ParsedEntry:
     broadcast_note: str | None = None
     image_url: str | None = None
     platforms: list[dict] = field(default_factory=list)
+    work_type: str | None = None  # 作品类型，如 漫画改编动画 / 原创动画
+    work_tags: str | None = None  # 题材标签，站点原文（斜杠/换行分隔）
 
     @property
     def title_main(self) -> str | None:
@@ -184,6 +193,7 @@ class SyncSummary:
     season_title: str
     season_url: str
     pages_fetched: int = 0
+    weekday_slots: int = 0  # 页面星期区发现的播出位数量（具体时间来源）
     parsed: int = 0
     valid: int = 0
     preview: int = 0  # dry-run 下可入库的条数
@@ -208,6 +218,7 @@ class SyncSummary:
             f"模式：{mode_label}",
             "同步汇总：",
             f"  请求页面：{self.pages_fetched}",
+            f"  星期区播出位：{self.weekday_slots}",
             f"  解析条目：{self.parsed}",
             f"  有效记录：{self.valid}",
             f"  可入库：{self.valid}"
@@ -279,6 +290,9 @@ def platform_from_link(text: str | None, href: str) -> dict | None:
     label = clean_text(text)
     if label and label.upper() in PROMO_ANCHOR_TEXTS:
         return None
+    # 锚文本是「[独家]」这类装饰标记时不算有效名称：回退用域名命名
+    if label and re.fullmatch(r"[\[\(【（].+[\]\)】）]", label):
+        label = ""
     return {"name": label or host, "url": href}
 
 
@@ -332,6 +346,27 @@ def pick_season(seasons: list[SeasonInfo], season_code: str | None) -> SeasonInf
 
 
 # ---------- HTML 条目切分与解析 ----------
+
+# 站点会给同类名追加数字序号区分样式变体（title_cn_r1、title_jp_r2、staff_r1…），
+# 精确匹配会漏掉带序号的作品；匹配前统一去掉类名尾部数字，向后兼容 r4/r5 等新变体。
+CLASS_NUM_SUFFIX_RE = re.compile(r"\d+$")
+# 2020~2021 的旧版档期页用无后缀类名（title_cn / broadcast / link_a），
+# 2022 起才改成 _r 结尾，两种写法都归一。
+CLASS_R_SUFFIX_RE = re.compile(r"_r$")
+
+
+def normalize_class_token(token: str) -> str:
+    """类名归一：title_cn_r3 / title_cn_r / title_cn 全部 -> title_cn。"""
+    return CLASS_R_SUFFIX_RE.sub("", CLASS_NUM_SUFFIX_RE.sub("", token))
+
+
+def class_tokens(attr_dict: dict) -> set[str]:
+    """把 class 属性拆成归一化后的类名集合。"""
+    return {
+        normalize_class_token(token)
+        for token in (attr_dict.get("class") or "").split()
+        if token
+    }
 
 
 @dataclass
@@ -387,28 +422,37 @@ class _EntryParser(html.parser.HTMLParser):
     """单条目块的字段提取器（标准库 HTMLParser，状态机式收集）。
 
     收集目标：
-    - p.title_cn_r / p.title_jp_r / p.broadcast_r / p.broadcast_ex_r 的文本；
+    - p.title_cn_r / p.title_jp_r / p.broadcast_r / p.broadcast_ex_r 的文本
+      （类名可能带数字序号，如 title_cn_r1，见 normalize_class_token）；
+    - td.type_[a-e]_r 的作品类型与 td.type_tag_r（同含 type_tag_r1 变体）的题材标签；
     - td.link_a_r / td.link_b_r 内的全部 <a> 链接（文本 + href）；
     - 块内第一个 width 含 180 的 <img> 的 data-src（海报）。
     """
 
-    CAPTURE_CLASSES = {"title_cn_r", "title_jp_r", "broadcast_r", "broadcast_ex_r"}
-    LINK_CELL_CLASSES = {"link_a_r", "link_b_r"}
+    CAPTURE_P_CLASSES = {"title_cn", "title_jp", "broadcast", "broadcast_ex"}
+    LINK_CELL_CLASSES = {"link_a", "link_b"}
+    # 作品类型（type_a 原创 / type_b 漫改 / type_c 小说改 / type_d、type_e 其他）
+    # 与题材标签（type_tag，仅新版页面有）所在的 td 单元格。
+    INFO_CELL_CLASSES = {"type_tag"} | {f"type_{letter}" for letter in "abcde"}
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
-        self.texts: dict[str, list[str]] = {name: [] for name in self.CAPTURE_CLASSES}
+        self.texts: dict[str, list[str]] = {
+            name: [] for name in self.CAPTURE_P_CLASSES | self.INFO_CELL_CLASSES
+        }
         self.links: list[tuple[str, str]] = []  # (锚文本, href)
         self.poster: str | None = None
         self._capture: str | None = None  # 正在收集的 p 类名
         self._capture_depth = 0
         self._buf: list[str] = []
+        self._cell_capture: str | None = None  # 正在收集的 td 单元格类名（类型/标签）
+        self._cell_buf: list[str] = []
         self._in_link_cell = False
         self._anchor: list | None = None  # [href, 文本缓冲]
 
     def handle_starttag(self, tag, attrs):
         attr_dict = dict(attrs)
-        classes = attr_dict.get("class") or ""
+        classes = class_tokens(attr_dict)
 
         if tag == "img":
             if self.poster is None:
@@ -421,13 +465,26 @@ class _EntryParser(html.parser.HTMLParser):
         if self._capture is not None:
             if tag == "p":
                 self._capture_depth += 1
+            elif tag == "br":
+                self._buf.append(" ")  # 多行标题/标签里的 <br> 转空格，避免文字粘连
             return
+        if self._cell_capture is not None:
+            if tag == "br":
+                self._cell_buf.append(" ")
+            return  # 类型/标签单元格内只有文本与 <br>，无嵌套单元格
 
-        if tag == "p" and classes in self.CAPTURE_CLASSES:
-            self._capture = classes
+        matched_p = classes & self.CAPTURE_P_CLASSES
+        matched_cell = classes & self.INFO_CELL_CLASSES
+        matched_link = classes & self.LINK_CELL_CLASSES
+
+        if tag == "p" and matched_p:
+            self._capture = next(iter(matched_p))
             self._capture_depth = 1
             self._buf = []
-        elif tag == "td" and classes in self.LINK_CELL_CLASSES:
+        elif tag == "td" and matched_cell:
+            self._cell_capture = next(iter(matched_cell))
+            self._cell_buf = []
+        elif tag == "td" and matched_link:
             self._in_link_cell = True
         elif tag == "a" and self._in_link_cell:
             href = (attr_dict.get("href") or "").strip()
@@ -438,6 +495,10 @@ class _EntryParser(html.parser.HTMLParser):
         if self._anchor is not None and tag == "a":
             self.links.append((clean_text("".join(self._anchor[1])) or "", self._anchor[0]))
             self._anchor = None
+        if self._cell_capture is not None and tag == "td":
+            self.texts[self._cell_capture].append("".join(self._cell_buf))
+            self._cell_capture = None
+            self._cell_buf = []
         if self._capture is not None and tag == "p":
             self._capture_depth -= 1
             if self._capture_depth <= 0:
@@ -449,11 +510,17 @@ class _EntryParser(html.parser.HTMLParser):
     def handle_data(self, data):
         if self._capture is not None:
             self._buf.append(data)
+        if self._cell_capture is not None:
+            self._cell_buf.append(data)
         if self._anchor is not None:
             self._anchor[1].append(data)
 
     def finalize(self):
         """解析结束时调用：把未正常闭合的捕获缓冲落袋（容忍畸形 HTML）。"""
+        if self._cell_capture is not None:
+            self.texts[self._cell_capture].append("".join(self._cell_buf))
+            self._cell_capture = None
+            self._cell_buf = []
         if self._capture is not None:
             self.texts[self._capture].append("".join(self._buf))
             self._capture = None
@@ -462,16 +529,31 @@ class _EntryParser(html.parser.HTMLParser):
             self._anchor = None
 
 
+def _first_text(texts: dict[str, list[str]], name: str) -> str | None:
+    """取某类名收集到的第一段非空文本（存在多段时只认第一段）。"""
+    for value in texts.get(name, []):
+        cleaned = clean_text(value)
+        if cleaned:
+            return cleaned
+    return None
+
+
 def parse_entry_chunk(
     chunk_html: str,
     fallback_image: str | None = None,
     *,
     allow_embedded_image: bool = True,
+    slot_index: dict | None = None,
 ) -> ParsedEntry:
     """解析单个条目块为 ParsedEntry；字段缺失时保留为 None，不猜测。
 
     allow_embedded_image=False 时忽略块内 <img>（回退切块的块尾可能带着
     下一条目的海报），只使用 fallback_image。
+
+    slot_index 为星期区播出位索引（build_slot_index 的产物）：条目自身的
+    broadcast_r 说明里没有 HH:MM（形如“10/3周六深夜”）时，按海报 URL 关联、
+    规范化标题兜底，回填具体播出时间；关联不上保持 None。同一关联还会把
+    星期区分区域平台（tr_area）合并进 platforms（条目自带平台优先）。
     """
     parser = _EntryParser()
     try:
@@ -481,16 +563,16 @@ def parse_entry_chunk(
         raise YucFetchError(f"条目 HTML 解析异常：{exc}") from exc
     parser.finalize()
 
-    title_cn = clean_text(parser.texts["title_cn_r"][0]) if parser.texts["title_cn_r"] else None
-    title_jp = clean_text(parser.texts["title_jp_r"][0]) if parser.texts["title_jp_r"] else None
+    title_cn = _first_text(parser.texts, "title_cn")
+    title_jp = _first_text(parser.texts, "title_jp")
 
     broadcast_parts = []
-    if parser.texts["broadcast_r"]:
-        part = clean_text(parser.texts["broadcast_r"][0])
+    if parser.texts["broadcast"]:
+        part = clean_text(parser.texts["broadcast"][0])
         if part:
             broadcast_parts.append(part)
-    if parser.texts["broadcast_ex_r"]:
-        part = clean_text(parser.texts["broadcast_ex_r"][0])
+    if parser.texts["broadcast_ex"]:
+        part = clean_text(parser.texts["broadcast_ex"][0])
         if part:
             broadcast_parts.append(part)
     broadcast_note = "；".join(broadcast_parts) or None
@@ -503,16 +585,191 @@ def parse_entry_chunk(
             platforms.append(platform)
             seen_urls.add(platform["url"])
 
+    # 本季站点不在条目里放播放平台链接，只在星期区 tr_area 给分区域平台
+    # （港台/环大陆）：按海报/标题关联后合并，条目自带平台优先。
     image = (parser.poster if allow_embedded_image else None) or fallback_image
+    slot = (
+        lookup_slot(slot_index, poster_url=image, title=title_cn or title_jp)
+        if slot_index
+        else None
+    )
+    for link in slot.platforms if slot else []:
+        if link["url"] not in seen_urls:
+            platforms.append(link)
+            seen_urls.add(link["url"])
+
+    # 作品类型散落在 type_a_r ~ type_e_r 之一，取第一段非空；题材标签在 type_tag_r。
+    work_type = next(
+        (
+            value
+            for letter in "abcde"
+            if (value := _first_text(parser.texts, f"type_{letter}"))
+        ),
+        None,
+    )
+    work_tags = _first_text(parser.texts, "type_tag")
+
+    broadcast_time = extract_broadcast_time(broadcast_note)
+    if broadcast_time is None and slot is not None:
+        broadcast_time = slot.time
     return ParsedEntry(
         title_cn=title_cn,
         title_jp=title_jp,
         weekday=extract_weekday(broadcast_note),
-        broadcast_time=extract_broadcast_time(broadcast_note),
+        broadcast_time=broadcast_time,
         broadcast_note=limit_text(broadcast_note),
         image_url=limit_text(image, 500),
         platforms=platforms,
+        work_type=work_type,
+        work_tags=work_tags,
     )
+
+
+# ---------- 星期区播出位（具体时间与平台来源） ----------
+
+# 页面下方按星期分组的播出位：<div class="div_date"> 内含 <p class="imgtext4">24:35~</p>
+# 与海报；紧随其后的 <td class="date_title_">/date_title__</td> 是作品名，
+# 再往下的 tr_area 行是分区域播放平台（港台/环大陆，本季条目里不放平台链接）。
+# 另有一种 div_date_（尾部多一个下划线）：纯平台卡片（Netflix 等），没有时间。
+SLOT_TIME_CLASSES = {"imgtext4", "imgtext5"}
+SLOT_TITLE_CLASSES = {"date_title_", "date_title__"}
+SLOT_DATE_CLASSES = {"div_date", "div_date_"}
+SLOT_AREA_CLASS = "area"
+WEEKDAY_TIME_RE = re.compile(r"^\s*(\d{1,2}:\d{2})")
+
+
+@dataclass
+class WeekdaySlot:
+    """星期区一个播出位：具体时间 + 海报 + 标题 + 区域平台，用于回填条目信息。"""
+
+    time: str | None  # HH:MM（可能 24:00+ 深夜时段），无时间为 None
+    poster_url: str | None
+    title: str | None
+    platforms: list[dict] = field(default_factory=list)  # 区域平台 [{name, url}]
+
+
+class _WeekdaySlotParser(html.parser.HTMLParser):
+    """扫描整个档期页，提取星期区播出位（div_date/div_date_ 块 + 标题 + 区域平台）。"""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.slots: list[WeekdaySlot] = []
+        self._slot: dict | None = None  # 进行中的播出位 {time, poster_url, title, platforms}
+        self._collecting: str | None = None  # None | "time" | "title" | "area"
+        self._buf: list[str] = []
+        self._pending_anchor: str | None = None  # 待确认的区域平台链接
+
+    def handle_starttag(self, tag, attrs):
+        attr_dict = dict(attrs)
+        classes = set((attr_dict.get("class") or "").split())
+        if self._collecting == "title":
+            return  # 标题单元格内只有文本（可能有 <br>）
+        if tag == "div" and (classes & SLOT_DATE_CLASSES):
+            # 新播出位开始：上一个（没等到标题的）直接丢弃
+            self._slot = {"time": None, "poster_url": None, "title": None, "platforms": []}
+            self._pending_anchor = None
+            return
+        if self._slot is None:
+            return
+        if tag == "p" and (classes & SLOT_TIME_CLASSES):
+            self._collecting = "time"
+            self._buf = []
+        elif tag == "p" and SLOT_AREA_CLASS in classes:
+            self._collecting = "area"
+            self._buf = []
+        elif tag == "img" and not self._slot["poster_url"]:
+            src = attr_dict.get("data-src") or attr_dict.get("src")
+            if src:
+                self._slot["poster_url"] = src.strip()
+        elif tag == "td" and (classes & SLOT_TITLE_CLASSES):
+            self._collecting = "title"
+            self._buf = []
+        elif tag == "a":
+            href = (attr_dict.get("href") or "").strip()
+            self._pending_anchor = href or None
+
+    def handle_endtag(self, tag):
+        if self._collecting == "time" and tag == "p":
+            match = WEEKDAY_TIME_RE.match("".join(self._buf))
+            if match:
+                self._slot["time"] = match.group(1)
+            self._collecting = None
+            self._buf = []
+        elif self._collecting == "area" and tag == "p":
+            self._emit_region_link("".join(self._buf))
+            self._collecting = None
+            self._buf = []
+        elif self._collecting == "title" and tag == "td":
+            self._slot["title"] = clean_text("".join(self._buf))
+            self.slots.append(WeekdaySlot(**self._slot))
+            self._collecting = None
+            self._buf = []
+        elif tag == "a":
+            self._pending_anchor = None
+
+    def _emit_region_link(self, area_text: str):
+        """区域平台链接：只有锚内带 <p class="area"> 才算，复用平台域名白名单过滤。"""
+        if not self._pending_anchor:
+            return
+        platform = platform_from_link(area_text, self._pending_anchor)
+        if platform:
+            self._slot["platforms"].append(platform)
+
+    def handle_data(self, data):
+        if self._collecting:
+            self._buf.append(data)
+
+
+def parse_weekday_slots(page_html: str) -> list[WeekdaySlot]:
+    """从档期页提取星期区全部播出位（按页面出现顺序）。"""
+    parser = _WeekdaySlotParser()
+    try:
+        parser.feed(page_html)
+        parser.close()
+    except Exception as exc:  # html.parser 宽容畸形输入，这里兜底防御
+        raise YucFetchError(f"档期页星期区解析异常：{exc}") from exc
+    return parser.slots
+
+
+def build_slot_index(slots: list[WeekdaySlot]) -> dict:
+    """把播出位按 海报URL / 规范化标题 建成索引，供条目回填时间与平台。
+
+    同一键多次出现时保留首个；但首个没有时间而后续有时，换成有时间的
+    （同作品多时段取首个带时间的播出位）。
+    """
+    index = {"by_poster": {}, "by_title": {}}
+    for slot in slots:
+        registrations = []
+        if slot.poster_url:
+            registrations.append(("by_poster", slot.poster_url))
+        title_key = normalize_title_key(slot.title)
+        if title_key:
+            registrations.append(("by_title", title_key))
+        for bucket, key in registrations:
+            current = index[bucket].get(key)
+            if current is None or (current.time is None and slot.time is not None):
+                index[bucket][key] = slot
+    return index
+
+
+def lookup_slot(
+    slot_index: dict, *, poster_url: str | None, title: str | None
+) -> WeekdaySlot | None:
+    """按海报 URL 关联、规范化标题兜底，找条目对应的播出位。"""
+    if not slot_index:
+        return None
+    if poster_url and poster_url in slot_index["by_poster"]:
+        return slot_index["by_poster"][poster_url]
+    key = normalize_title_key(title)
+    if key and key in slot_index["by_title"]:
+        return slot_index["by_title"][key]
+    return None
+
+
+def slot_time_for(slot_index: dict, *, poster_url: str | None, title: str | None) -> str | None:
+    """取条目对应的具体播出时间（HH:MM）；无时间播出位或关联不上返回 None。"""
+    slot = lookup_slot(slot_index, poster_url=poster_url, title=title)
+    return slot.time if slot else None
 
 
 # ---------- 网络请求 ----------
@@ -586,6 +843,31 @@ def _make_fetcher(*, opener, timeout, retries, user_agent, sleep=time.sleep):
     return fetch
 
 
+def _has_cjk(text: str | None) -> bool:
+    """主标题是否含中日韩汉字（跨语言合并时优先保留中文条目）。"""
+    if not text:
+        return False
+    return any("\u4e00" <= ch <= "\u9fff" for ch in text)
+
+
+def _choose_best_entry(entries: list["ParsedEntry"]) -> "ParsedEntry":
+    """同一作品（共享主标题或日文原名）的多条候选里优先保留信息更完整的。
+
+    - 优先带中文译名（title_cn 非空）的；
+    - 其次主标题含汉字（本身就是中文条目）的；
+    - 都没有则保留首条（与旧“保留首条”行为一致）。
+    """
+    if len(entries) == 1:
+        return entries[0]
+    with_cn = [e for e in entries if e.title_cn]
+    if with_cn:
+        return with_cn[0]
+    with_cjk = [e for e in entries if _has_cjk(e.title_main)]
+    if with_cjk:
+        return with_cjk[0]
+    return entries[0]
+
+
 # ---------- 同步主流程 ----------
 
 
@@ -603,11 +885,15 @@ def run_sync(
     base_url: str = YUC_BASE_URL,
     fetch=None,
     sleep=time.sleep,
+    season_url: str | None = None,
+    season_title: str = "",
 ) -> SyncSummary:
     """同步一个档期：Atom 发现 -> 抓取档期页 -> 解析 -> 去重 -> 写库 -> 汇总。
 
     - fetch：可选的 fetch(url) -> str 注入点，测试用它替代真实网络；
       不传时按 proxy/timeout 等参数构造真实请求器（请求间加 delay 限频）。
+    - season_url：直接给出档期页地址时跳过 Atom（回填历史档期用，Atom 只留最近
+      十几个档期，2020~2022 的老档期页仍然在线但不在 Atom 里）。
     - dry-run 不写新番数据；两种模式都保存同步运行记录。
     - 单条写入失败不中断整体；同步不删除本地已有记录。
     """
@@ -619,11 +905,18 @@ def run_sync(
             user_agent=user_agent, sleep=sleep,
         )
 
-    atom_text = fetch(f"{base_url.rstrip('/')}/atom.xml")
-    seasons = parse_atom(atom_text)
-    if not seasons:
-        raise YucFetchError(f"Atom 中未发现任何档期页面（{base_url}/atom.xml）")
-    season = pick_season(seasons, season_code)  # 不存在时抛 SeasonNotFoundError
+    if season_url:
+        season = SeasonInfo(
+            code=season_code or "",
+            title=season_title or f"{season_code} 新番表",
+            url=season_url,
+        )
+    else:
+        atom_text = fetch(f"{base_url.rstrip('/')}/atom.xml")
+        seasons = parse_atom(atom_text)
+        if not seasons:
+            raise YucFetchError(f"Atom 中未发现任何档期页面（{base_url}/atom.xml）")
+        season = pick_season(seasons, season_code)  # 不存在时抛 SeasonNotFoundError
 
     summary = SyncSummary(
         mode=mode, season_code=season.code, season_title=season.title, season_url=season.url
@@ -648,8 +941,18 @@ def run_sync(
             return summary
         summary.pages_fetched = 1
 
+        # 具体播出时间（HH:MM）不在条目里，而在页面下方星期区播出位；
+        # 先建索引，解析条目时按海报/标题回填。
+        slots = parse_weekday_slots(page_html)
+        slot_index = build_slot_index(slots)
+        summary.weekday_slots = len(slots)
+
         issues: list[str] = []
-        seen_keys: set[str] = set()
+
+        # 阶段 1：解析整页所有条目块。解析失败 / 缺主标题 / 主标题无法规范化
+        # 的当场记 skipped，不进入后续合并与入库。
+        parsed: list[ParsedEntry] = []
+        parsed_keys: list[set[str]] = []
         for chunk in split_entries(page_html):
             summary.parsed += 1
             try:
@@ -657,6 +960,7 @@ def run_sync(
                     chunk.html,
                     fallback_image=chunk.fallback_image,
                     allow_embedded_image=chunk.trust_embedded_image,
+                    slot_index=slot_index,
                 )
             except YucFetchError as exc:
                 summary.parsed -= 1
@@ -674,25 +978,90 @@ def run_sync(
                 summary.outcomes.append(EntryOutcome(title="", status="skipped", reason=reason))
                 continue
 
-            key = normalize_title_key(title)
-            if not key:
+            main_key = normalize_title_key(title)
+            if not main_key:
                 summary.skipped += 1
                 reason = f"主标题无法规范化：{title!r}"
                 issues.append(reason)
                 summary.outcomes.append(EntryOutcome(title=title, status="skipped", reason=reason))
                 continue
-            if key in seen_keys:
-                summary.duplicates += 1
+            jp_key = normalize_title_key(entry.title_jp)
+            parsed.append(entry)
+            parsed_keys.append({main_key, jp_key} - {None})
+
+        # 阶段 2：跨语言 / 跨写法合并。同一作品可能被页面列成多条：
+        #  - 同主标题重复（渲染 bug，main 相同）；
+        #  - 中日文两条（main 一中一日、title_jp 相同）。
+        # 按 main_key / jp_key 任一共键用并查集归组，组内优先保留带中文译名
+        # 的条目，确保最终每部作品只入库一条且尽量保留中文信息。
+        parent = list(range(len(parsed)))
+
+        def find(x: int) -> int:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def union(a: int, b: int) -> None:
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[ra] = rb
+
+        key_index: dict[str, list[int]] = {}
+        for i, ks in enumerate(parsed_keys):
+            for k in ks:
+                key_index.setdefault(k, []).append(i)
+        for idxs in key_index.values():
+            for j in idxs[1:]:
+                union(idxs[0], j)
+
+        groups: dict[int, list[int]] = {}
+        for i in range(len(parsed)):
+            groups.setdefault(find(i), []).append(i)
+
+        seen_keys: set[str] = set()
+        for grp in groups.values():
+            members = [parsed[i] for i in grp]
+            best = _choose_best_entry(members)
+            best_key = normalize_title_key(best.title_main)
+            if not best_key:
+                summary.skipped += 1
                 summary.outcomes.append(
-                    EntryOutcome(title=title, status="duplicate", reason="同档期内重复作品，仅保留首条")
+                    EntryOutcome(title=best.title_main or "", status="skipped", reason="主标题无法规范化")
                 )
                 continue
-            seen_keys.add(key)
+            if best_key in seen_keys:
+                # 不同日文名却撞了主标题键（极少见）：整组判重复，全部丢弃。
+                for member in members:
+                    summary.duplicates += 1
+                    summary.outcomes.append(
+                        EntryOutcome(
+                            title=member.title_main or "",
+                            status="duplicate",
+                            reason="同档期内重复作品，仅保留首条",
+                        )
+                    )
+                continue
+            seen_keys.add(best_key)
             summary.valid += 1
+            if len(grp) > 1:
+                summary.duplicates += len(grp) - 1
+                for member in members:
+                    if normalize_title_key(member.title_main) == best_key:
+                        continue
+                    summary.outcomes.append(
+                        EntryOutcome(
+                            title=member.title_main or "",
+                            status="duplicate",
+                            reason="中日文/重复作品，已合并保留中文译名条目",
+                        )
+                    )
 
+            entry = best
+            title = entry.title_main
             data = {
                 "season_code": season.code,
-                "source_key": limit_text(key),
+                "source_key": limit_text(best_key),
                 "title_main": limit_text(title),
                 "title_cn": limit_text(entry.title_cn),
                 "title_jp": limit_text(entry.title_jp),
@@ -701,6 +1070,8 @@ def run_sync(
                 "broadcast_note": limit_text(entry.broadcast_note),
                 "image_url": entry.image_url,
                 "platforms": entry.platforms,
+                "work_type": limit_text(entry.work_type, 50),
+                "work_tags": limit_text(entry.work_tags, 200),
                 "source_url": season.url,
             }
 
@@ -751,6 +1122,84 @@ def run_sync(
         return summary
     finally:
         db.close()
+
+
+# ---------- 历史档期回填 ----------
+
+# yuc.wiki 只在 1/4/7/10 月出表，其余月份没有档期页。
+QUARTER_MONTHS = ("01", "04", "07", "10")
+
+
+def quarter_seasons(
+    start_code: str, *, end_code: str | None = None, now: datetime | None = None
+) -> list[str]:
+    """从 start_code 到 end_code（默认最新季度）的季度档期码，按新到旧排序。
+
+    Atom 只保留最近十几个档期（2023 起），2020~2022 的老档期页仍在线但不在
+    Atom 里，回填必须按「年-季度」直接拼 URL 去抓。
+    """
+    match = re.fullmatch(r"(20\d{2})(0[1-9]|1[0-2])", start_code or "")
+    if not match:
+        raise ValueError(f"回填起点需为 YYYYMM（收到 {start_code!r}）")
+    clock = now or datetime.now()
+    end_year, end_month = (
+        (int(end_code[:4]), int(end_code[4:])) if end_code else (clock.year, clock.month)
+    )
+
+    codes: list[str] = []
+    year, month = int(match.group(1)), int(match.group(2))
+    while (year, month) <= (end_year, end_month):
+        code = f"{year:04d}{month:02d}"
+        if f"{month:02d}" in QUARTER_MONTHS:
+            codes.append(code)
+        month += 1
+        if month > 12:
+            year, month = year + 1, 1
+    return sorted(codes, reverse=True)
+
+
+def run_sync_backfill(
+    codes: list[str],
+    *,
+    session_factory,
+    apply: bool = False,
+    base_url: str = YUC_BASE_URL,
+    fetch=None,
+    delay: float = DEFAULT_DELAY,
+    sleep=time.sleep,
+    **kwargs,
+) -> list[SyncSummary]:
+    """按给定档期码逐个直接抓档期页（不经 Atom）；单个失败不影响其余。"""
+    summaries: list[SyncSummary] = []
+    for index, code in enumerate(codes):
+        url = f"{base_url.rstrip('/')}/{code}/"
+        try:
+            summaries.append(
+                run_sync(
+                    code,
+                    session_factory=session_factory,
+                    apply=apply,
+                    base_url=base_url,
+                    fetch=fetch,
+                    delay=delay,
+                    sleep=sleep,
+                    season_url=url,
+                    **kwargs,
+                )
+            )
+        except (YucFetchError, SeasonNotFoundError) as exc:
+            failed = SyncSummary(
+                mode="apply" if apply else "dry-run",
+                season_code=code,
+                season_title="",
+                season_url=url,
+            )
+            failed.failed = 1
+            failed.outcomes.append(EntryOutcome(title="", status="failed", reason=str(exc)))
+            summaries.append(failed)
+        if delay > 0 and index + 1 < len(codes):
+            sleep(delay)
+    return summaries
 
 
 def run_sync_seasons(
@@ -831,6 +1280,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="同步 Atom 中最近的 N 个档期（与 --season 互斥，用于回填历史档期）",
     )
     parser.add_argument(
+        "--backfill-since",
+        default=None,
+        metavar="YYYYMM",
+        help=(
+            "从该季度起回填到最新一期（如 202001）：直接抓档期页、不依赖 Atom，"
+            "只认同 1/4/7/10 月的季度档期；与 --season/--seasons 互斥"
+        ),
+    )
+    parser.add_argument(
         "--insecure",
         action="store_true",
         default=None,
@@ -897,9 +1355,13 @@ def resolve_insecure(explicit: bool | None, env=None) -> bool:
 def build_session_factory(database_url: str, busy_timeout: float = 30.0):
     """按数据库 URL 建会话工厂（SQLite 放宽写锁等待，容忍与线上服务并发写）。
 
+    老库可能还没有 work_type / work_tags 列（无 Alembic，靠 crud 里的
+    ensure_* 幂等补列），先补列再同步，避免写入即报“no such column”。
+
     返回 (session_factory, engine)：调用方负责 engine.dispose()。
     """
     engine = build_engine(database_url, busy_timeout=busy_timeout)
+    crud.ensure_schedule_work_info_columns(engine)
     return sessionmaker(bind=engine, autoflush=False, expire_on_commit=False), engine
 
 
@@ -921,6 +1383,9 @@ def main(argv=None) -> int:
     if args.season and args.seasons:
         print("错误：--season 与 --seasons 不能同时使用")
         return 2
+    if args.backfill_since and (args.season or args.seasons):
+        print("错误：--backfill-since 不能与 --season / --seasons 同时使用")
+        return 2
 
     fetch = _make_fetcher(
         opener=build_opener(proxy, args.insecure), timeout=args.timeout, retries=args.retries,
@@ -930,16 +1395,33 @@ def main(argv=None) -> int:
     print(f"代理：{proxy if proxy else '未启用（直连）'}")
     if args.insecure:
         print("证书校验：已跳过（--insecure）")
-    try:
-        seasons = parse_atom(fetch(ATOM_URL))
-    except YucFetchError as exc:
-        print(f"错误：{exc}")
-        return 1
+
+    # 回填走直接档期页地址，不需要先读 Atom（Atom 只有最近十几个档期）。
+    backfill_codes: list[str] = []
+    if args.backfill_since:
+        try:
+            backfill_codes = quarter_seasons(args.backfill_since)
+        except ValueError as exc:
+            print(f"错误：{exc}")
+            return 2
+        if not backfill_codes:
+            print(f"错误：{args.backfill_since} 之后没有可回填的季度档期")
+            return 2
+        print(
+            f"回填 {len(backfill_codes)} 个档期：{backfill_codes[-1]} ~ {backfill_codes[0]}"
+        )
+        seasons: list[SeasonInfo] = []
+    else:
+        try:
+            seasons = parse_atom(fetch(ATOM_URL))
+        except YucFetchError as exc:
+            print(f"错误：{exc}")
+            return 1
 
     if args.list_seasons:
         print_seasons(seasons)
         return 0
-    if not seasons:
+    if not backfill_codes and not seasons:
         print("错误：Atom 中未发现任何档期页面，无法同步")
         return 1
 
@@ -948,7 +1430,20 @@ def main(argv=None) -> int:
     session_factory, engine = build_session_factory(database_url, busy_timeout=60.0)
     summaries: list[SyncSummary] = []
     try:
-        if args.seasons:
+        if backfill_codes:
+            summaries = run_sync_backfill(
+                backfill_codes,
+                session_factory=session_factory,
+                apply=args.apply,
+                proxy=proxy,
+                insecure=args.insecure,
+                timeout=args.timeout,
+                retries=args.retries,
+                delay=args.delay,
+                user_agent=args.user_agent,
+                fetch=fetch,
+            )
+        elif args.seasons:
             codes = [season.code for season in seasons[: args.seasons]]
             print(f"批量同步最近 {len(codes)} 个档期：{'、'.join(codes)}")
             summaries = run_sync_seasons(

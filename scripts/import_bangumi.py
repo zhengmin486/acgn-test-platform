@@ -68,14 +68,16 @@ from sqlalchemy.orm import sessionmaker  # noqa: E402
 
 from app import crud  # noqa: E402
 from app import entity_links  # noqa: E402
+from app.bangumi_meta import _clean_name, infobox_map  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.database import build_engine  # noqa: E402
 from app.models import Content  # noqa: E402
 from app.tagging import (  # noqa: E402
-    TAG_GENRE,
     TAG_STUDIO,
     TAG_YEAR,
+    canonical_genre,
     classify_tag,
+    is_genre_candidate,
     year_from_date,
 )
 
@@ -125,9 +127,8 @@ LIGHT_NOVEL_TAG = "轻小说"
 
 BOOK_KIND_LIGHT_NOVEL = "light_novel"  # 文库出身的轻小说
 BOOK_KIND_LITERATURE = "literature"  # 日本普通小说（非文库轻小说）
-# infobox 里出现这些键就说明有文库归属 -> 轻小说。
-BUNKO_INFOBOX_KEYS: tuple[str, ...] = ("文库", "文庫", "レーベル")
-# 已知轻小说文库（中日两种写法都收，覆盖主要几家）。
+# 已知轻小说文库（中日两种写法都收，覆盖主要几家）。判定只看「文库字段的值
+# 命中这份名单」——单有「文库」字段不够（新潮文庫 / 岩波文庫 是普通文学）。
 KNOWN_LIGHT_NOVEL_BUNKO: tuple[str, ...] = (
     "電撃文庫", "电击文库",
     "富士見ファンタジア文庫", "富士见幻想文库",
@@ -208,8 +209,10 @@ def classify_book(payload: dict) -> tuple[str | None, str | None]:
     values = "\n".join(_iter_infobox_strings(payload, include_keys=False))
     if LIGHT_NOVEL_TAG in _tag_names(payload):
         return "novel", BOOK_KIND_LIGHT_NOVEL
-    if any(key in joined for key in BUNKO_INFOBOX_KEYS):
-        return "novel", BOOK_KIND_LIGHT_NOVEL
+    # 只认「值命中已知轻小说文库」，不再用「infobox 里有文库字段」这种弱信号：
+    # 新潮文庫 / 岩波文庫 同样有文库字段，照旧判会把东野圭吾、京极夏彦、
+    # 伊坂幸太郎这些普通推理文艺一并当成轻小说（线上曾因此混进十几部）。
+    # 已知文库名单见 KNOWN_LIGHT_NOVEL_BUNKO（電撃文庫 / MF文庫J / GA文庫 …）。
     if any(bunko in joined for bunko in KNOWN_LIGHT_NOVEL_BUNKO):
         return "novel", BOOK_KIND_LIGHT_NOVEL
     # 「XX出版社」是中文出版社的固定写法（人民文学出版社 / 重庆出版社 …）；
@@ -309,12 +312,13 @@ RANDOM_PAGE_SHARE = 15  # 每页计划贡献的抽样数：count 超过它就多
 
 # Bangumi images 字段里的尺寸键，按偏好顺序取。
 #
-# **medium（r/800）优先而非 large**：实测同一封面 medium 比 large 原图小
-# 12–30%（例：428x606 的 68KB vs 60KB；849x1200 的 217KB vs 170KB），
-# 而本站封面最终都要经 /media/full 压到 ≤1200px/≤400KB 的 WebP，
-# 用 medium 几乎无损却省下三成带宽。1000 部作品按 30% 算就是省 20 MB 上行。
-# large 留作 medium 缺失时的兜底。
-COVER_SIZE_PREFERENCE = ("medium", "common", "large")
+# **large（原图）优先**（2026-10-19 实测修正）：服务器侧用的是镜像
+# bgmimg.anibt.net，它只放行原图路径，所有 ``/r/<像素>/`` 缩略路径一律
+# 403（medium=r/800、common=r/400 在镜像上同样受限，实测只有原图 200）。
+# 旧顺序 medium 优先时，抓图端每条都拿到 403，线上 4449 部作品因此长期没封面。
+# 原图 200 KB 上下，站内再由 /media/full 压成 ≤1200px/≤400KB 的 WebP，
+# 多花这点带宽换「每张图都真的下得来」。
+COVER_SIZE_PREFERENCE = ("large", "common", "medium")
 
 # 封面文件大小上限：Bangumi 封面一般几十~几百 KB，5 MB 足够兜底异常响应。
 COVER_MAX_BYTES = 5 * 1024 * 1024
@@ -488,6 +492,9 @@ class MappedSubject:
     year: int | None = None
     image_url: str | None = None
     book_kind: str | None = None
+    # 搜索增强：日文原名（name 与 title 不同时）+ infobox 别名。
+    title_original: str | None = None
+    aliases: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -1079,27 +1086,39 @@ def _tag_candidates(payload: dict) -> list[tuple[int, str]]:
     return candidates
 
 
-def extract_tags(payload: dict, limit: int = MAX_TAGS_PER_SUBJECT) -> list[str]:
+def extract_tags(
+    payload: dict, limit: int = MAX_TAGS_PER_SUBJECT, exclude: set[str] | None = None
+) -> list[str]:
     """从 Bangumi 条目 JSON 提取**题材**标签（经 app.tagging 归一）。
 
     规则：
-    - 按标注数（count）从多到少过 ``classify_tag``，只留题材（``TAG_GENRE``）：
+    - 按标注数（count）从多到少过 ``is_genre_candidate``，只留「题材候选」：
       年份、公司、声优、媒介、平台（TV / PC / 剧场版 / 2011年10月…）在入库前
       就被丢掉，不占题材名额——批量导入链路与站内清洗同一套口径，
       否则标签云会被媒介标签霸榜（线上曾点 `TV` 出 2974 条）；
+    - 放宽原 ``classify_tag`` 严格白名单：未进白名单但明显是主题的词也保留
+      （解决「很多作品标签不够」），但作品信息（公司 / 年份 / 季度）与已知
+      噪音（媒介 / 平台 / 地区 / 元标签）仍坚决排除；
+    - ``exclude``：显式排除一组词（如本作真实的声优 / 主创名），避免作者 / 声优
+      误入标签云；Bangumi 的 ``tags`` 字段本不含人物名，导入路径可不传；
     - 同义词归一到规范名（SF -> 科幻、癒し -> 治愈），标签云不因写法分裂；
-    - 同名去重（保序）、超长名丢弃（不截断，截断会产生语义错误的标签）；
-    - tags 缺失 / 不是列表 / 没有题材标签时返回空列表——标签是可选增强，
+      未命中规范名的真实主题词保留原名；
+    - 按规范名去重（保序）、超长名丢弃（不截断，截断会产生语义错误的标签）；
+    - tags 缺失 / 不是列表 / 没有题材候选时返回空列表——标签是可选增强，
       不因此跳过整个条目。
     """
     names: list[str] = []
+    seen: set[str] = set()
     for _count, name in _tag_candidates(payload):
         if len(names) >= limit:
             break
-        kind, value = classify_tag(name)
-        if kind != TAG_GENRE or value in names:
+        if not is_genre_candidate(name, exclude=exclude):
             continue
-        names.append(value)
+        canonical = canonical_genre(name) or name
+        if canonical in seen:
+            continue
+        seen.add(canonical)
+        names.append(canonical)
     return names
 
 
@@ -1181,13 +1200,61 @@ def extract_book_tags(payload: dict, limit: int = MAX_BOOK_TAGS_PER_SUBJECT) -> 
 
 
 def _infobox_values(value) -> list[str]:
-    """infobox 值 -> 字符串列表（字符串原样，列表逐项转字符串）。"""
+    """infobox 值 -> 字符串列表（字符串原样，列表逐项转字符串）。
+
+    API 结构里「别名」的值是 ``[{"v": "EVA"}, ...]``（每项一个别名），
+    要取 dict 的 ``v`` 键，不能 str(dict) 整个序列化进去。
+    """
     if isinstance(value, str):
         text = value.strip()
         return [text] if text else []
     if isinstance(value, list):
-        return [str(v).strip() for v in value if str(v).strip()]
+        out: list[str] = []
+        for item in value:
+            if isinstance(item, dict) and "v" in item:
+                text = str(item["v"]).strip()
+            else:
+                text = str(item).strip()
+            if text:
+                out.append(text)
+        return out
     return []
+
+
+MAX_ALIASES_PER_SUBJECT = 20  # 别名只服务搜索召回，20 个足够覆盖正常条目
+
+
+def extract_alias_names(payload: dict, title: str, title_original: str | None) -> list[str]:
+    """从 infobox「别名」键提取搜索用别名，过滤垃圾值。
+
+    过滤规则（确定性，供增量入库与本机/服务器回填脚本共用，防口径漂移）：
+    - 丢弃 ≤1 字符与纯数字（infobox 实测混着「第四个」这类 wiki 噪音，
+      太短的别名在 LIKE 检索里只会制造误命中）；
+    - 丢弃与 title / title_original 重复的值；
+    - 顺序去重，超过 MAX_ALIASES_PER_SUBJECT 截断。
+    解析失败/无「别名」键返回空列表，绝不抛异常——别名是增强不是关键路径。
+    """
+    infobox = payload.get("infobox")
+    if not isinstance(infobox, list):
+        return []
+    raw: list[str] = []
+    for item in infobox:
+        if isinstance(item, dict) and item.get("key") == "别名":
+            raw.extend(_infobox_values(item.get("value")))
+    out: list[str] = []
+    seen: set[str] = set()
+    reserved = {title.strip(), (title_original or "").strip()}
+    for name in raw:
+        name = name.strip()
+        if len(name) <= 1 or name.isdigit():
+            continue
+        if name in reserved or name in seen:
+            continue
+        seen.add(name)
+        out.append(name)
+        if len(out) >= MAX_ALIASES_PER_SUBJECT:
+            break
+    return out
 
 
 def map_subject(payload: dict) -> MappedSubject:
@@ -1222,6 +1289,9 @@ def map_subject(payload: dict) -> MappedSubject:
         raise SubjectMappingError("缺少可用标题（name_cn 与 name 均为空）")
     if len(title) > TITLE_MAX_LENGTH:
         raise SubjectMappingError(f"标题超过 {TITLE_MAX_LENGTH} 字符，无法安全存入 title 字段")
+    # 日文原名：title 走了 name_cn（即两者不同）时才单独存，避免冗余重复。
+    name = (payload.get("name") or "").strip()
+    title_original = name if name and name != title else None
 
     summary = (payload.get("summary") or "").strip()
     if not summary:
@@ -1240,21 +1310,26 @@ def map_subject(payload: dict) -> MappedSubject:
         summary=summary,
         rating=float(score),
         source_url=SOURCE_URL_TEMPLATE.format(subject_id=bangumi_id),
-        tags=_subject_tags(payload, content_type),
+        tags=_subject_tags(payload, content_type, exclude=_build_tag_exclude(payload)),
         studios=extract_studios(payload),
         year=extract_year(payload),
         image_url=extract_cover_url(payload),
         book_kind=book_kind,
+        title_original=title_original,
+        aliases=extract_alias_names(payload, title, title_original),
     )
 
 
-def _subject_tags(payload: dict, content_type: str) -> list[str]:
+def _subject_tags(
+    payload: dict, content_type: str, exclude: set[str] | None = None
+) -> list[str]:
     """题材标签：动画/漫画/游戏走 Bangumi 标签归一；书籍另补 infobox 文库标签。
 
     书籍的 Bangumi 标签常被「轻小说」「小说」这类载体词占满名额（归一后属
     噪音），所以文库 / 丛书标签对小说区是关键补充，放在归一标签之后。
+    ``exclude`` 透传给 ``extract_tags``（声优 / 主创名兜底排除）。
     """
-    tags = extract_tags(payload)
+    tags = extract_tags(payload, exclude=exclude)
     if content_type != "novel":
         return tags
     for name in extract_book_tags(payload):
@@ -1263,6 +1338,35 @@ def _subject_tags(payload: dict, content_type: str) -> list[str]:
         if len(tags) >= MAX_TAGS_PER_SUBJECT:
             break
     return tags[:MAX_TAGS_PER_SUBJECT]
+
+
+def _build_tag_exclude(payload: dict) -> set[str]:
+    """构造本作应排除的「作品信息」词：infobox 主创/公司名 + 自身标题/别名。
+
+    Bangumi 的 tags 字段里常混有导演 / 作曲 / 制作公司 / 作品自身译名，这些属
+    作品信息而非题材，应排掉（与「作者声优公司不进标签」一致）。persons/characters
+    接口在镜像上不一定返回，这里以 /v0/subjects 内自带的 infobox 为准。
+    """
+    excluded: set[str] = set()
+    subject = payload if "infobox" in payload else payload.get("subject") or payload
+    info = infobox_map(subject)
+    for role in (
+        "导演", "系列构成", "音乐", "人物设定", "原作", "脚本",
+        "美术监督", "音响监督", "总作画监督", "作画监督", "动画制作",
+        "企画", "制作",
+    ):
+        for raw in info.get(role, []):
+            name = _clean_name(str(raw))
+            if name:
+                excluded.add(name)
+    for raw in (subject.get("name"), subject.get("name_cn")):
+        if raw:
+            excluded.add(str(raw).strip())
+    for raw in info.get("别名", []):
+        name = _clean_name(str(raw))
+        if name:
+            excluded.add(name)
+    return excluded
 
 
 # ---------- 入库流程 ----------
@@ -1349,6 +1453,8 @@ def _map_and_store(db, payload: dict, *, apply: bool, cover_downloader=False) ->
             source_url=subject.source_url,
             year=subject.year,
             book_kind=subject.book_kind,
+            title_original=subject.title_original,
+            aliases=subject.aliases,
         )
         db.add(content)
         db.commit()

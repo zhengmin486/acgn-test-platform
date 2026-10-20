@@ -28,10 +28,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.import_bangumi import TYPE_MAPPING  # noqa: E402  # {1:novel,2:anime,4:game,6:comic}
+from scripts.import_bangumi import resolve_content_type  # noqa: E402
 
 SUBJECT_MEMBER_RE = "subject"
-ALLOWED_TYPES = set(TYPE_MAPPING)  # {1, 2, 4, 6}
 
 
 def parse_wiki_infobox(raw: str) -> list[dict[str, str]]:
@@ -79,13 +78,16 @@ def parse_wiki_infobox(raw: str) -> list[dict[str, str]]:
 def build_payload(entry: dict) -> dict | None:
     """把归档条目转成与 Bangumi API /v0/subjects/{id} 等价的 payload；不可用返回 None。
 
+    归档字段形态（实测 2026-10-13 dump）：``score`` 直接是 float、``rank`` 是
+    独立整数（0 表示无排名）、``score_details`` 是 {分数段: 人数}——与 API 的
+    ``rating {score, rank, total}`` 嵌套结构不同，这里负责重新组装。
+
     - rating 构造：score 必须有效；rank 归档里 0 表示无排名，不回填为有效值；
     - tags：归档格式为 [{name, count}]（部分），直接透传；
     - images：归档**不含**封面地址，留空——封面由封面脚本/按需下载单独补；
     - infobox：wiki 字符串 -> API 结构，解析失败给空列表（识别自动跳过）。
     """
-    rating = entry.get("score") or {}
-    score = rating.get("score") if isinstance(rating, dict) else None
+    score = entry.get("score")
     if not isinstance(score, (int, float)) or isinstance(score, bool) or score <= 0:
         return None
 
@@ -97,9 +99,9 @@ def build_payload(entry: dict) -> dict | None:
     if not summary:
         return None
 
-    rank = rating.get("rank")
+    rank = entry.get("rank")
     rank_value = rank if isinstance(rank, int) and not isinstance(rank, bool) and rank > 0 else 0
-    details = rating.get("score_details") or {}
+    details = entry.get("score_details") or {}
     total = sum(int(v) for v in details.values()) if isinstance(details, dict) else 0
 
     tags = entry.get("tags")
@@ -118,7 +120,7 @@ def build_payload(entry: dict) -> dict | None:
         "name": name,
         "name_cn": name_cn,
         "summary": summary,
-        "rating": {"score": score, "rank": rank_value, "total": total},
+        "rating": {"score": float(score), "rank": rank_value, "total": total},
         "tags": tags,
         "infobox": infobox,
         "date": entry.get("date") or "",
@@ -127,12 +129,15 @@ def build_payload(entry: dict) -> dict | None:
     }
 
 
-def iter_subjects(dump_path: Path, member: str = "subject.json"):
-    """流式读取归档里的 subject 条目，返回迭代器。"""
+def iter_subjects(dump_path: Path, member: str = "subject.jsonlines"):
+    """流式读取归档里的 subject 条目，返回迭代器。
+
+    官方归档成员名是 ``subject.jsonlines``（941MB 解压后），JSON Lines 格式。
+    """
     with zipfile.ZipFile(dump_path) as archive:
-        names = [n for n in archive.namelist() if n.endswith("subject.json")]
+        names = [n for n in archive.namelist() if n.endswith(member)]
         if not names:
-            raise RuntimeError(f"{dump_path} 里找不到 subject.json：{archive.namelist()[:10]}")
+            raise RuntimeError(f"{dump_path} 里找不到 {member}：{archive.namelist()[:10]}")
         with archive.open(names[0]) as handle:
             for line in handle:
                 line = line.strip()
@@ -151,11 +156,13 @@ def select_from_archive(
     per_type: dict[str, int],
     *,
     max_rank: int = 3000,
+    year_from: str = "",
 ) -> tuple[list[dict], Counter, int]:
     """按 rank 从归档选品，返回 (payload 清单, 类型统计, 扫描总行数)。
 
     - 只取本站四类型、非 nsfw、rank > 0（无排名的不算热门）；
     - rank 越小越热门；``max_rank`` 兜底防止把排名几万的也捞进来；
+    - ``year_from``（如 "2000"）按发行年份过滤——空日期条目一并排除；
     - 每类取 rank 最小的 ``per_type[类型]`` 条。
     """
     by_type_ranks: dict[str, list[tuple[int, int]]] = {t: [] for t in per_type}
@@ -166,19 +173,26 @@ def select_from_archive(
         scanned += 1
         if entry.get("nsfw"):
             continue
-        bgm_type = entry.get("type")
-        if bgm_type not in ALLOWED_TYPES:
+        # resolve_content_type：type=2→anime、4→game；type=1 书籍按 platform
+        # 拆 comic(1001)/novel(1002)；type=6 是三次元真人剧（Archive README
+        # 写「6=漫画」是错的），type=3 音乐——都返回 None 被排除。
+        content_type = resolve_content_type(entry)
+        if content_type is None:
             continue
-        content_type = TYPE_MAPPING[bgm_type]
         want = per_type.get(content_type, 0)
         if want <= 0:
             continue
         type_counter[content_type] += 1
 
-        rating = entry.get("score") or {}
-        rank = rating.get("rank")
+        # 归档的 rank 是顶层整数（0 = 无排名），不是嵌套在 score 里
+        rank = entry.get("rank")
         if not isinstance(rank, int) or isinstance(rank, bool) or rank <= 0 or rank > max_rank:
             continue
+
+        if year_from:
+            date = str(entry.get("date") or "")
+            if date[:4] < year_from:
+                continue
 
         heap = by_type_ranks[content_type]
         heap.append((rank, entry["id"]))
@@ -219,8 +233,19 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="从官方归档按 rank 选品")
     parser.add_argument("--dump", default=str(PROJECT_ROOT / ".workbuddy/archive/dump.zip"))
     parser.add_argument("--total", type=int, default=100)
+    parser.add_argument(
+        "--type",
+        choices=["anime", "game", "novel", "comic"],
+        default=None,
+        help="只选某一类型（--total 全部给该类型）；缺省按自然比例分配",
+    )
     parser.add_argument("--out", default=str(PROJECT_ROOT / ".workbuddy/pilot/selection.json"))
     parser.add_argument("--max-rank", type=int, default=3000)
+    parser.add_argument(
+        "--year-from",
+        default="",
+        help="只收录发行年份 >= 该值的条目（如 2000）；空日期一并排除",
+    )
     args = parser.parse_args(argv)
 
     dump = Path(args.dump)
@@ -229,8 +254,16 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     per_type = natural_quota(args.total)
+    if args.type:
+        per_type = {k: 0 for k in per_type}
+        per_type[args.type] = args.total
     print(f"配额：{per_type}")
-    payloads, type_counter, scanned = select_from_archive(dump, per_type, max_rank=args.max_rank)
+    payloads, type_counter, scanned = select_from_archive(
+        dump,
+        per_type,
+        max_rank=args.max_rank,
+        year_from=str(args.year_from) if args.year_from else "",
+    )
     print(f"扫描 {scanned} 行；候选分布：{dict(type_counter)}；选中 {len(payloads)} 条")
 
     out = Path(args.out)

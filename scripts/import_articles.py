@@ -57,10 +57,11 @@ from sqlalchemy import select
 # Allow execution as `python scripts\import_articles.py` from project root.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from app import article_tags
+from app import article_body, article_media, article_tags
 from app.config import settings
 from app.database import SessionLocal
 from app.models import Article
+from scripts import news_classify, news_filters
 
 # ---------- 站点常量 ----------
 
@@ -78,6 +79,7 @@ RETRY_BACKOFF = 0.8  # 重试间隔基数（秒），第 n 次重试等待 n * �
 DEFAULT_LIMIT = 12  # 未指定条数时的默认抓取量（约等于一个列表页）
 MAX_LIST_PAGES = 5  # 列表最多翻页数，避免「不限条数」时无边界抓取
 MAX_SUMMARY_CHARS = 140  # summary 从正文截断时的长度
+MAX_BODY_IMAGES = 12  # 单篇正文最多保留多少张图（防个别页面图片过多拖垮导入与页面）
 DETAIL_WORKERS = 4  # 详情页并发抓取线程数（纯网络 I/O，与 SQLite 写入无关）
 
 
@@ -164,6 +166,8 @@ _META_DESCRIPTION_NAME_RE = re.compile(
     r'<meta[^>]*name="description"[^>]*content="([^"]*)"', re.IGNORECASE
 )
 _IFRAME_SRC_RE = re.compile(r'<iframe\b[^>]*?src="([^"]+)"[^>]*>', re.IGNORECASE)
+_IMG_TAG_RE = re.compile(r"<img\b[^>]*>", re.IGNORECASE)
+_IMG_SRC_RE = re.compile(r"""\bsrc\s*=\s*["']([^"']+)["']""", re.IGNORECASE)
 
 _MONTHS = {
     "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
@@ -175,6 +179,58 @@ def clean_text(raw: str) -> str:
     """把 HTML 片段折叠成单行纯文本（去标签之外再压缩空白）。"""
     text = re.sub(r"<[^>]+>", " ", raw or "")
     return re.sub(r"\s+", " ", unescape(text)).strip()
+
+
+def absolute_image_url(src: str) -> str:
+    """把源站的相对图片地址补全为绝对地址。
+
+    源站图片形如 ``SYS/CONTENTS/<uuid>``（无扩展名；也见过 ``/SYS/...``、
+    ``//host/...`` 与完整 http 地址），统一补成可直接下载的绝对 URL。
+    """
+    text = (src or "").strip()
+    if not text:
+        return ""
+    if text.startswith("//"):
+        return f"https:{text}"
+    if text.startswith(("http://", "https://")):
+        return text
+    return f"{SITE_BASE.rstrip('/')}/{text.lstrip('/')}"
+
+
+def _is_decorative_image(url: str) -> bool:
+    """站点模板图（logo / 图标，路径含 /assets/）不算正文图，直接丢弃。"""
+    return "/assets/" in url
+
+
+def html_to_text(raw: str) -> str:
+    """详情正文 HTML -> 纯文本：保留段落换行，图片转 ``[图]`` 行，内嵌视频/音频转 ``[媒体]`` 行。
+
+    图片只保留前 ``MAX_BODY_IMAGES`` 张（按出现顺序），模板图（``/assets/``）跳过且不占配额；
+    超过上限的图直接丢弃——正文的阅读价值优先于图片数量。
+    """
+    text = raw or ""
+    text = _IFRAME_SRC_RE.sub(lambda m: f"\n[媒体] {unescape(m.group(1))}\n", text)
+
+    kept = 0
+
+    def _replace_img(match: re.Match) -> str:
+        nonlocal kept
+        if kept >= MAX_BODY_IMAGES:
+            return "\n"
+        src_match = _IMG_SRC_RE.search(match.group(0))
+        url = absolute_image_url(src_match.group(1)) if src_match else ""
+        if not url or _is_decorative_image(url):
+            return "\n"
+        kept += 1
+        return f"\n{article_body.IMAGE_PREFIX} {url}\n"
+
+    text = _IMG_TAG_RE.sub(_replace_img, text)
+    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"</(p|div|li|h[1-6])>", "\n", text, flags=re.IGNORECASE)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = unescape(text).replace("\r\n", "\n").replace("\r", "\n")
+    lines = [re.sub(r"[ \t\u3000]+", " ", line).strip() for line in text.split("\n")]
+    return "\n".join(line for line in lines if line).strip()
 
 
 def parse_site_date(raw: str) -> datetime | None:
@@ -204,6 +260,9 @@ class NewsEntry:
     summary: str = ""
     body: str = ""
     has_detail: bool = True
+    # 头图（绝对 URL）：优先列表缩略图（keyvisual），详情页没有时回退正文首图。
+    # 导入 apply 时尽量本地化；这里始终保留源站地址，下载失败也能显示。
+    thumb_url: str = ""
 
 
 def split_ip_title(raw: str) -> tuple[str, str]:
@@ -262,9 +321,20 @@ def parse_list_page(html: str) -> list[NewsEntry]:
                 published_at=published_at or datetime.now(),
                 ip_name=ip_name or (clean_text(origin_match.group(1)) if origin_match else ""),
                 has_detail=has_detail,
+                thumb_url=_list_thumb_url(block),
             )
         )
     return entries
+
+
+def _list_thumb_url(block: str) -> str:
+    """列表项的缩略图（keyvisual）绝对地址；没有图或只是站点模板图时返回空串。"""
+    img_match = _IMG_TAG_RE.search(block)
+    if not img_match:
+        return ""
+    src_match = _IMG_SRC_RE.search(img_match.group(0))
+    url = absolute_image_url(src_match.group(1)) if src_match else ""
+    return "" if (not url or _is_decorative_image(url)) else url
 
 
 def next_page_url(html: str, category: NewsCategory, current_page: int) -> str | None:
@@ -311,6 +381,12 @@ def parse_detail_page(html: str, entry: NewsEntry) -> NewsEntry:
     if not summary or summary == title:
         summary = _first_meaningful_line(body, title)[:MAX_SUMMARY_CHARS]
 
+    # 头图：列表缩略图优先；列表没有（如详情页直连）时回退正文第一张图
+    head_image = entry.thumb_url
+    if not head_image:
+        body_images = article_body.extract_image_urls(body)
+        head_image = body_images[0] if body_images else ""
+
     return NewsEntry(
         detail_id=entry.detail_id,
         url=entry.url,
@@ -319,29 +395,20 @@ def parse_detail_page(html: str, entry: NewsEntry) -> NewsEntry:
         ip_name=entry.ip_name,
         summary=summary,
         body=body,
+        thumb_url=head_image,
     )
 
 
 def _first_meaningful_line(body: str, title: str) -> str:
-    """取正文中第一行与标题不同的内容；正文只有标题/媒体时回落标题。"""
+    """取正文中第一行与标题不同的内容；正文只有标题/图片/媒体时回落标题。"""
     for line in (body or "").split("\n"):
         text = re.sub(r"\s+", " ", line).strip()
-        if not text or text == title or text.startswith("[媒体]"):
+        if not text or text == title:
+            continue
+        if text.startswith((article_body.MEDIA_PREFIX, article_body.IMAGE_PREFIX)):
             continue
         return text
     return title
-
-
-def html_to_text(raw: str) -> str:
-    """详情正文 HTML -> 纯文本：保留段落换行，内嵌视频/音频转为链接行。"""
-    text = raw or ""
-    text = _IFRAME_SRC_RE.sub(lambda m: f"\n[媒体] {unescape(m.group(1))}\n", text)
-    text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
-    text = re.sub(r"</(p|div|li|h[1-6])>", "\n", text, flags=re.IGNORECASE)
-    text = re.sub(r"<[^>]+>", "", text)
-    text = unescape(text).replace("\r\n", "\n").replace("\r", "\n")
-    lines = [re.sub(r"[ \t\u3000]+", " ", line).strip() for line in text.split("\n")]
-    return "\n".join(line for line in lines if line).strip()
 
 
 # ---------- 网络层 ----------
@@ -379,23 +446,37 @@ def collect_news(
     category: NewsCategory,
     *,
     limit: int | None = None,
+    max_pages: int | None = None,
     fetch=None,
 ) -> list[NewsEntry]:
-    """抓取栏目列表（必要时翻页）直到够 limit 条或没有下一页。"""
+    """抓取栏目列表（必要时翻页）直到够 limit 条或没有下一页。
+
+    max_pages：列表最多翻页数（默认 MAX_LIST_PAGES）；放量导入时可调大以翻更旧的页。
+    """
     fetch = fetch or fetch_page
     target = limit or DEFAULT_LIMIT
+    pages = max_pages or MAX_LIST_PAGES
     entries: list[NewsEntry] = []
     seen: set[str] = set()
     url = f"{SITE_BASE}{category.list_path}"
-    for page in range(1, MAX_LIST_PAGES + 1):
+    fetched_pages = 0
+    for page in range(1, pages + 1):
         html = fetch(url)
+        fetched_pages += 1
+        fresh = 0
         for entry in parse_list_page(html):
             if entry.detail_id in seen:
                 continue
             seen.add(entry.detail_id)
             entries.append(entry)
+            fresh += 1
             if len(entries) >= target:
                 return entries
+        # 翻页按钮还在、但这一页全是已收录条目时：直接停。
+        # 站点按「收录时间」翻页，再往下捞到的还是同一批已存在内容，
+        # 空转只是浪费详情页请求（放量导入时 --max-pages 调大就会连续命中）。
+        if fresh == 0 and fetched_pages > 1:
+            break
         following = next_page_url(html, category, page)
         if not following:
             break
@@ -443,6 +524,7 @@ class ArticleImportSummary:
     pending: int = 0
     added: int = 0
     failed: int = 0
+    filtered: int = 0  # 被硬广过滤掉的条数
     recognized: int = 0  # apply 模式下实际执行「识别标签 + 关联作品」的文章数
     outcomes: list[ArticleOutcome] = field(default_factory=list)
 
@@ -456,6 +538,7 @@ class ArticleImportSummary:
             "导入汇总：",
             f"  抓取条目：{self.requested}",
             f"  已存在跳过：{self.existing}",
+            f"  硬广过滤：{self.filtered}",
             f"  待新增：{self.pending}",
             f"  实际新增：{self.added}",
             f"  抓取失败：{self.failed}",
@@ -471,6 +554,7 @@ def run_import_articles(
     apply: bool = False,
     category: str | None = None,
     limit: int | None = None,
+    max_pages: int | None = None,
     fetch=None,
 ) -> ArticleImportSummary:
     """抓取并导入资讯：采集列表 -> 去重 -> 抓详情 -> （apply 时）写入。
@@ -487,18 +571,33 @@ def run_import_articles(
         requested=0,
     )
 
-    entries = collect_news(channel, limit=limit, fetch=fetch)
+    entries = collect_news(channel, limit=limit, max_pages=max_pages, fetch=fetch)
     summary.requested = len(entries)
 
     db = session_factory()
     try:
-        existing_urls = _existing_values(db, Article.original_url, [e.url for e in entries])
+        # 同 URL 的记录连对象一起取：重复导入时除了去重，还要给存量文章
+        # 补齐「作品名／」前缀（识别回填时的 extra_names 信号，只补空列）。
+        existing_by_url = {
+            row.original_url: row
+            for row in db.scalars(
+                select(Article).where(
+                    Article.original_url.in_([entry.url for entry in entries])
+                )
+            )
+        }
+        existing_urls = set(existing_by_url)
         fresh = [entry for entry in entries if entry.url not in existing_urls]
+        ip_backfilled = 0
         for entry in entries:
             if entry.url in existing_urls:
                 summary.existing += 1
+                reason = "库中已有同 URL 记录，跳过不覆盖"
+                if apply and _backfill_ip_name(existing_by_url[entry.url], entry.ip_name):
+                    ip_backfilled += 1
+                    reason += "（已补齐作品名前缀 ip_name）"
                 summary.outcomes.append(
-                    ArticleOutcome(entry.title, "existing", "库中已有同 URL 记录，跳过不覆盖", entry.url)
+                    ArticleOutcome(entry.title, "existing", reason, entry.url)
                 )
 
         details = fetch_details([entry for entry in fresh if entry.has_detail], fetch=fetch)
@@ -512,15 +611,37 @@ def run_import_articles(
                     ArticleOutcome(entry.title, "failed", "详情页抓取失败，未写入", entry.url)
                 )
                 continue
+            # 硬广过滤：只挡最露骨广告（营销活动保留）。
+            skip_reason = news_filters.should_skip_article(
+                item.title, item.summary, channel.label
+            )
+            if skip_reason:
+                summary.filtered += 1
+                summary.outcomes.append(
+                    ArticleOutcome(item.title, "filtered", skip_reason, item.url)
+                )
+                continue
             prepared.append(item)
 
-        existing_titles = _existing_values(db, Article.title, [item.title for item in prepared])
+        existing_by_title = {
+            row.title: row
+            for row in db.scalars(
+                select(Article).where(
+                    Article.title.in_([item.title for item in prepared])
+                )
+            )
+        }
+        existing_titles = set(existing_by_title)
         added: list[tuple[Article, str]] = []  # (新文章, 列表页的作品名前缀)
         for item in prepared:
             if item.title in existing_titles:
                 summary.existing += 1
+                reason = "库中已有同标题记录，跳过不覆盖"
+                if apply and _backfill_ip_name(existing_by_title[item.title], item.ip_name):
+                    ip_backfilled += 1
+                    reason += "（已补齐作品名前缀 ip_name）"
                 summary.outcomes.append(
-                    ArticleOutcome(item.title, "existing", "库中已有同标题记录，跳过不覆盖", item.url)
+                    ArticleOutcome(item.title, "existing", reason, item.url)
                 )
                 continue
             summary.pending += 1
@@ -529,37 +650,118 @@ def run_import_articles(
                     ArticleOutcome(item.title, "pending", "预览模式：未写入数据库", item.url)
                 )
                 continue
+            # 正文图与头图本地化：逐张下载落盘，失败的保留源站外链（不阻塞入库）
+            body = item.body
+            image_url = item.thumb_url or None
+            media_note = ""
+            localized = article_media.localize_media(
+                item.body, item.thumb_url or None, key=item.detail_id
+            )
+            body, image_url = localized.body, localized.head_image
+            if localized.saved or localized.failed:
+                media_note = f"，图片本地化 {localized.saved} 张"
+                if localized.failed:
+                    media_note += f"（{localized.failed} 张保留外链）"
+            # 分类 / 事件 / 优先级 三维度分离（本源是官方宣发，source_type 固定为官方PR）。
+            subject = news_classify.normalize_subject(channel.label)
+            subcategory = news_classify.classify_subcategory(
+                item.title, item.summary, subject
+            )
+            event_type = news_classify.classify_event_type(item.title, item.summary)
+            # Aniplex 是日本官方站，默认地区取日本；标题命中国产 / 欧美信号时再细化。
+            region = news_classify.detect_region(
+                news_classify.REGION_JP, item.title, item.summary
+            )
             article = Article(
                 title=item.title,
-                category=channel.label,
+                category=subject,
                 summary=item.summary,
-                body=item.body,
+                body=body,
+                image_url=image_url,
+                # 「作品名／」前缀落库：识别回填（link_articles.py）用它当
+                # extra_names 强信号，避免存量文章重算时丢掉这个来源信号。
+                ip_name=item.ip_name or None,
                 source=SOURCE_NAME,
                 original_url=item.url,
                 is_published=True,
                 published_at=item.published_at,
+                subcategory=subcategory,
+                event_type=event_type,
+                region=region,
+                source_type=news_classify.SOURCE_TYPE_PR,
+                priority_score=news_classify.compute_priority_score(
+                    category=subject,
+                    subcategory=subcategory,
+                    region=region,
+                    event_type=event_type,
+                    source_type=news_classify.SOURCE_TYPE_PR,
+                    text=f"{item.title}\n{item.summary}",
+                ),
+                is_adult=news_classify.flag_adult(item.title, item.summary),
             )
             db.add(article)
             added.append((article, item.ip_name))
             summary.added += 1
-            summary.outcomes.append(ArticleOutcome(item.title, "added", "已写入", item.url))
-
-        if apply and added:
-            db.flush()  # 先分配文章 id，供识别关联行引用
-            article_tags.link_articles(
-                db,
-                [article for article, _ in added],
-                extra_names_map={
-                    article.id: [ip_name] if ip_name else []
-                    for article, ip_name in added
-                },
+            summary.outcomes.append(
+                ArticleOutcome(item.title, "added", f"已写入{media_note}", item.url)
             )
-            summary.recognized = len(added)
+
+        if apply and (added or ip_backfilled):
+            if added:
+                db.flush()  # 先分配文章 id，供识别关联行引用
+                article_tags.link_articles(
+                    db,
+                    [article for article, _ in added],
+                    extra_names_map={
+                        article.id: [ip_name] if ip_name else []
+                        for article, ip_name in added
+                    },
+                )
+                summary.recognized = len(added)
             db.commit()
     finally:
         db.close()
 
     return summary
+
+
+def run_import_all_categories(
+    session_factory,
+    *,
+    apply: bool = False,
+    categories: list[str] | None = None,
+    total: int | None = None,
+    per_category: int | None = None,
+    max_pages: int | None = None,
+    fetch=None,
+) -> list[ArticleImportSummary]:
+    """跨栏目放量导入：按栏目顺序抓取，累计到 total 条为止。
+
+    categories：栏目名列表，缺省按站点栏目顺序（动漫 → 榜单 → 活动）。
+    total：本次最多抓取的条目总数（含库中已存在、会被跳过的条目）；
+    per_category：单栏目上限，给定时优先于 total 的剩余额度。
+    返回每个栏目一份汇总，便于看清各栏目贡献了多少条。
+    """
+    channels = (
+        [category_by_label(name) for name in categories] if categories else list(CATEGORIES)
+    )
+    summaries: list[ArticleImportSummary] = []
+    collected = 0
+    for channel in channels:
+        if total is not None and collected >= total:
+            break
+        remaining = (total - collected) if total is not None else None
+        summary = run_import_articles(
+            session_factory,
+            apply=apply,
+            category=channel.label,
+            limit=per_category or remaining,
+            max_pages=max_pages,
+            fetch=fetch,
+        )
+        summaries.append(summary)
+        collected += summary.requested
+    return summaries
 
 
 def _materialize(entry: NewsEntry, details: dict) -> NewsEntry | None:
@@ -579,14 +781,22 @@ def _materialize(entry: NewsEntry, details: dict) -> NewsEntry | None:
         summary=entry.title[:MAX_SUMMARY_CHARS],
         body=f"{entry.title}\n\n原文：{entry.url}",
         has_detail=False,
+        thumb_url=entry.thumb_url,
     )
 
 
-def _existing_values(db, column, values: list[str]) -> set[str]:
-    """查询库中已存在的取值（values 为空时不查库）。"""
-    if not values:
-        return set()
-    return set(db.scalars(select(column).where(column.in_(values))).all())
+def _backfill_ip_name(article: Article, ip_name: str) -> bool:
+    """给存量文章补齐「作品名／」前缀（只写空列，不覆盖已有值）。
+
+    识别回填（scripts/link_articles.py）把 ip_name 当 extra_names 强信号；
+    存量文章导入时还没这一列，重复导入是它们补上该信号的唯一机会。
+    返回是否真的写入（区分「已补齐」与「本来就是空/已有值」）。
+    """
+    name = (ip_name or "").strip()
+    if not name or article.ip_name:
+        return False
+    article.ip_name = name
+    return True
 
 
 def main(argv=None) -> int:
@@ -604,30 +814,75 @@ def main(argv=None) -> int:
         "--limit", type=int, default=None,
         help=f"最多抓取条数，缺省 {DEFAULT_LIMIT} 条（每条都会请求一次详情页）",
     )
+    parser.add_argument(
+        "--all-categories", action="store_true",
+        help="依次抓取全部栏目（动漫资讯 / 榜单资讯 / 活动资讯），用于放量导入",
+    )
+    parser.add_argument(
+        "--total", type=int, default=None,
+        help="跨栏目抓取的条目总数上限（配合 --all-categories；含已存在被跳过的条目）",
+    )
+    parser.add_argument(
+        "--per-category", type=int, default=None,
+        help="单栏目抓取条数上限（不给则用 --total 的剩余额度）",
+    )
+    parser.add_argument(
+        "--max-pages", type=int, default=None,
+        help=f"单栏目列表最多翻页数，缺省 {MAX_LIST_PAGES}；放量时调大可翻到更旧的资讯",
+    )
     args = parser.parse_args(argv)
 
     print(f"数据库：{settings.database_url}")
     print(f"数据源：{SOURCE_NAME}（{SITE_BASE}）")
     try:
-        summary = run_import_articles(
-            SessionLocal, apply=args.apply, category=args.category, limit=args.limit
-        )
+        if args.all_categories or args.total:
+            summaries = run_import_all_categories(
+                SessionLocal,
+                apply=args.apply,
+                total=args.total,
+                per_category=args.per_category,
+                max_pages=args.max_pages,
+            )
+        else:
+            summaries = [
+                run_import_articles(
+                    SessionLocal,
+                    apply=args.apply,
+                    category=args.category,
+                    limit=args.limit,
+                    max_pages=args.max_pages,
+                )
+            ]
     except (ArticleFetchError, UnknownArticleCategoryError) as exc:
         print(f"抓取失败：{exc}")
         return 1
 
-    print(summary.describe())
-    for i, outcome in enumerate(summary.outcomes, 1):
-        if outcome.status == "existing":
-            continue
-        print(f"{i}. [{outcome.status}] {outcome.title}")
-        print(f"   {outcome.url}")
-        if outcome.reason:
-            print(f"   {outcome.reason}")
+    added_total = sum(s.added for s in summaries)
+    existing_total = sum(s.existing for s in summaries)
+    failed_total = sum(s.failed for s in summaries)
+    for summary in summaries:
+        print(summary.describe())
+    index = 0
+    printed = 0
+    for summary in summaries:
+        for outcome in summary.outcomes:
+            if outcome.status == "existing":
+                continue
+            index += 1
+            if outcome.status == "added" and printed >= 20:
+                continue  # 放量时新增条目很多，明细只列前 20 条
+            printed += 1
+            print(f"{index}. [{outcome.status}] {outcome.title}")
+            print(f"   {outcome.url}")
+            if outcome.reason:
+                print(f"   {outcome.reason}")
+    if index > printed:
+        print(f"（其余 {index - printed} 条新增明细省略）")
     if not args.apply:
-        print("模式：dry-run，未写入数据库。确认后追加 --apply 正式导入。")
+        print(f"模式：dry-run，未写入数据库。待新增 {sum(s.pending for s in summaries)} 条，"
+              f"确认后追加 --apply 正式导入。")
         return 0
-    print(f"正式导入完成：新增 {summary.added} 条，跳过已存在 {summary.existing} 条，失败 {summary.failed} 条。")
+    print(f"正式导入完成：新增 {added_total} 条，跳过已存在 {existing_total} 条，失败 {failed_total} 条。")
     return 0
 
 

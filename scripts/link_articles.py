@@ -1,4 +1,4 @@
-"""资讯识别回填：给库中已有资讯补「识别标签 + 关联作品」。
+"""资讯识别回填：给库中已有资讯补「识别标签 + 关联作品 + 作品信息」。
 
 适用场景：
 - 识别功能上线前导入的资讯没有标签与关联（article_tags / article_content_links 为空）；
@@ -16,7 +16,7 @@
 用法示例：
     # 预览：对所有资讯做识别计算，不写库
     python scripts/link_articles.py
-    # 正式回填（写入 article_tags / article_content_links）
+    # 正式回填（写入 article_tags / article_content_links / article_entities）
     python scripts/link_articles.py --apply
     # 已有识别结果的也重算（作品库扩充后刷新）
     python scripts/link_articles.py --apply --force
@@ -59,6 +59,7 @@ class LinkOutcome:
     status: str  # recognized / pending / skipped
     tags: list[str] = field(default_factory=list)
     contents: list[str] = field(default_factory=list)
+    work_info: list[str] = field(default_factory=list)
     reason: str = ""
 
     def describe(self) -> str:
@@ -70,6 +71,8 @@ class LinkOutcome:
         parts = [f"[{label}] #{self.article_id} 《{self.title}》"]
         parts.append(f"标签：{'、'.join(self.tags) if self.tags else '未识别到'}")
         parts.append(f"作品：{'、'.join(self.contents) if self.contents else '未关联到'}")
+        if self.work_info:
+            parts.append(f"作品信息：{'、'.join(self.work_info)}")
         if self.reason:
             parts.append(f"- {self.reason}")
         return " ".join(parts)
@@ -84,8 +87,9 @@ class LinkSummary:
     recognized: int = 0
     pending: int = 0
     skipped: int = 0
-    tagged: int = 0  # 识别出至少一个标签的篇数
+    tagged: int = 0  # 识别出至少一个题材标签的篇数
     linked: int = 0  # 关联到至少一部作品的篇数
+    informed: int = 0  # 识别出至少一个作品信息标签的篇数
     outcomes: list[LinkOutcome] = field(default_factory=list)
 
     def describe(self) -> str:
@@ -96,9 +100,10 @@ class LinkSummary:
                 "回填汇总：",
                 f"  资讯总数：{self.requested}",
                 f"  实际识别：{self.recognized}（预览待识别 {self.pending}）",
-                f"  跳过（已有识别结果）：{self.skipped}",
+                f"  跳过（已有识别结果 / 空结果已清空）：{self.skipped}",
                 f"  识别出标签：{self.tagged} 篇",
                 f"  关联到作品：{self.linked} 篇",
+                f"  识别出作品信息：{self.informed} 篇",
             ]
         )
 
@@ -112,10 +117,18 @@ def list_target_articles(db, article_ids: list[int] | None) -> list[Article]:
 
 
 def has_recognition(db, article_id: int) -> bool:
-    """该资讯是否已有识别结果（标签或关联作品任一非空即算）。"""
+    """该资讯是否已有识别结果（标签 / 关联作品 / 作品信息任一非空即算）。"""
     if crud.list_article_tags(db, article_id):
         return True
-    return crud.count_article_content_links(db, article_id) > 0
+    if crud.count_article_content_links(db, article_id) > 0:
+        return True
+    return crud.count_article_entities(db, article_id) > 0
+
+
+def _work_info_label(item) -> str:
+    """作品信息标签的展示名：`名称（标注）`（kind + entity_type → 中文）。"""
+    label = crud.WORK_INFO_KIND_LABELS.get((item.kind, item.entity_type), "作品")
+    return f"{item.name}（{label}）"
 
 
 def run_backfill(
@@ -134,15 +147,22 @@ def run_backfill(
     db = session_factory()
     try:
         articles = list_target_articles(db, article_ids)
-        # 词表只查一次：标签名 + 作品标题（识别是纯本地计算，不访问网络）。
-        tag_names = crud.list_all_tag_names(db)
-        content_titles = [title for _, title in crud.list_content_titles(db)]
+        # 词表只查一次：题材标签名 + 作品标题 + 作品信息（纯本地计算，
+        # 不访问网络）。
+        tag_names, title_terms, info_terms = article_tags.load_vocabulary(db)
 
         for article in articles:
             summary.requested += 1
             recognition = article_tags.recognize(
-                article, tag_names=tag_names, content_titles=content_titles
+                article,
+                tag_names=tag_names,
+                title_terms=title_terms,
+                info_terms=info_terms,
+                # 「作品名／」前缀（导入时落库的 ip_name）与导入路径同一强信号：
+                # 正文没复述作品名时靠它把作品拉进候选（app/article_tags）。
+                extra_names=[article.ip_name] if article.ip_name else [],
             )
+            work_info = [_work_info_label(item) for item in recognition.work_info]
             if has_recognition(db, article.id) and not force:
                 summary.skipped += 1
                 summary.outcomes.append(
@@ -152,20 +172,27 @@ def run_backfill(
                         "skipped",
                         recognition.tags,
                         recognition.content_titles,
+                        work_info,
                         "已有识别结果，跳过（--force 重新识别）",
                     )
                 )
                 continue
-            if not recognition.tags and not recognition.content_titles:
-                # 识别结果为空：写与不写结果一样，按「无需写入」跳过，
-                # 不重复计数（否则每次回填都把这类文章算成「实际识别」）。
+            if not recognition.tags and not recognition.content_titles and not recognition.work_info:
+                # 空识别结果也必须走「替换式写入」：否则重算清不掉历史误关联
+                # （旧算法挂上去的作品行会永远留在页面上）。replace_* 传空
+                # 列表即删除旧行，幂等。
+                if apply:
+                    had_recognition = has_recognition(db, article.id)
+                    article_tags.apply_recognition(db, recognition)
+                    if had_recognition:
+                        summary.recognized += 1
                 summary.skipped += 1
                 summary.outcomes.append(
                     LinkOutcome(
                         article.id,
                         article.title,
                         "skipped",
-                        reason="未识别到标签或作品，无需写入",
+                        reason="未识别到标签、作品或作品信息，已清空旧关联",
                     )
                 )
                 continue
@@ -181,10 +208,17 @@ def run_backfill(
                 summary.tagged += 1
             if recognition.content_titles:
                 summary.linked += 1
+            if recognition.work_info:
+                summary.informed += 1
             summary.outcomes.append(
                 LinkOutcome(
-                    article.id, article.title, status, recognition.tags,
-                    recognition.content_titles, reason,
+                    article.id,
+                    article.title,
+                    status,
+                    recognition.tags,
+                    recognition.content_titles,
+                    work_info,
+                    reason,
                 )
             )
 
@@ -205,7 +239,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--apply",
         action="store_true",
-        help="把识别结果写入 article_tags / article_content_links；不加则只预览",
+        help="把识别结果写入 article_tags / article_content_links / article_entities；不加则只预览",
     )
     parser.add_argument(
         "--force",
@@ -239,7 +273,8 @@ def main(argv=None, *, session_factory=None) -> int:
         args.article_id = list(dict.fromkeys(args.article_id))  # 去重保序
 
     if session_factory is None:
-        engine = build_engine(args.database_url)
+        # 与线上服务 / 后台脚本共库时写锁等待放宽到 60s（默认 5s 易锁超时）
+        engine = build_engine(args.database_url, busy_timeout=60.0)
         session_factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 
     print(f"数据库：{args.database_url}")

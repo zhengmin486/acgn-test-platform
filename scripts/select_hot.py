@@ -52,10 +52,18 @@ from scripts.import_bangumi import (  # noqa: E402
     TYPE_MAPPING,
     BangumiAPIError,
     build_opener,
+    resolve_content_type,
 )
 
 # bgm.tv 分区 -> 会出现的 Bangumi 条目类型。
 # 注意「书籍」分区里小说(type=1)与漫画(type=6)混在一起，所以一个分区对应多个 type。
+#
+# 修正（2026-10-21）：上面这句是旧注释，编码写反了。实测真实语义是
+#   type=1 书籍（漫画与小说**按 platform 拆**）、type=2 动画、type=3 音乐、
+#   type=4 游戏、type=6 真人剧（Archive README 把 6 写成「漫画」是错的）。
+# 所以本模块**不能只查 TYPE_MAPPING**（它只有 2/4 两项）：那样 book 分区抓到的
+# 书籍条目会被整类丢掉，novel/comic 配额恒为 0、余额全溢出给动画。
+# 类型判定统一走 import_bangumi.resolve_content_type，与入库口径保持一致。
 BROWSER_CATEGORIES: tuple[str, ...] = ("anime", "book", "game")
 SUBJECT_LINK_RE = re.compile(r"/subject/(\d+)")
 
@@ -87,6 +95,9 @@ class Candidate:
     bangumi_id: int
     source_category: str
     subject_type: int | None = None
+    # 抓详情时定好的本站类型。书籍(type=1)光看 subject_type 分不出漫画/小说，
+    # 必须靠 payload 的 platform / infobox 判，判完落在这里。
+    resolved_type: str | None = None
     collect: int = 0
     score: float = 0.0
     title: str = ""
@@ -99,7 +110,9 @@ class Candidate:
 
     @property
     def content_type(self) -> str | None:
-        return TYPE_MAPPING.get(self.subject_type) if self.subject_type else None
+        return self.resolved_type or (
+            TYPE_MAPPING.get(self.subject_type) if self.subject_type else None
+        )
 
     @property
     def tier(self) -> str:
@@ -301,9 +314,11 @@ def collect_candidates(
             report.detail_failures.append(sid)
             continue
 
-        content_type = TYPE_MAPPING.get(payload.get("type"))
+        # 走 resolve_content_type 而不是 TYPE_MAPPING：书籍按 platform / infobox
+        # 拆成 comic / novel，非日本小说与画集会被判为 None 丢掉——与入库口径一致。
+        content_type = resolve_content_type(payload)
         if content_type is None:
-            continue  # 音乐 / 三次元，本站不收
+            continue  # 音乐 / 真人剧 / 非日本书 / 画集，本站不收
 
         rating = payload.get("rating") or {}
         collection = payload.get("collection") or {}
@@ -317,6 +332,7 @@ def collect_candidates(
                 bangumi_id=sid,
                 source_category=category,
                 subject_type=payload.get("type"),
+                resolved_type=content_type,
                 collect=int(collection.get("collect") or 0),
                 score=float(rating.get("score") or 0.0),
                 title=title,

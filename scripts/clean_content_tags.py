@@ -1,16 +1,22 @@
-"""清洗已入库作品的标签：题材留在 content_tags，公司进 content_studios，年份进 contents.year。
+"""清洗已入库作品的标签：题材留在 content_tags，公司进 content_studios，年份进 contents.year，
+形式载体（TV / 剧场版 / 漫画改 …）进 contents.media / contents.source_material。
 
 背景：
 - 早期同步 / 导入把 Bangumi 的 top 标签原样写进 `content_tags`，里面混着
   `2011`（年份）、`A-1 Pictures`（公司）、`花泽香菜`（声优）、`TV`（媒介）；
 - 标签云与「按标签筛选」只该看到题材，否则点 `2011` 会出来一堆不相干作品；
-- 但年份和公司有价值，不能删：分别落到 `contents.year` 与 `content_studios`。
+- 但年份、公司、形式载体都有价值，不能删：分别落到 `contents.year`、
+  `content_studios` 与 `contents.media` / `contents.source_material`。
 
 规则（与 app/tagging.py 同一套）：
 - 题材 → 保留在 content_tags；
 - 公司 → 规范名写入 content_studios（京都动画 / A-1 Pictures …）；
 - 年份 → 优先级：已有 year > Bangumi 快照 date > 简介里的「YYYY 年」> 标签里的四位年份；
-- 其余（声优 / 载体 / 平台 / 地区）→ 丢弃，不再关联。
+- 形式载体 → 媒介（TV / 剧场版 / OVA / OAD / WEB）写 contents.media，
+  原作载体（漫画改 / 小说改 / 游戏改 / 原创 …）写 contents.source_material，
+  两列值由标签里的形式词推导：有形式词即覆盖（含清掉历史脏数据），
+  无形式词时才保留列里既有的合法枚举值；
+- 其余（声优 / 平台 / 地区 / 季度 / 元标签）→ 丢弃，不再关联。
 
 默认只预览，`--apply` 才写库；写完默认清理无人引用的孤儿标签行。
 
@@ -39,7 +45,12 @@ from app import crud  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.database import build_engine  # noqa: E402
 from app.models import BangumiCollection, Content, ContentTag, Tag  # noqa: E402
-from app.tagging import split_tags, year_from_date  # noqa: E402
+from app.tagging import (  # noqa: E402
+    MEDIA_TAGS,
+    SOURCE_MATERIAL_TAGS,
+    split_tags_full,
+    year_from_date,
+)
 
 
 @dataclass
@@ -58,6 +69,8 @@ class CleanSummary:
     dropped_tags: int = 0
     studios_added: int = 0
     years_set: int = 0
+    media_set: int = 0
+    source_set: int = 0
     pruned_tags: int = 0
     outcomes: list[CleanOutcome] = field(default_factory=list)
 
@@ -100,7 +113,9 @@ def clean_contents(
         studios = crud.list_content_studios(db, content.id)
 
         # 已在 content_studios 的公司也参与去重（重复执行不会丢）
-        genres, tag_studios, tag_year = split_tags(tags + studios)
+        genres, tag_studios, tag_year, tag_media, tag_source = split_tags_full(
+            tags + studios
+        )
         # 年份只信结构化来源：已有 year > Bangumi 快照 date > 标签里的四位年份。
         # 不从简介里正则抓年份——原作简介常出现剧情设定的年份（例如 EVA 的 2000 年），
         # 那不是发行年，写进去就是错数据。
@@ -116,8 +131,35 @@ def clean_contents(
         tags_changed = genres != tags
         studios_changed = tag_studios != studios
         year_changed = bool(year) and content.year != year
+        # 形式载体完全由标签里的形式词推导（content_tags 是真相来源）：
+        # 标签里有形式词就写（覆盖任何既有值，含历史脏数据）；标签里没有时，
+        # 若列里已是合法枚举值则保留（详情页 / 人工补过的），否则清掉脏数据。
+        # 合法值取展示名（MEDIA_TAGS / SOURCE_MATERIAL_TAGS 的 **值**）：这两个表的
+        # 键是归一化小写形式（tv / ova / web…），而 content.media / new_media 存的是
+        # 展示名（TV / OVA / WEB / 剧场版…），用键集合判定会把合法值误判为脏数据，
+        # 导致每次清洗都把已写好的媒介列清空（第二次跑不再幂等）。
+        _valid_media = set(MEDIA_TAGS.values())
+        _valid_source = set(SOURCE_MATERIAL_TAGS.values())
+        new_media = (
+            tag_media
+            if tag_media
+            else (content.media if content.media in _valid_media else None)
+        )
+        new_source = (
+            tag_source
+            if tag_source
+            else (content.source_material if content.source_material in _valid_source else None)
+        )
+        media_changed = new_media != content.media
+        source_changed = new_source != content.source_material
 
-        if not (tags_changed or studios_changed or year_changed):
+        if not (
+            tags_changed
+            or studios_changed
+            or year_changed
+            or media_changed
+            or source_changed
+        ):
             summary.outcomes.append(
                 CleanOutcome(content.id, content.title, "unchanged")
             )
@@ -128,13 +170,19 @@ def clean_contents(
         summary.dropped_tags += len(dropped)
         summary.studios_added += len([s for s in tag_studios if s not in studios])
         summary.years_set += 1 if year_changed else 0
+        summary.media_set += 1 if media_changed else 0
+        summary.source_set += 1 if source_changed else 0
         summary.outcomes.append(
             CleanOutcome(
                 content.id,
                 content.title,
                 "clean" if apply else "preview",
                 f"题材 {len(genres)} 个；公司 {', '.join(tag_studios) or '无'}；"
-                f"年份 {year or '未知'}；丢弃 {', '.join(dropped) or '无'}",
+                f"年份 {year or '未知'}；媒介 {new_media or '无'}"
+                f"{'（保留既有合法值）' if (not tag_media and new_media) else ''}；"
+                f"原作 {new_source or '无'}"
+                f"{'（保留既有合法值）' if (not tag_source and new_source) else ''}；"
+                f"丢弃 {', '.join(dropped) or '无'}",
             )
         )
 
@@ -147,6 +195,11 @@ def clean_contents(
             crud.replace_content_studios(db, content.id, tag_studios)
         if year_changed:
             content.year = year
+        if media_changed:
+            content.media = new_media
+        if source_changed:
+            content.source_material = new_source
+        if year_changed or media_changed or source_changed:
             db.commit()
         summary.applied += 1
 
@@ -216,7 +269,9 @@ def main(argv=None) -> int:  # noqa: ANN001 - CLI 入口
     if args.apply:
         print(
             f"写入 {summary.applied} 部；新增公司 {summary.studios_added} 条、"
-            f"补年份 {summary.years_set} 部、移除噪音标签关联 {summary.dropped_tags} 条、"
+            f"补年份 {summary.years_set} 部、补媒介 {summary.media_set} 部、"
+            f"补原作载体 {summary.source_set} 部、"
+            f"移除噪音标签关联 {summary.dropped_tags} 条、"
             f"清理孤儿标签 {summary.pruned_tags} 行"
         )
     else:

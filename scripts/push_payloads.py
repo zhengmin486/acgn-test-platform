@@ -29,19 +29,36 @@ BATCH = 50
 
 
 def login(base_url: str, username: str, password: str) -> dict[str, str]:
-    """用口令换 session Cookie（与 run_pilot 同一套语义）。"""
+    """用口令换 session Cookie（与 run_pilot 同一套语义）。
+
+    登录接口 303 跳转并在该响应上种 Cookie；urllib 默认跟随重定向会丢掉
+    303 响应头，所以用不跟随重定向的 opener 直接取第一跳的 Set-Cookie。
+    """
     body = urllib.parse.urlencode({"username": username, "password": password}).encode()
     request = urllib.request.Request(
         f"{base_url.rstrip('/')}/login",
         data=body,
         headers={"Content-Type": "application/x-www-form-urlencoded"},
     )
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    with opener.open(request, timeout=20) as response:
-        if "login" in response.geturl():
-            raise RuntimeError("登录失败：用户名或口令不正确")
-        cookie = response.headers.get("Set-Cookie") or ""
-    session = cookie.split(";")[0] if cookie else ""
+
+    class _NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None  # 不跟随：303 响应本身带着 Set-Cookie
+
+    opener = urllib.request.build_opener(_NoRedirect, urllib.request.ProxyHandler({}))
+    try:
+        response = opener.open(request, timeout=20)
+        response.read()
+        headers_out = response.headers
+    except urllib.error.HTTPError as exc:
+        headers_out = exc.headers  # 303 就是走这里
+
+    session = ""
+    for value in headers_out.get_all("Set-Cookie") or []:
+        first = value.split(";")[0].strip()
+        if first:
+            session = first
+            break
     if not session:
         raise RuntimeError("登录失败：响应里没有 session Cookie")
     return {"Cookie": session}
@@ -90,23 +107,25 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="推送归档选品 payload 到服务器")
     parser.add_argument(
         "--selection",
-        default=str(PROJECT_ROOT / ".workbuddy/pilot/selection.json"),
+        default=str(PROJECT_ROOT / ".workbuddy/pilot/selection_new.json"),
     )
     parser.add_argument(
         "--base-url",
         default=os.environ.get("INGEST_URL") or "http://154.8.194.198:8000",
     )
     parser.add_argument("--key", default=os.environ.get("INGEST_API_KEY") or "")
+    parser.add_argument(
+        "--cookie",
+        default=os.environ.get("ADMIN_COOKIE") or "",
+        help="直接传已登录的 admin 会话 Cookie（形如 'session=...'），跳过口令登录",
+    )
     parser.add_argument("--username", default=os.environ.get("ADMIN_USERNAME") or "admin")
     parser.add_argument("--password", default=os.environ.get("ADMIN_PASSWORD") or "")
     parser.add_argument("--source", default="archive-dump")
     args = parser.parse_args(argv)
 
     if not args.key:
-        print("缺少 INGEST_API_KEY", file=sys.stderr)
-        return 1
-    if not args.password:
-        print("缺少 ADMIN_PASSWORD", file=sys.stderr)
+        print("缺少 INGEST_API_KEY（--key 或环境变量 INGEST_API_KEY）", file=sys.stderr)
         return 1
 
     payloads = json.loads(Path(args.selection).read_text(encoding="utf-8"))
@@ -115,7 +134,14 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print(f"推送 {len(payloads)} 条到 {args.base_url} ...")
 
-    headers = login(args.base_url, args.username, args.password)
+    if args.cookie:
+        headers = {"Cookie": args.cookie}
+        print("使用提供的 admin 会话 Cookie（跳过口令登录）")
+    else:
+        if not args.password:
+            print("缺少 ADMIN_PASSWORD（--password 或环境变量），且未提供 --cookie", file=sys.stderr)
+            return 1
+        headers = login(args.base_url, args.username, args.password)
     total, imported, duplicate = push(
         payloads,
         base_url=args.base_url,

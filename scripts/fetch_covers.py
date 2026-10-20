@@ -31,6 +31,7 @@ import argparse
 import importlib.util
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -163,6 +164,76 @@ def list_pending_contents(
     return rows
 
 
+def _run_concurrent(
+    session_factory,
+    *,
+    rows: list[tuple[int, int, str]],
+    apply: bool,
+    workers: int,
+    fetch,
+    cover_downloader,
+) -> CoverSummary:
+    """多线程回填：拉条目 / 下图都是网络等待，线程池即可并行（GIL 不挡 IO）。
+
+    为什么需要它：线上 4000 多部待补时，单线程串行约 9 秒/部，全量要跑近十小时。
+    每个任务自己开 session 写库，只写 image_url 一列，冲突面很小
+    （engine 已设 busy_timeout，短写会等锁而不是直接失败）。
+    """
+    summary = CoverSummary()
+
+    def handle(content_id: int, bangumi_id: int, title: str) -> CoverOutcome:
+        try:
+            payload = fetch(bangumi_id)
+        except import_bangumi.BangumiAPIError as exc:
+            return CoverOutcome(content_id, bangumi_id, title, "failed", str(exc))
+        remote_url = import_bangumi.extract_cover_url(payload)
+        if not remote_url:
+            return CoverOutcome(content_id, bangumi_id, title, "skipped", "该条目没有可用封面图")
+        try:
+            local_url = cover_downloader(remote_url, bangumi_id)
+        except import_bangumi.CoverDownloadError as exc:
+            return CoverOutcome(content_id, bangumi_id, title, "failed", str(exc))
+        if not apply:
+            return CoverOutcome(content_id, bangumi_id, title, "downloaded", local_url)
+        db = session_factory()
+        try:
+            row = db.get(Content, content_id)
+            if row is None:
+                return CoverOutcome(content_id, bangumi_id, title, "failed", "条目已不存在")
+            row.image_url = local_url
+            db.commit()
+        except Exception as exc:  # noqa: BLE001 - 单条写库失败不该中断整批
+            db.rollback()
+            return CoverOutcome(content_id, bangumi_id, title, "failed", f"写库失败：{exc}")
+        finally:
+            db.close()
+        return CoverOutcome(content_id, bangumi_id, title, "applied", local_url)
+
+    # 一次提交过多任务会占满内存，分批提交、边跑边收。
+    batch = max(workers * 4, 32)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        for start in range(0, len(rows), batch):
+            chunk = rows[start : start + batch]
+            futures = {
+                pool.submit(handle, content_id, bangumi_id, title): content_id
+                for content_id, bangumi_id, title in chunk
+            }
+            for future in as_completed(futures):
+                outcome = future.result()
+                summary.scanned += 1
+                summary.outcomes.append(outcome)
+                if outcome.status == "applied":
+                    summary.downloaded += 1
+                    summary.applied += 1
+                elif outcome.status == "downloaded":
+                    summary.downloaded += 1
+                elif outcome.status == "skipped":
+                    summary.skipped += 1
+                else:
+                    summary.failed += 1
+    return summary
+
+
 def run_backfill(
     session_factory,
     *,
@@ -173,6 +244,7 @@ def run_backfill(
     limit: int | None = None,
     content_ids: list[int] | None = None,
     pause: float = 0.0,
+    workers: int = 1,
     proxy: str | None = None,
     timeout: float = import_bangumi.DEFAULT_TIMEOUT,
     retries: int = import_bangumi.DEFAULT_RETRIES,
@@ -206,6 +278,30 @@ def run_backfill(
             retries=retries,
             user_agent=user_agent,
             sleep=sleep,
+        )
+
+    if workers and workers > 1:
+        # 先把待处理列表查完、只留三元组，避免把 ORM 对象带进工作线程。
+        db = session_factory()
+        try:
+            pending = list_pending_contents(
+                db,
+                force=force,
+                scope=scope,
+                top=top,
+                limit=limit,
+                content_ids=content_ids,
+            )
+            rows = [(row.id, row.bangumi_id, row.title) for row in pending]
+        finally:
+            db.close()
+        return _run_concurrent(
+            session_factory,
+            rows=rows,
+            apply=apply,
+            workers=workers,
+            fetch=fetch,
+            cover_downloader=cover_downloader,
         )
 
     summary = CoverSummary()
@@ -325,7 +421,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--sleep",
         type=float,
         default=0.5,
-        help="每部之间的暂停秒数（默认 0.5，限速避免打爆图床）",
+        help="每部之间的暂停秒数（默认 0.5，限速避免打爆图床；--workers>1 时不生效）",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="并发线程数（默认 1=逐条）；大批量补图建议 4–8，IO 等待即并行",
     )
     parser.add_argument(
         "--proxy",
@@ -363,7 +465,9 @@ def main(argv=None, *, fetch=None, cover_downloader=None) -> int:
     print(f"代理：{proxy if proxy else '未启用（直连）'}")
     print(f"封面目录：{settings.cover_storage_dir}")
 
-    engine = build_engine(args.database_url)
+    # 线上服务与脚本共用一个 SQLite 文件：逐条 commit 的短写要肯等锁，
+    # 否则高并发导入 / 封面回填时会互相抛 database is locked。
+    engine = build_engine(args.database_url, busy_timeout=60.0)
     session_factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
     try:
         summary = run_backfill(
@@ -373,6 +477,7 @@ def main(argv=None, *, fetch=None, cover_downloader=None) -> int:
             limit=args.limit,
             content_ids=args.content_ids,
             pause=args.sleep,
+            workers=args.workers,
             apply=args.apply,
             force=args.force,
             proxy=proxy,
