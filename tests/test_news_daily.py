@@ -673,12 +673,12 @@ RSS_MAJOR_2 = """<?xml version="1.0" encoding="UTF-8"?>
 
 class TestMajorAnnouncementExemption:
     def test_word_table_hits_and_misses(self):
-        """词表三档：改编/新企划 > 续作 > 双信号；普通稿不命中。"""
+        """词表三档：化类 > 续作/剧场版 > 中文官宣；普通稿不命中。"""
         from scripts.news_classify import (
             MAJOR_NONE,
+            MAJOR_OFFICIAL,
             MAJOR_SEQUEL,
             MAJOR_STRONG,
-            MAJOR_WEAK,
             detect_major_announcement,
         )
 
@@ -687,11 +687,53 @@ class TestMajorAnnouncementExemption:
         assert detect_major_announcement("『ホシ』コミカライズ決定")[0] == MAJOR_STRONG
         assert detect_major_announcement("『ホシ』第2期制作決定")[0] == MAJOR_SEQUEL
         assert detect_major_announcement("『ホシ』続編制作決定")[0] == MAJOR_SEQUEL
-        assert detect_major_announcement("新动画宣布制作")[0] == MAJOR_WEAK
+        assert detect_major_announcement("新动画宣布制作")[0] == MAJOR_OFFICIAL
         # 普通稿：没有决定词，或没有形态词，都不算官宣
         assert detect_major_announcement("旧闻一条")[0] == MAJOR_NONE
         assert detect_major_announcement("ゲームアップデート実施")[0] == MAJOR_NONE
         assert detect_major_announcement("〇〇のグッズ発売")[0] == MAJOR_NONE
+
+    def test_operator_news_are_not_announcements(self):
+        """线上 286 条真实标题回归：商品 / 活动 / 放映 / 报道稿一律不算官宣。
+
+        这批全是 2026-10-22 线上实测被误判的原文标题（Aniplex 官方 PR 的稿子几乎都带
+        「TVアニメ」「劇場アニメ」前缀，用「裸形态词 × 决定词」判定会全线命中）。
+        """
+        from scripts.news_classify import MAJOR_NONE, detect_major_announcement
+
+        for title in (
+            "TVアニメ「マジカル★エクスプローラー」 Blu-ray全4巻が発売決定！",
+            "TVアニメ「バーテックスフォース」Blu-ray&DVDシリーズ発売決定！",
+            "アニメ「青春ブタ野郎」シリーズTVer、ABEMAでの配信決定！",
+            "TVアニメ「マッシュル」、10月4日よりBS11にて再放送決定！",
+            "TVアニメ「妖狐×僕SS」15周年企画始動！",
+            "アニメまんが聖地EXPO2026にてステージ参加決定！",
+            "TVアニメ『BLEACH』完結記念！歴代OP＆EDリスニングパーティー 開催決定！",
+            "アニメ『SAO』POP UP STOREが新宿マルイにて開催決定",
+            "劇場アニメーション『魔法使いの夜』最終予告公開！",
+            "マチアソビVol.31にて劇場アニメーション「魔法使いの夜」の企画が展開！",
+            "ゲーム「放置少女」×アニメ「生徒会にも穴はある！」コラボ決定！",
+            "「ガンダム」旧作アニメのリメイクの定義【藤津亮太のアニメの門V】",
+            "第25回角川ビーンズ小説大賞の受賞結果が発表",
+            "サンリオ パーティランド」新TVCM発表会",
+            "「カルドセプト ビギンズ」，PC版の発売日が10月28日に決定",
+        ):
+            assert detect_major_announcement(title)[0] == MAJOR_NONE, title
+
+    def test_real_announcements_still_hit(self):
+        """同一批线上数据里真正的官宣不能被收紧掉（过拟合检查）。"""
+        from scripts.news_classify import detect_major_announcement, is_major_announcement
+
+        for title in (
+            "《胡桃同学是人造人》宣布2027年TV动画化",
+            "《加奈子的幸福杀手生活》2027年4月TV动画化",
+            "续篇来袭！《魔都精兵的奴隶》动画第三季制作确定",
+            "《晨曦公主》续作动画由PIERROT FILMS制作",
+            "机动战士高达最新动画官宣定档 2027年4月播出",
+            "劇場版『ホシ』2027年公開、特報映像公開",
+            "『ホシ』第3期の制作が決定、2027年放送",  # 含「放送」但是正经续作官宣
+        ):
+            assert is_major_announcement(title), title
 
     def test_major_is_admitted_when_quota_exhausted(self, factory):
         """配额跑满（quota=0）时仍收官宣，普通稿一条不进。"""

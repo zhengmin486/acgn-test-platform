@@ -14,7 +14,8 @@ scripts/news_classify 的同一套规则把历史行重算一遍，让旧资讯�
 
 用法（默认预览，--apply 才写库）：
     python scripts/backfill_article_classification.py
-    python scripts/backfill_article_classification.py --apply
+    python scripts/backfill_article_classification.py --limit 10 --apply   # 先小批量试跑
+    python scripts/backfill_article_classification.py --apply              # 全量
 """
 
 from __future__ import annotations
@@ -36,6 +37,8 @@ from scripts import news_classify  # noqa: E402
 
 # 官方宣发源（旧单源导入器写入的 ANIPLEX NEWS BOX）。
 PR_SOURCES = {"ANIPLEX NEWS BOX"}
+
+DETAILS_MAX = 20  # 明细最多打印多少条（小批量试跑时够看，全量时不刷屏）
 
 
 def _default_region(source: str) -> str:
@@ -79,13 +82,18 @@ def classify_row(article: Article) -> dict:
     }
 
 
-def run(database_url: str, *, apply: bool) -> dict:
+def run(database_url: str, *, apply: bool, limit: int = 0) -> dict:
+    """重算全部资讯；``limit > 0`` 时最多处理这么多条**需变更**的记录（从小到大按 id）。
+
+    limit 按「需变更条数」算而不是「扫描条数」：早期稿子（2024 年的 Aniplex PR）几乎
+    不会命中官宣词表，按扫描条数截断等于看不到任何变化——先小批量试跑时那样毫无意义。
+    """
     engine = build_engine(database_url, busy_timeout=60.0)
     factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
-    stats = {"total": 0, "changed": 0, "adult": 0, "major": 0}
+    stats: dict = {"total": 0, "changed": 0, "adult": 0, "major": 0, "details": []}
     db = factory()
     try:
-        rows = list(db.scalars(select(Article)))
+        rows = list(db.scalars(select(Article).order_by(Article.id)))
         stats["total"] = len(rows)
         for article in rows:
             info = classify_row(article)
@@ -100,7 +108,18 @@ def run(database_url: str, *, apply: bool) -> dict:
             }
             if not diff:
                 continue
+            if limit and stats["changed"] >= limit:
+                stats["truncated"] = True
+                break
             stats["changed"] += 1
+            stats["details"].append(
+                {
+                    "id": article.id,
+                    "title": article.title,
+                    "old": {key: getattr(article, key) for key in diff},
+                    "new": diff,
+                }
+            )
             if apply:
                 for key, value in diff.items():
                     setattr(article, key, value)
@@ -112,17 +131,33 @@ def run(database_url: str, *, apply: bool) -> dict:
     return stats
 
 
+def _describe_detail(item: dict) -> str:
+    """一条变更的紧凑描述：`priority_score 108→168，is_major False→True`。"""
+    parts = []
+    for key, new in item["new"].items():
+        old = item["old"][key]
+        parts.append(f"{key} {old!r}→{new!r}")
+    return f"#{item['id']} {item['title'][:40]}｜" + "，".join(parts)
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="回填既有资讯的分类与优先级（默认预览）")
     parser.add_argument("--apply", action="store_true", help="正式写库")
+    parser.add_argument(
+        "--limit", type=int, default=0, metavar="N",
+        help="最多处理 N 条需变更的记录（0=全量，先小批量试跑用）",
+    )
     parser.add_argument("--database-url", default=settings.database_url)
     args = parser.parse_args(argv)
-    stats = run(args.database_url, apply=args.apply)
+    stats = run(args.database_url, apply=args.apply, limit=args.limit)
     mode = "已写入" if args.apply else "预览（未写入）"
     print(
-        f"{mode}：共 {stats['total']} 条资讯，需更新 {stats['changed']} 条，"
-        f"其中成人向 {stats['adult']} 条、重大官宣 {stats['major']} 条"
+        f"{mode}：共 {stats['total']} 条资讯，需更新 {stats['changed']} 条"
+        + ("（已达 --limit 上限，未扫完）" if stats.get("truncated") else "")
+        + f"，其中成人向 {stats['adult']} 条、重大官宣 {stats['major']} 条"
     )
+    for item in stats["details"][:DETAILS_MAX]:
+        print("  " + _describe_detail(item))
     return 0
 
 
