@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app import crud, media
 from app.auth import require_admin_api
+from app.config import settings
 from app.database import get_db
 
 # 复用的依赖注解：模块级定义一次，各端点签名直接引用（FastAPI 推荐写法）。
@@ -37,7 +38,9 @@ def list_contents(
     tags: str | None = Query(default=None, max_length=200),
     year: int | None = Query(default=None, alias="year", ge=1900, le=2100),
     page: int | None = Query(default=None, ge=1),
-    page_size: int | None = Query(default=None, ge=1, le=500),
+    page_size: int | None = Query(
+        default=None, ge=1, le=settings.api_contents_max_page_size
+    ),
     all_rows: bool = Query(default=False, alias="all"),
 ) -> dict:
     """返回内容列表；可按 ACGN 类型、标签与年份筛选（三者可叠加）。
@@ -128,7 +131,7 @@ def search_contents(
     q: str = Query(default=""),
     content_type: str | None = Query(default=None, alias="type", max_length=20),
     page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=20, ge=1, le=100),
+    page_size: int = Query(default=20, ge=1, le=settings.api_search_max_page_size),
 ) -> dict:
     """按标题/简介模糊搜索（不区分大小写），可叠加类型筛选与分页。
 
@@ -174,7 +177,7 @@ def search_contents(
 def list_tags(
     db: DbSession,
     content_type: str | None = Query(default=None, alias="type", max_length=20),
-    limit: int = Query(default=500, ge=1, le=2000),
+    limit: int = Query(default=500, ge=1, le=settings.api_tags_max_limit),
 ) -> dict:
     """标签全集（名称 + 关联作品数），按作品数从多到少。
 
@@ -219,24 +222,35 @@ WEEKDAY_NAMES = {1: "周一", 2: "周二", 3: "周三", 4: "周四", 5: "周五"
 @router.get("/schedule")
 def list_schedule(
     db: DbSession,
-    season: str | None = Query(default=None, max_length=6),
+    season: str | None = Query(default=None, max_length=20),
+    category: str | None = Query(default=None, max_length=20),
     q: str | None = Query(default=None, max_length=100),
     weekday: int | None = Query(default=None),
     page: int = Query(default=1, ge=1),
-    page_size: int = Query(default=20, ge=1, le=100),
+    page_size: int = Query(default=20, ge=1, le=settings.api_schedule_max_page_size),
 ) -> dict:
-    """分页查询新番档期作品；可按档期、星期（1-7）、关键词筛选。
+    """分页查询新番档期作品；可按档期、分类、星期（1-7）、关键词筛选。
 
     不传 season 时返回全部档期数据；仅读取已同步数据，不实时抓取外部网站。
+    category 为特殊档期分类码（unreleased / ova_sp / cn_movie），与 season
+    二选一：同时给出时以 category 为准。
     """
     if weekday is not None and weekday not in WEEKDAY_NAMES:
         raise HTTPException(
             status_code=400, detail="星期不合法，可选值 1-7（1=周一 … 7=周日）"
         )
+    category = (category or "").strip() or None
+    if category and category not in crud.SCHEDULE_CATEGORY_LABELS:
+        raise HTTPException(
+            status_code=400,
+            detail="分类不合法，可选值："
+            + " / ".join(crud.SCHEDULE_CATEGORY_LABELS),
+        )
     keyword = (q or "").strip() or None
     total, items = crud.list_schedules(
         db,
         season=season,
+        category=category,
         keyword=keyword,
         weekday=weekday,
         page=page,
@@ -244,6 +258,7 @@ def list_schedule(
     )
     return {
         "season": season,
+        "category": category,
         "keyword": keyword,
         "weekday": weekday,
         "total": total,
@@ -256,15 +271,28 @@ def list_schedule(
 
 @router.get("/schedule/seasons")
 def list_schedule_seasons(db: DbSession) -> dict:
-    """已同步的档期列表（含作品数与最近同步时间），按档期新到旧排序。"""
+    """已同步的档期列表（含作品数与最近同步时间），按档期新到旧排序。
+
+    只含季度档期；特殊分类见 /schedule/categories。
+    """
     seasons = crud.list_schedule_seasons(db)
     return {"total": len(seasons), "seasons": seasons}
+
+
+@router.get("/schedule/categories")
+def list_schedule_categories(db: DbSession) -> dict:
+    """特殊档期分类列表（固定三项：未上线新番/剧场版ova与特别篇/大陆引进剧场版）。
+
+    含各自已同步作品数；未同步过的分类 count 为 0。
+    """
+    categories = crud.list_schedule_categories(db)
+    return {"total": len(categories), "categories": categories}
 
 
 @router.get("/schedule/runs", dependencies=[Depends(require_admin_api)])
 def list_schedule_runs(
     db: DbSession,
-    limit: int = Query(default=50, ge=1, le=200),
+    limit: int = Query(default=50, ge=1, le=settings.api_sync_runs_max_limit),
 ) -> dict:
     """只读查询同步运行记录（最新在前）；dry-run 与 apply 记录同表区分。
 

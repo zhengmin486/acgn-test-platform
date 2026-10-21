@@ -89,6 +89,17 @@ ATOM_NS = "{http://www.w3.org/2005/Atom}"
 
 # 档期页链接形如 /202610/（2026 年 10 月新番表）；月份限定 01-12。
 SEASON_PATH_RE = re.compile(r"/(20\d{2})(0[1-9]|1[0-2])(?:/|$)")
+
+# 特殊档期分类：源站 Atom 条目标题/链接 → 本站分类码与展示名。
+# 站点原文（新番卫星观测站 / Movie-OVA-SP / 内地上映动画电影）只在抓取时用作
+# 匹配键，入库即改写为本站点名；展示名与 app.crud.SCHEDULE_CATEGORY_LABELS 同源。
+# - path：Atom 条目链接里的路径片段（最稳，标题常被站点改写），命中即认定；
+# - title：标题包含的子串，path 缺失或拿不到链接时兜底（如内地上映动画电影）。
+SPECIAL_CATEGORIES = (
+    {"code": "unreleased", "label": "未上线新番", "path": "/new/"},
+    {"code": "ova_sp", "label": "剧场版ova与特别篇", "path": "/sp/"},
+    {"code": "cn_movie", "label": "大陆引进剧场版", "title": "内地上映动画电影"},
+)
 # 档期页详情条目以 HTML 注释 <!--#A01--> 等分块（站点模板约定）。
 ENTRY_MARKER_RE = re.compile(r"<!--\s*#\s*[A-Za-z]+\d+\s*-->")
 TITLE_MAIN_ANCHOR_RE = re.compile(r"class=[\"']title_main(?:_r\d*)?[\"']")
@@ -330,6 +341,34 @@ def parse_atom(atom_text: str) -> list[SeasonInfo]:
         key=lambda s: (int(s.code[:4]), int(s.code[4:])),
         reverse=True,
     )
+
+
+def parse_special_categories(atom_text: str) -> list[SeasonInfo]:
+    """从 Atom 中发现三个特殊档期分类：未上线新番 / 剧场版ova与特别篇 / 大陆引进剧场版。
+
+    匹配规则（见 SPECIAL_CATEGORIES）：优先按条目链接路径片段（/new/、/sp/），
+    拿不到链接或路径未知时按标题子串兜底（内地上映动画电影）。命中后把站点原文
+    改写为本站展示名作为 title；返回顺序与 SPECIAL_CATEGORIES 一致，未出现的分类略去。
+    """
+    try:
+        root = ET.fromstring(atom_text)
+    except ET.ParseError as exc:
+        raise YucFetchError(f"Atom XML 解析失败：{exc}") from exc
+
+    found: dict[str, SeasonInfo] = {}
+    for entry in root.findall(f"{ATOM_NS}entry"):
+        link_el = entry.find(f"{ATOM_NS}link")
+        link = (link_el.get("href") or "").strip() if link_el is not None else ""
+        title_el = entry.find(f"{ATOM_NS}title")
+        title = unescape(title_el.text or "").strip() if title_el is not None else ""
+        for spec in SPECIAL_CATEGORIES:
+            if spec.get("path") and spec["path"] in link:
+                found[spec["code"]] = SeasonInfo(code=spec["code"], title=spec["label"], url=link)
+                break
+            if spec.get("title") and spec["title"] in title:
+                found[spec["code"]] = SeasonInfo(code=spec["code"], title=spec["label"], url=link)
+                break
+    return [found[c["code"]] for c in SPECIAL_CATEGORIES if c["code"] in found]
 
 
 def pick_season(seasons: list[SeasonInfo], season_code: str | None) -> SeasonInfo:
@@ -887,6 +926,7 @@ def run_sync(
     sleep=time.sleep,
     season_url: str | None = None,
     season_title: str = "",
+    category: str | None = None,
 ) -> SyncSummary:
     """同步一个档期：Atom 发现 -> 抓取档期页 -> 解析 -> 去重 -> 写库 -> 汇总。
 
@@ -1073,6 +1113,7 @@ def run_sync(
                 "work_type": limit_text(entry.work_type, 50),
                 "work_tags": limit_text(entry.work_tags, 200),
                 "source_url": season.url,
+                "category": category,
             }
 
             if not apply:
@@ -1122,6 +1163,62 @@ def run_sync(
         return summary
     finally:
         db.close()
+
+
+# ---------- 特殊档期分类同步 ----------
+
+# 特殊分类（未上线新番 / 剧场版ova与特别篇 / 大陆引进剧场版）不在季度档期发现
+# 路径里：它们的 season_code 就是分类码，必须先从 Atom 定位页面地址再抓。
+SPECIAL_CATEGORY_CODES = tuple(c["code"] for c in SPECIAL_CATEGORIES)
+
+
+def find_special_category(atom_text: str, code: str) -> SeasonInfo:
+    """从 Atom 中定位某个特殊分类的页面地址与展示名。
+
+    找不到时抛 SeasonNotFoundError（带上已发现的分类列表，便于回显原因）。
+    """
+    found = {s.code: s for s in parse_special_categories(atom_text)}
+    info = found.get(code)
+    if info is None:
+        raise SeasonNotFoundError(code, list(found.values()))
+    return info
+
+
+def run_sync_special_category(
+    code: str,
+    *,
+    session_factory,
+    apply: bool = False,
+    base_url: str = YUC_BASE_URL,
+    fetch=None,
+    **kwargs,
+) -> SyncSummary:
+    """同步一个特殊档期分类：读 Atom 定位分类页 -> 抓页 -> 解析 -> 带 category 写库。
+
+    与 run_sync 的区别只在于「目标页面从哪来」：季度档期由 Atom 的 /YYYYMM/
+    路径发现，特殊分类由分类码定位（分类码同时作为 season_code 与 category 落库）。
+    """
+    if fetch is None:
+        fetch = _make_fetcher(
+            opener=build_opener(kwargs.pop("proxy", None), resolve_insecure(kwargs.pop("insecure", None))),
+            timeout=kwargs.pop("timeout", DEFAULT_TIMEOUT),
+            retries=kwargs.pop("retries", DEFAULT_RETRIES),
+            user_agent=kwargs.pop("user_agent", DEFAULT_USER_AGENT),
+            sleep=kwargs.pop("sleep", time.sleep),
+        )
+    atom_text = fetch(f"{base_url.rstrip('/')}/atom.xml")
+    info = find_special_category(atom_text, code)
+    return run_sync(
+        code,
+        session_factory=session_factory,
+        apply=apply,
+        base_url=base_url,
+        fetch=fetch,
+        season_url=info.url,
+        season_title=info.title,
+        category=code,
+        **kwargs,
+    )
 
 
 # ---------- 历史档期回填 ----------
@@ -1295,6 +1392,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="跳过 TLS 证书校验（源站证书过期又必须取数时临时使用；也可设 YUC_INSECURE=1）",
     )
     parser.add_argument(
+        "--category",
+        default=None,
+        metavar="CODE",
+        help=(
+            "特殊档期分类码（unreleased / ova_sp / cn_movie）；与 --season/--seasons/"
+            "--backfill-since 互斥，按 Atom 改写后的本站点名抓取对应分类页"
+        ),
+    )
+    parser.add_argument(
+        "--special",
+        action="store_true",
+        help=(
+            "同步全部三个特殊档期分类（未上线新番 / 剧场版ova与特别篇 / 大陆引进剧场版）；"
+            "与 --season/--seasons/--backfill-since 互斥"
+        ),
+    )
+    parser.add_argument(
         "--list-seasons",
         action="store_true",
         help="只列出 Atom 中发现的全部可用档期，不做同步",
@@ -1387,6 +1501,21 @@ def main(argv=None) -> int:
         print("错误：--backfill-since 不能与 --season / --seasons 同时使用")
         return 2
 
+    special_codes: list[str] = []
+    if args.special:
+        special_codes = [c["code"] for c in SPECIAL_CATEGORIES]
+    elif args.category:
+        if args.category not in {c["code"] for c in SPECIAL_CATEGORIES}:
+            print(
+                "错误：未知的特殊档期分类码："
+                f"{args.category!r}（可选：unreleased / ova_sp / cn_movie）"
+            )
+            return 2
+        special_codes = [args.category]
+    if special_codes and (args.season or args.seasons or args.backfill_since):
+        print("错误：--category / --special 不能与 --season / --seasons / --backfill-since 同时使用")
+        return 2
+
     fetch = _make_fetcher(
         opener=build_opener(proxy, args.insecure), timeout=args.timeout, retries=args.retries,
         user_agent=args.user_agent,
@@ -1421,7 +1550,23 @@ def main(argv=None) -> int:
     if args.list_seasons:
         print_seasons(seasons)
         return 0
-    if not backfill_codes and not seasons:
+
+    special_map: dict[str, SeasonInfo] = {}
+    if special_codes:
+        try:
+            special_map = {s.code: s for s in parse_special_categories(fetch(ATOM_URL))}
+        except YucFetchError as exc:
+            print(f"错误：{exc}")
+            return 1
+        missing = [c for c in special_codes if c not in special_map]
+        if missing:
+            print(f"错误：Atom 中未发现特殊档期分类：{', '.join(missing)}")
+            return 1
+        print(
+            f"同步 {len(special_codes)} 个特殊档期分类："
+            f"{'、'.join(special_map[c].title for c in special_codes)}"
+        )
+    if not backfill_codes and not seasons and not special_codes:
         print("错误：Atom 中未发现任何档期页面，无法同步")
         return 1
 
@@ -1458,6 +1603,41 @@ def main(argv=None) -> int:
                 user_agent=args.user_agent,
                 fetch=fetch,
             )
+        elif special_codes:
+            for code in special_codes:
+                info = special_map[code]
+                try:
+                    summaries.append(
+                        run_sync(
+                            code,
+                            session_factory=session_factory,
+                            apply=args.apply,
+                            proxy=proxy,
+                            insecure=args.insecure,
+                            timeout=args.timeout,
+                            retries=args.retries,
+                            delay=args.delay,
+                            user_agent=args.user_agent,
+                            fetch=fetch,
+                            season_url=info.url,
+                            season_title=info.title,
+                            category=code,
+                        )
+                    )
+                except (YucFetchError, SeasonNotFoundError) as exc:
+                    failed = SyncSummary(
+                        mode="apply" if args.apply else "dry-run",
+                        season_code=code,
+                        season_title=info.title,
+                        season_url=info.url,
+                    )
+                    failed.failed = 1
+                    failed.outcomes.append(
+                        EntryOutcome(title="", status="failed", reason=str(exc))
+                    )
+                    summaries.append(failed)
+                if args.delay > 0 and code != special_codes[-1]:
+                    time.sleep(args.delay)
         else:
             try:
                 summaries = [

@@ -46,6 +46,7 @@ ATOM_XML = """<?xml version="1.0" encoding="utf-8"?>
   <entry><title>2026年7月新番表</title><link href="http://yuc.wiki/202607/"/><updated>2026-09-01T00:00:00.000Z</updated></entry>
   <entry><title>2026年10月新番表</title><link href="http://yuc.wiki/202610/"/><updated>2026-08-01T00:00:00.000Z</updated></entry>
   <entry><title>Movie/OVA/OAD/SP etc.</title><link href="http://yuc.wiki/sp/"/><updated>2026-09-20T18:50:24.545Z</updated></entry>
+  <entry><title>内地上映动画电影</title><link href="http://yuc.wiki/cnmovie/"/><updated>2026-09-21T10:00:00.000Z</updated></entry>
   <entry><title>2025年1月新番表</title><link href="http://yuc.wiki/202501/"/><updated>2026-10-12T00:00:00.000Z</updated></entry>
 </feed>"""
 
@@ -247,6 +248,85 @@ class TestAtomDiscovery:
     def test_invalid_atom_raises_clear_error(self):
         with pytest.raises(sync_yuc.YucFetchError, match="Atom"):
             sync_yuc.parse_atom("<this is not xml")
+
+
+class TestSpecialCategories:
+    """特殊档期分类（未上线新番 / 剧场版ova与特别篇 / 大陆引进剧场版）的发现与改写。"""
+
+    def test_discovers_three_special_categories_with_relabeled_titles(self):
+        """从 Atom 认出三个特殊分类，并把站点原文改写为本站点名。"""
+        specials = sync_yuc.parse_special_categories(ATOM_XML)
+        by_code = {s.code: s for s in specials}
+        assert set(by_code) == {"unreleased", "ova_sp", "cn_movie"}
+        # 站点原文（新番卫星观测站 / Movie-OVA-SP / 内地上映动画电影）已改写
+        assert by_code["unreleased"].title == "未上线新番"
+        assert by_code["unreleased"].url == "http://yuc.wiki/new/"
+        assert by_code["ova_sp"].title == "剧场版ova与特别篇"
+        assert by_code["ova_sp"].url == "http://yuc.wiki/sp/"
+        assert by_code["cn_movie"].title == "大陆引进剧场版"
+        assert by_code["cn_movie"].url == "http://yuc.wiki/cnmovie/"
+
+    def test_parse_atom_still_only_seasons(self):
+        """parse_atom 仍只返回季度档期，特殊分类不混进季度发现结果。"""
+        seasons = sync_yuc.parse_atom(ATOM_XML)
+        assert [s.code for s in seasons] == ["202610", "202607", "202501"]
+        codes = {s.code for s in seasons}
+        assert "new" not in codes and "sp" not in codes and "cnmovie" not in codes
+
+    def test_special_category_by_path_and_title(self):
+        """路径片段（/new/、/sp/）优先；拿不到路径时按标题子串兜底。"""
+        atom = (
+            '<feed xmlns="http://www.w3.org/2005/Atom">'
+            '<entry><title>新番卫星观测站</title><link href="http://yuc.wiki/new/"/></entry>'
+            '<entry><title>Movie/OVA/OAD/SP etc.</title><link href="http://yuc.wiki/sp/"/></entry>'
+            '<entry><title>内地上映动画电影</title><link href="http://yuc.wiki/cnmovie/"/></entry>'
+            "</feed>"
+        )
+        specials = {s.code: s for s in sync_yuc.parse_special_categories(atom)}
+        assert set(specials) == {"unreleased", "ova_sp", "cn_movie"}
+
+    def test_find_special_category_locates_page(self):
+        """find_special_category：按分类码定位页面地址与本站点名。"""
+        info = sync_yuc.find_special_category(ATOM_XML, "cn_movie")
+        assert info.url == "http://yuc.wiki/cnmovie/"
+        assert info.title == "大陆引进剧场版"
+
+    def test_find_special_category_raises_when_missing(self):
+        """分类码不存在时抛 SeasonNotFoundError（页面据此回显原因）。"""
+        with pytest.raises(sync_yuc.SeasonNotFoundError):
+            sync_yuc.find_special_category(ATOM_XML, "not_a_category")
+
+    def test_run_sync_special_category_stores_category(self, tmp_path):
+        """run_sync_special_category：先读 Atom 定位分类页，再带 category 写库。"""
+        factory = make_db(tmp_path)
+        requested: list[str] = []
+
+        def fake_fetch(url):
+            requested.append(url)
+            if url.endswith("/atom.xml"):
+                return ATOM_XML
+            return SEASON_HTML
+
+        summary = sync_yuc.run_sync_special_category(
+            "unreleased",
+            session_factory=factory,
+            apply=True,
+            fetch=fake_fetch,
+        )
+        assert summary.added >= 1
+        # 先读 Atom，再抓分类页
+        assert requested[0].endswith("/atom.xml")
+        assert "http://yuc.wiki/new/" in requested
+        # 落库带 category，且季度档期列表不含该分类
+        db = factory()
+        try:
+            rows = db.query(AnimeSchedule).all()
+            assert rows and all(row.category == "unreleased" for row in rows)
+            assert all(row.season_code == "unreleased" for row in rows)
+            seasons = crud.list_schedule_seasons(db)
+            assert seasons == []
+        finally:
+            db.close()
 
 
 # ---------- 字段清洗与映射 ----------
@@ -655,6 +735,50 @@ class TestRunSync:
         finally:
             db.close()
 
+    def test_apply_special_category_sync_stores_category(self, tmp_path):
+        """特殊分类同步：season_code / category 都写为分类码，站点原文改写为本站点名。
+
+        用 build_entry 拼一份与季度页同结构的页面，验证解析复用与分类落库。
+        """
+        factory = make_db(tmp_path)
+        special_url = "http://yuc.wiki/new/"
+        special_page = (
+            PAGE_HEADER
+            + build_entry(1, cn="未上线甲", jp="UPCOMING A", broadcast="10/3周六深夜")
+            + build_entry(2, cn="未上线乙", jp="UPCOMING B", broadcast="10/5深夜")
+            + "</body></html>"
+        )
+        fetch = make_stub_fetch({ATOM_URL: ATOM_XML, special_url: special_page})
+        summary = sync_yuc.run_sync(
+            "unreleased",
+            session_factory=factory,
+            apply=True,
+            fetch=fetch,
+            season_url=special_url,
+            season_title="未上线新番",
+            category="unreleased",
+        )
+        assert summary.season_code == "unreleased"
+        assert summary.added == 2
+
+        db = factory()
+        try:
+            rows = db.query(AnimeSchedule).all()
+            assert len(rows) == 2
+            for row in rows:
+                assert row.season_code == "unreleased"
+                assert row.category == "unreleased"
+                assert row.source_url == special_url
+
+            # 季度档期列表只收 YYYYMM，不含特殊分类
+            season_list = crud.list_schedule_seasons(db)
+            assert season_list == []
+            # 分类列表给出三项，未上线新番计数为 2，其余为 0
+            cat_list = {c["code"]: c["count"] for c in crud.list_schedule_categories(db)}
+            assert cat_list == {"unreleased": 2, "ova_sp": 0, "cn_movie": 0}
+        finally:
+            db.close()
+
     def test_source_change_updates_and_new_entry_added(self, tmp_path):
         """源数据变化时更新对应记录；新作品作为新增处理，其余不变。"""
         factory = make_db(tmp_path)
@@ -934,6 +1058,58 @@ class TestScheduleApi:
         assert body["seasons"][0]["count"] == 2
         assert body["seasons"][0]["last_synced_at"]
 
+    def test_categories_endpoint(self, seeded):
+        """特殊分类接口：固定三项 + 各自作品数；未同步的分类 count=0。"""
+        body = seeded.get("/api/schedule/categories").json()
+        assert body["total"] == 3
+        assert [c["code"] for c in body["categories"]] == [
+            "unreleased", "ova_sp", "cn_movie",
+        ]
+        assert [c["label"] for c in body["categories"]] == [
+            "未上线新番", "剧场版ova与特别篇", "大陆引进剧场版",
+        ]
+        assert all(c["count"] == 0 for c in body["categories"])
+
+    def test_schedule_api_category_filter(self, tmp_path):
+        """按 category 过滤：只返回该分类作品，且与季度档期互不串味。"""
+        factory = make_db(tmp_path)
+        create_accounts(factory, admin=True, user=False)
+        db = factory()
+        try:
+            upsert_sample(db, season="202610", source_key="季度作品", title_main="季度作品",
+                          title_cn="季度作品", title_jp=None)
+            upsert_sample(db, season="unreleased", source_key="未上线作品", title_main="未上线作品",
+                          title_cn="未上线作品", title_jp=None, category="unreleased")
+        finally:
+            db.close()
+
+        def override_get_db():
+            session = factory()
+            try:
+                yield session
+            finally:
+                session.close()
+
+        client = TestClient(app)
+        app.dependency_overrides[get_db] = override_get_db
+        login_as_admin(client)
+        try:
+            resp = client.get("/api/schedule", params={"category": "unreleased"})
+            assert resp.status_code == 200
+            body = resp.json()
+            assert body["total"] == 1
+            assert body["items"][0]["title_main"] == "未上线作品"
+            assert body["items"][0]["category"] == "unreleased"
+
+            # 非法分类码 400（不静默返回全部）
+            bad = client.get("/api/schedule", params={"category": "不存在的分类"})
+            assert bad.status_code == 400
+
+            # 分类视图不串入季度档期作品
+            assert client.get("/api/schedule", params={"season": "202610"}).json()["total"] == 1
+        finally:
+            app.dependency_overrides.pop(get_db, None)
+
     def test_detail_and_404(self, seeded):
         listing = seeded.get("/api/schedule", params={"season": "202610"}).json()
         target = listing["items"][0]
@@ -1126,6 +1302,83 @@ class TestSchedulePages:
         assert "dry-run" in resp.text
         assert "badge" in resp.text  # 运行模式以徽标展示
 
+    def test_schedule_page_category_view(self, tmp_path):
+        """特殊分类视图：只显示该分类作品，不混季度档期作品；季度 tab 也不含分类作品。"""
+        factory = make_db(tmp_path)
+        create_accounts(factory, admin=True, user=False)
+        db = factory()
+        try:
+            # 一条季度档期 + 三条特殊分类作品
+            upsert_sample(db, season="202610", source_key="季度作品", title_main="季度作品",
+                          title_cn="季度作品", title_jp=None)
+            for code, title in (
+                ("unreleased", "未上线作品甲"),
+                ("ova_sp", "特篇作品乙"),
+                ("cn_movie", "引进剧场丙"),
+            ):
+                upsert_sample(db, season=code, source_key=title, title_main=title,
+                              title_cn=title, title_jp=None, category=code)
+        finally:
+            db.close()
+
+        def override_get_db():
+            session = factory()
+            try:
+                yield session
+            finally:
+                session.close()
+
+        client = TestClient(app)
+        app.dependency_overrides[get_db] = override_get_db
+        login_as_admin(client)
+        try:
+            # 1) 默认（季度视图）：出现季度作品，不出现任何特殊分类作品
+            home = client.get("/schedule")
+            assert home.status_code == 200
+            assert "季度作品" in home.text
+            assert "未上线作品甲" not in home.text
+            assert "特篇作品乙" not in home.text
+            assert "引进剧场丙" not in home.text
+            # 三个分类 tab 都在，且带计数
+            for label in ("未上线新番", "剧场版ova与特别篇", "大陆引进剧场版"):
+                assert label in home.text
+            assert "分类 未上线新番" not in home.text  # 默认不是分类视图
+
+            # 2) 分类视图：只显示该分类作品
+            resp = client.get("/schedule", params={"category": "unreleased"})
+            assert resp.status_code == 200
+            assert "分类 未上线新番" in resp.text
+            assert "未上线作品甲" in resp.text
+            assert "特篇作品乙" not in resp.text
+            assert "引进剧场丙" not in resp.text
+            assert "季度作品" not in resp.text
+            # 分类视图下隐藏季度筛选框，改为隐藏的 category 维度
+            assert 'name="category" value="unreleased"' in resp.text
+
+            # 3) 其余两个分类同理
+            for code, title in (("ova_sp", "特篇作品乙"), ("cn_movie", "引进剧场丙")):
+                other = client.get("/schedule", params={"category": code})
+                assert other.status_code == 200
+                assert title in other.text
+                assert "未上线作品甲" not in other.text
+                assert "季度作品" not in other.text
+
+            # 4) 分类视图下关键词筛选仍然生效
+            hit = client.get("/schedule", params={"category": "unreleased", "q": "甲"})
+            assert hit.status_code == 200
+            assert "未上线作品甲" in hit.text
+            miss = client.get("/schedule", params={"category": "unreleased", "q": "乙"})
+            assert miss.status_code == 200
+            assert "未上线作品甲" not in miss.text
+
+            # 5) 非法 category 回落到季度视图（不 500、不空页）
+            bad = client.get("/schedule", params={"category": "不存在的分类"})
+            assert bad.status_code == 200
+            assert "季度作品" in bad.text
+            assert "分类 " not in bad.text
+        finally:
+            app.dependency_overrides.pop(get_db, None)
+
 
 # ---------- 模型注册与约束 ----------
 
@@ -1150,9 +1403,9 @@ class TestScheduleModels:
             item = record.as_dict()
             assert item["platforms"] == [{"name": "bilibili", "url": "https://www.bilibili.com/"}]
             assert set(item) == {
-                "id", "season_code", "source_key", "title_main", "title_cn", "title_jp",
-                "weekday", "broadcast_time", "broadcast_note", "work_type", "work_tags",
-                "image_url", "platforms", "source_url", "last_synced_at",
+                "id", "season_code", "source_key", "category", "title_main", "title_cn",
+                "title_jp", "weekday", "broadcast_time", "broadcast_note", "work_type",
+                "work_tags", "image_url", "platforms", "source_url", "last_synced_at",
             }
         finally:
             db.close()
@@ -1221,6 +1474,50 @@ def test_build_opener_insecure_skips_certificate_checks():
 def test_cli_rejects_season_and_seasons_together():
     """--season 与 --seasons 语义互斥，同时给是参数错误。"""
     assert sync_yuc.main(["--season", "202610", "--seasons", "2"]) == 2
+
+
+def test_cli_rejects_category_with_season():
+    """--category 与 --season 互斥。"""
+    assert sync_yuc.main(["--category", "unreleased", "--season", "202610"]) == 2
+
+
+def test_cli_rejects_unknown_category_code():
+    """未知分类码直接报参数错误，不触网。"""
+    assert sync_yuc.main(["--category", "not_a_category"]) == 2
+
+
+def test_cli_special_sync_does_not_crash(monkeypatch, tmp_path):
+    """CLI 走特殊分类分支时不因限频变量名写错而崩（回归 2026-10-21）。
+
+    之前分支里用的是裸 delay（应为 args.delay），--special 会 NameError。
+    """
+    calls: list[str] = []
+
+    def fake_fetch(url):
+        calls.append(url)
+        if url.endswith("/atom.xml"):
+            return ATOM_XML
+        return SEASON_HTML
+
+    factory = make_db(tmp_path, name="cli.db")
+
+    class _StubEngine:
+        def dispose(self):
+            pass
+
+    monkeypatch.setattr(sync_yuc, "_make_fetcher", lambda **kwargs: fake_fetch)
+    monkeypatch.setattr(
+        sync_yuc, "build_session_factory", lambda url, busy_timeout=30.0: (factory, _StubEngine())
+    )
+    monkeypatch.setattr(sync_yuc.time, "sleep", lambda _s: None)
+
+    # 只验证「能跑通到同步阶段」：用 --category 单分类，避免跑三遍
+    exit_code = sync_yuc.main(
+        ["--category", "unreleased", "--database-url", f"sqlite:///{tmp_path / 'cli.db'}"]
+    )
+    assert exit_code == 0
+    assert any(url.endswith("/atom.xml") for url in calls)
+    assert "http://yuc.wiki/new/" in calls
 
 
 def test_resolve_insecure_prefers_flag_over_env():

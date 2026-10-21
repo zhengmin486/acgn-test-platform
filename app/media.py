@@ -345,6 +345,164 @@ def remove_cover_file(image_url: str | None) -> bool:
     return removed
 
 
+# ---------- 存储容量护栏 ----------
+
+
+def purge_stale_temp_files(max_age_seconds: int | None = None) -> int:
+    """清理原子写残留的 .tmp-* 临时文件，返回删除个数。
+
+    _atomic_write 正常路径要么改名为正式文件、要么异常自删；只有进程崩溃 /
+    断电会留下孤儿临时文件。这里按 mtime 判断：超过 media_temp_max_age_seconds
+    （默认 1 小时）的一律清掉。巡检封面目录（含 thumbs/full）与头像目录。
+    """
+    if max_age_seconds is None:
+        max_age_seconds = settings.media_temp_max_age_seconds
+    now = time.time()
+    removed = 0
+    for root in (cover_root(), avatar_root()):
+        for sub in (root, root / "thumbs", root / "full"):
+            try:
+                candidates = list(sub.glob(".tmp-*"))
+            except OSError:
+                continue
+            for path in candidates:
+                try:
+                    if not path.is_file():
+                        continue
+                    if now - path.stat().st_mtime > max_age_seconds:
+                        path.unlink()
+                        removed += 1
+                except OSError:
+                    continue  # 单个文件失败不中断整体清理
+    return removed
+
+
+def _tree_size(root: Path) -> int:
+    """目录总字节数（不存在按 0）。"""
+    total = 0
+    for sub in (root, root / "thumbs", root / "full"):
+        try:
+            for path in sub.iterdir():
+                try:
+                    if path.is_file():
+                        total += path.stat().st_size
+                except OSError:
+                    continue
+        except OSError:
+            continue
+    return total
+
+
+def _oldest_files(paths: list[Path]) -> list[Path]:
+    """按 mtime 从旧到新排序（清理顺序：先牺牲最旧的）。"""
+
+    def mtime(path: Path) -> float:
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    return sorted(paths, key=mtime)
+
+
+def _enforce_dir_cap(
+    root: Path,
+    *,
+    max_bytes: int,
+    referenced: set[str],
+    regenerable_subdirs: tuple[str, ...] = ("thumbs", "full"),
+) -> dict:
+    """单个目录的容量 enforcement：先删可再生文件，再删未引用文件。
+
+    返回统计：{total_before, total_after, removed_variants, removed_unreferenced}。
+    语义：
+    - 总量不超 max_bytes 时一个文件都不动；
+    - 超限先删 regenerable_subdirs 下的派生图（thumbs/full 都是按需可重建的
+      缓存，删了下次访问自动生成），从旧到新删到达标为止；
+    - 仍超限才删顶层文件里**未被引用**的（referenced 为文件名集合，由调用方
+      从库内反查传入），同样从旧到新。被引用的原图绝不动。
+    """
+    stats = {"total_before": 0, "total_after": 0, "removed_variants": 0,
+             "removed_unreferenced": 0}
+    total = _tree_size(root)
+    stats["total_before"] = total
+    if total <= max_bytes:
+        stats["total_after"] = total
+        return stats
+
+    # 第一轮：可再生派生图（缓存）从旧到新删
+    for sub in regenerable_subdirs:
+        subdir = root / sub
+        try:
+            candidates = [p for p in subdir.iterdir() if p.is_file()]
+        except OSError:
+            continue
+        for path in _oldest_files(candidates):
+            if _tree_size(root) <= max_bytes:
+                break
+            try:
+                path.unlink()
+                stats["removed_variants"] += 1
+            except OSError:
+                continue
+
+    # 第二轮：仍超限才删未被引用的顶层文件（原图），从旧到新
+    if _tree_size(root) > max_bytes:
+        try:
+            candidates = [p for p in root.iterdir() if p.is_file()]
+        except OSError:
+            candidates = []
+        for path in _oldest_files(candidates):
+            if _tree_size(root) <= max_bytes:
+                break
+            if path.name in referenced:
+                continue  # 库里还引用着的原图绝不动
+            try:
+                path.unlink()
+                stats["removed_unreferenced"] += 1
+            except OSError:
+                continue
+    stats["total_after"] = _tree_size(root)
+    return stats
+
+
+def enforce_storage_caps(referenced_covers: set[str], referenced_avatars: set[str]) -> dict:
+    """封面 / 头像两个上传目录的容量巡检（超出上限时按「可再生优先」清理）。
+
+    referenced_* 由调用方从数据库反查传入（crud.list_cover_reference_names /
+    crud.list_avatar_reference_names），保证「被引用的原图 / 头像绝不被清」。
+    顺带清理崩溃遗留的 .tmp-* 临时文件。纯文件系统操作，不做任何 DB 写。
+    """
+    return {
+        "purged_temp_files": purge_stale_temp_files(),
+        "covers": _enforce_dir_cap(
+            cover_root(),
+            max_bytes=settings.media_storage_max_bytes,
+            referenced=referenced_covers,
+        ),
+        "avatars": _enforce_dir_cap(
+            avatar_root(),
+            max_bytes=settings.avatar_storage_max_bytes,
+            referenced=referenced_avatars,
+            regenerable_subdirs=(),
+        ),
+    }
+
+
+# 节流：容量巡检要遍历目录，不能每次上传都跑；间隔见 config。
+_last_cap_check = 0.0
+
+
+def storage_cap_check_due() -> bool:
+    """距上次容量巡检是否已到节流间隔（到点即记账并返回 True）。"""
+    global _last_cap_check
+    now = time.monotonic()
+    if now - _last_cap_check < settings.media_storage_check_interval_seconds:
+        return False
+    _last_cap_check = now
+    return True
+
+
 # ---------- 封面按需下载 ----------
 
 # 远端封面下载的护栏：单张大小上限与超时。封面图本身只有几十到几百 KB，

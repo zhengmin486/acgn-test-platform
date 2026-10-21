@@ -361,6 +361,19 @@ class TestMatchTags:
         assert article_tags.match_tags(title="机甲", tag_names=[]) == []
         assert article_tags.match_tags(title="完全无关的文本", tag_names=["机甲"]) == []
 
+    def test_numeric_tags_ignored(self):
+        """纯数字标签不参与识别：'10' 会命中正文里的日期（10月/第10话），必须挡掉。
+
+        Tag 表里混进了 '10'、'01'、'201504' 这类历史遗留名，曾把 80 多篇资讯
+        全打上「10」这种毫无意义的标签。
+        """
+        names = article_tags.match_tags(
+            title="10月新番开播",
+            body="10月1日开播，第10话已上线",
+            tag_names=["10", "01", "0_", "新番"],
+        )
+        assert names == ["新番"]
+
     def test_vocabulary_dedup_and_blank(self):
         """词表重复项与空白项不重复计分。"""
         names = article_tags.match_tags(

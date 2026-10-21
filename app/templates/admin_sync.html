@@ -92,8 +92,11 @@
                             {% for s in season_suggestions %}
                             <option value="{{ s.season_code }}">{{ s.label }}</option>
                             {% endfor %}
+                            {% for c in special_categories %}
+                            <option value="{{ c.code }}">{{ c.label }}</option>
+                            {% endfor %}
                         </datalist>
-                        <div class="form-text">{{ spec.scope_help }}；建议里是本地已同步与前后三个月的档期，也可直接填任意 YYYYMM。</div>
+                        <div class="form-text">{{ spec.scope_help }}；建议里是本地已同步与前后三个月的档期，也可直接填任意 YYYYMM；特殊分类填 unreleased / ova_sp / cn_movie。</div>
                     </div>
                     {% else %}
                     <div class="row g-2 mb-3">

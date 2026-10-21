@@ -63,6 +63,10 @@ GAME_PAYLOAD = {
     "name": "Undertale",
     "summary": "一款不杀死任何怪物也可以通关的 RPG。",
     "rating": {"score": 9.4},
+    # 2026-10-21 收录口径：非 galge 游戏需选品端查过镜像关联、确认有动画/漫画
+    # 相关并打标（scripts.select_from_archive.apply_ingest_policy），本夹具模拟
+    # 「已确认相关」的形态。
+    "_site_related_ip": True,
 }
 
 
@@ -189,7 +193,9 @@ class TestMapSubject:
             (2, "TV", "anime"),
             (4, "PC", "game"),
             (1, 1001, "comic"),   # 归档：书籍区 1001=漫画
-            (1, 1002, "novel"),   # 归档：1002=小说 —— 类型仍是 novel，无文库信号先打「文学」标注
+            # (1, 1002, ...) 无文库信号的小说 = 文学，2026-10-21 起不收（见
+            # TestIngestPolicy20261021）；类型解析本身仍见 test_book_classify。
+            (1, 1002, None),
             (1, "漫画", "comic"),  # API 字符串 platform
             (1, "轻小说", "novel"),
             (1, 1003, None),      # 画集不收
@@ -201,9 +207,13 @@ class TestMapSubject:
 
         type=2→anime、4→game；type=1 书籍按 platform 拆分（1001=漫画、1002=小说）；
         type=6 是三次元真人剧（Archive README 写「6=漫画」是错的），不收录。
+        2026-10-21 收录口径：游戏须 galge 或带相关 IP 标记，小说须轻小说。
         """
         payload = make_payload(400, bgm_type)
         payload["platform"] = platform
+        if bgm_type == 4:
+            # 游戏走 galge 通道（tags 判定）；解析规则本身与本口径正交
+            payload["tags"] = [{"name": "GALGAME", "count": 10}]
 
         if expected_type is None:
             with pytest.raises(import_bangumi.SubjectMappingError):
@@ -494,6 +504,75 @@ class TestExtractBookTags:
         assert subject.book_kind == "light_novel"
         # 「轻小说」是载体词（归一后属噪音），文库标签补位
         assert subject.tags == ["科幻", "魔法", "電撃文庫"]
+
+
+class TestIngestPolicy20261021:
+    """收录口径（2026-10-21 用户定稿）：小说只收轻小说，游戏只收 galge / 相关 IP。
+
+    - classify_book 的语义不变（文学仍返回 ("novel", "literature")，存量打标
+      scripts/mark_book_kinds.py 依赖它），拦人在 map_subject 的入库闸口；
+    - 游戏的 galge 判定只读 tags（is_galge_payload，不出网）；「有动画/漫画
+      相关」由选品端查镜像后打 payload["_site_related_ip"]=True。
+    """
+
+    @staticmethod
+    def _novel_payload() -> dict:
+        payload = make_payload(510, 1)
+        payload["platform"] = 1002
+        payload["infobox"] = [{"key": "出版社", "value": "新潮社"}]
+        return payload
+
+    @staticmethod
+    def _game_payload(**extra) -> dict:
+        payload = make_payload(520, 4)
+        payload.update(extra)
+        return payload
+
+    def test_literature_novel_rejected(self):
+        with pytest.raises(import_bangumi.SubjectMappingError) as excinfo:
+            import_bangumi.map_subject(self._novel_payload())
+        assert "文学" in str(excinfo.value)
+
+    def test_light_novel_still_imports(self):
+        payload = self._novel_payload()
+        payload["tags"] = [{"name": "轻小说", "count": 300}]
+        subject = import_bangumi.map_subject(payload)
+        assert subject.type == "novel"
+        assert subject.book_kind == "light_novel"
+
+    def test_galge_game_imports_by_tag(self):
+        payload = self._game_payload(tags=[{"name": "GALGAME", "count": 88}])
+        subject = import_bangumi.map_subject(payload)
+        assert subject.type == "game"
+
+    def test_galge_tag_match_is_case_insensitive(self):
+        payload = self._game_payload(tags=[{"name": "galgame", "count": 5}])
+        assert import_bangumi.map_subject(payload).type == "game"
+
+    def test_plain_game_rejected(self):
+        with pytest.raises(import_bangumi.SubjectMappingError) as excinfo:
+            import_bangumi.map_subject(self._game_payload())
+        assert "游戏" in str(excinfo.value)
+
+    def test_related_ip_marker_imports(self):
+        payload = self._game_payload(_site_related_ip=True)
+        assert import_bangumi.map_subject(payload).type == "game"
+
+    def test_marker_must_be_true(self):
+        """标记只有显式 True 才放行——其它真值形态（字符串等）不认。"""
+        payload = self._game_payload(_site_related_ip="yes")
+        with pytest.raises(import_bangumi.SubjectMappingError):
+            import_bangumi.map_subject(payload)
+
+    def test_is_galge_payload_signals(self):
+        assert import_bangumi.is_galge_payload({"tags": [{"name": "GALGAME"}]})
+        assert import_bangumi.is_galge_payload({"tags": ["美少女游戏"]})
+        assert import_bangumi.is_galge_payload({"tags": [{"name": "ギャルゲー"}]})
+        # 视觉小说也算（2026-10-21 用户补充口径：文字冒险类一并收）
+        assert import_bangumi.is_galge_payload({"tags": [{"name": "视觉小说"}]})
+        assert import_bangumi.is_galge_payload({"tags": [{"name": "Visual Novel"}]})
+        assert not import_bangumi.is_galge_payload({"tags": [{"name": "RPG"}]})
+        assert not import_bangumi.is_galge_payload({})
 
 
 # ---------- 网络层：超时、重试与代理配置 ----------

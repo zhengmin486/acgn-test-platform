@@ -76,6 +76,14 @@ class Content(Base):
     # （API 契约保持不变）。
     title_original: Mapped[str | None] = mapped_column(String(200), nullable=True)
     aliases: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    # 原文简介（简介语言切换的「原文」一侧）：
+    # summary 存中文简介，本列存 Bangumi 的原始语言简介（多为日文）。
+    # 两者都只由 bangumi_meta.sync_content_meta 在**本列为空且与中文简介不同**时
+    # 写入（不覆盖人工维护），历史行由 scripts/backfill_meta.py 回填。
+    # 为空表示这部作品只有一种语言，详情页不显示语言切换入口。
+    # 经 crud.ensure_content_summary_original_column 幂等补列；不进 as_dict
+    # （API 契约保持不变）。
+    summary_original: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 书籍细分标注：light_novel（文库轻小说）/ literature（日本普通文学）。
     # Bangumi 只有一个「小说」platform，两类都在里面；本站不为此拆类型，
     # 只在卡片与详情页打一枚「文学」角标让用户一眼分辨（详见 app/page_common）。
@@ -366,6 +374,10 @@ class AnimeSchedule(Base):
     - work_type：作品类型（原创动画 / 漫画改编动画 / 小说改编动画 等）；
     - work_tags：题材标签，源站原文（斜杠或换行分隔）；
     - platforms：确认的播放平台链接列表 [{name, url}]，JSON 存储；
+    - category：分类标识，NULL/空表示季度档期（season_code 为 YYYYMM），
+      特殊分类使用固定码：unreleased=未上线新番、ova_sp=剧场版ova与特别篇、
+      cn_movie=大陆引进剧场版；源站 Atom 条目名（新番卫星观测站 / Movie-OVA-SP /
+      内地上映动画电影）在入库时统一改写为本站点名；
     - 同步只新增/更新本表记录，不触碰 Content、Article 等其他模块数据。
     """
 
@@ -377,8 +389,9 @@ class AnimeSchedule(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    season_code: Mapped[str] = mapped_column(String(6), nullable=False, index=True)
+    season_code: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
     source_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    category: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
     title_main: Mapped[str] = mapped_column(String(200), nullable=False)
     title_cn: Mapped[str | None] = mapped_column(String(200), nullable=True)
     title_jp: Mapped[str | None] = mapped_column(String(200), nullable=True)
@@ -400,6 +413,7 @@ class AnimeSchedule(Base):
             "id": self.id,
             "season_code": self.season_code,
             "source_key": self.source_key,
+            "category": self.category,
             "title_main": self.title_main,
             "title_cn": self.title_cn,
             "title_jp": self.title_jp,
@@ -1181,7 +1195,7 @@ class ScheduleSyncRun(Base):
         DateTime, nullable=False, default=datetime.now
     )
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    season_code: Mapped[str | None] = mapped_column(String(6), nullable=True)
+    season_code: Mapped[str | None] = mapped_column(String(20), nullable=True)
     mode: Mapped[str] = mapped_column(String(10), nullable=False)
     pages_fetched: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     parsed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

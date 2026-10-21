@@ -43,7 +43,12 @@ from app.business_pages import CONTENT_TYPE_LABELS, WEEKDAY_NAMES
 from app.database import SessionLocal
 from app.page_common import DbSession, render_missing, templates
 from scripts.import_bangumi import random_import, run_import
-from scripts.sync_yuc_schedule import SeasonNotFoundError, YucFetchError, run_sync
+from scripts.sync_yuc_schedule import (
+    SeasonNotFoundError,
+    YucFetchError,
+    run_sync,
+    run_sync_special_category,
+)
 
 router = APIRouter(tags=["content-admin"])
 
@@ -66,8 +71,15 @@ def _clean_content_type(value: str) -> str | None:
 def resync_season(season_code: str):
     """按档期重新同步：复用既有同步流程，正式写入（apply=True）。
 
+    特殊分类（unreleased / ova_sp / cn_movie）不是季度档期，走
+    run_sync_special_category：从 Atom 定位分类页后按 category 写库。
+
     单独抽出为一个函数，便于测试替换（不触网、不写真实库）。
     """
+    if season_code in crud.SCHEDULE_CATEGORY_LABELS:
+        return run_sync_special_category(
+            season_code, session_factory=SessionLocal, apply=True
+        )
     return run_sync(season_code, session_factory=SessionLocal, apply=True)
 
 
@@ -137,6 +149,7 @@ def data_overview(request: Request, db: DbSession):
             "article_total": crud.count_articles(db),
             "schedule_total": crud.count_schedules(db),
             "season_total": crud.count_schedule_seasons(db),
+            "category_total": crud.count_schedule_categories(db),
             "quality": _quality_summary(batches[0] if batches else None),
         },
     )
@@ -404,6 +417,7 @@ def schedules_page(
     request: Request,
     db: DbSession,
     season: str = Query(default=""),
+    category: str = Query(default=""),
     q: str = Query(default=""),
     page: int = Query(default=1, ge=1),
     deleted: int | None = Query(default=None),
@@ -414,12 +428,27 @@ def schedules_page(
     failed: int = Query(default=0),
     reason: str = Query(default=""),
 ):
-    """新番档期：分页列表 + 档期/关键词筛选；删除与重新同步结果均由参数回显。"""
+    """新番档期：分页列表 + 档期/分类/关键词筛选；删除与重新同步结果均由参数回显。
+
+    档期（season=YYYYMM）与分类（category=unreleased/ova_sp/cn_movie）两个
+    维度互斥：给定分类时按分类过滤，否则按档期过滤；都不给则看全部。
+    """
     seasons = crud.list_schedule_seasons(db)
+    categories = crud.list_schedule_categories(db)
     season_code = season.strip() or None
+    category_code = category.strip() or None
+    if category_code and category_code not in crud.SCHEDULE_CATEGORY_LABELS:
+        category_code = None
+    if category_code:
+        season_code = None
     keyword = q.strip() or None
     total, works = crud.list_schedules(
-        db, season=season_code, keyword=keyword, page=page, page_size=PAGE_SIZE
+        db,
+        season=season_code,
+        category=category_code,
+        keyword=keyword,
+        page=page,
+        page_size=PAGE_SIZE,
     )
     return templates.TemplateResponse(
         request=request,
@@ -430,7 +459,11 @@ def schedules_page(
             "page": page,
             "total_pages": _pages(total),
             "seasons": seasons,
+            "categories": categories,
+            "category_labels": crud.SCHEDULE_CATEGORY_LABELS,
             "current_season": season_code,
+            "current_category": category_code,
+            "current_category_label": crud.schedule_display_label(category_code),
             "q": q,
             "weekday_names": WEEKDAY_NAMES,
             "deleted": deleted,
@@ -450,6 +483,7 @@ def delete_schedule_page(
     schedule_id: int,
     db: DbSession,
     season: str = Form(""),
+    category: str = Form(""),
     q: str = Form(""),
     page: str = Form("1"),
 ):
@@ -465,6 +499,7 @@ def delete_schedule_page(
         _url(
             "/manage/schedules",
             season=season.strip(),
+            category=category.strip(),
             q=q.strip(),
             page=_page_param(page),
             deleted=deleted,
@@ -477,6 +512,7 @@ def delete_schedule_page(
 def resync_schedule_page(
     season_code: str = Form(""),
     season: str = Form(""),
+    category: str = Form(""),
     q: str = Form(""),
     page: str = Form("1"),
 ):
@@ -486,7 +522,12 @@ def resync_schedule_page(
     只回显原因，不抛异常、不影响任何其它功能。
     """
     code = season_code.strip()
-    base = {"season": season.strip(), "q": q.strip(), "page": _page_param(page)}
+    base = {
+        "season": season.strip(),
+        "category": category.strip(),
+        "q": q.strip(),
+        "page": _page_param(page),
+    }
     if not code:
         return RedirectResponse(
             _url("/manage/schedules", **base, resync="error", reason="缺少档期参数"),
@@ -558,6 +599,10 @@ def _render_sync_page(
             "task_labels": sync_tasks.task_labels(),
             "seasons": seasons,
             "season_suggestions": sync_tasks.suggest_season_codes(seasons),
+            "special_categories": [
+                {"code": code, "label": label}
+                for code, label in crud.SCHEDULE_CATEGORY_LABELS.items()
+            ],
             "categories": sync_tasks.article_categories(),
             "result": result,
             "can_confirm": can_confirm,
@@ -968,5 +1013,9 @@ def schedule_runs_page(request: Request, db: DbSession):
     return templates.TemplateResponse(
         request=request,
         name="schedule_runs.html",
-        context={"runs": runs, "total": total},
+        context={
+            "runs": runs,
+            "total": total,
+            "category_labels": crud.SCHEDULE_CATEGORY_LABELS,
+        },
     )

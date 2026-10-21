@@ -20,7 +20,8 @@ from starlette.datastructures import UploadFile
 
 from app import crud, media
 from app.auth import require_admin_page
-from app.page_common import DbSession, render_missing
+from app.config import settings
+from app.page_common import DbSession, maybe_enforce_storage_caps, render_missing
 
 router = APIRouter(tags=["cover-admin"])
 
@@ -64,7 +65,13 @@ async def upload_content_cover(request: Request, content_id: int, db: DbSession)
             _url_with(next_url, cover="error", why="empty"), status_code=303
         )
     try:
-        local_url = media.save_upload(await upload.read(), content_id)
+        # 只读「上限 + 1KB」：超大文件不会整个进内存，超限立即被 save_upload 拒绝；
+        # 读完即关，释放 multipart 落盘的临时文件。
+        data = await upload.read(settings.cover_upload_max_bytes + 1024)
+    finally:
+        await upload.close()
+    try:
+        local_url = media.save_upload(data, content_id)
     except media.UploadError as exc:
         return RedirectResponse(
             _url_with(next_url, cover="error", why=exc.code), status_code=303
@@ -74,4 +81,5 @@ async def upload_content_cover(request: Request, content_id: int, db: DbSession)
     content.image_url = local_url
     db.commit()
     media.remove_cover_file(previous)
+    maybe_enforce_storage_caps()
     return RedirectResponse(_url_with(next_url, cover="ok"), status_code=303)

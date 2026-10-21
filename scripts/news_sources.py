@@ -79,7 +79,14 @@ SOURCES: tuple[SourceSpec, ...] = (
     # ln-news（ラノベニュースオンライン）是轻小说专门站，Atom 格式、当天更新，服务器可直连。
     SourceSpec("lnnews", "ラノベニュースオンライン", "https://ln-news.com/feed", "rss", "轻小说", "ja"),
     # —— 中文源（综合动态 / 动画，均为日本 ACGN 的中文编译）——
+    # ACGCH（acgch.com）简中版：日本媒体的中文编译，标题规范、无水文；
+    # RSS 恒 50 条，站方分类（动画/漫画/轻小说/业界/活动周边/虚拟主播）与
+    # 本站分类对齐，虚拟主播类落「综合动态」兜底桶。2026-10-21 调查后接入。
+    SourceSpec("acgch", "ACGCH", "https://acgch.com/zh-hans/rss.xml", "rss", "综合动态", "zh"),
     SourceSpec("gcores", "机核 GCORES", "https://www.gcores.com/rss", "rss", "综合动态", "zh"),
+    # 触乐：中文游戏行业 / 创作者向媒体（人物专访、行业特稿），补中文行业缺口；
+    # 「触乐怪话 / 触乐夜话」栏目为编辑随笔，由 news_filters 按标题前缀过滤。
+    SourceSpec("chuapp", "触乐", "http://www.chuapp.com/feed", "rss", "游戏", "zh"),
     SourceSpec("gamersky", "游民星空 ACG", "https://acg.gamersky.com/", "html", "动画", "zh"),
 )
 
@@ -102,6 +109,8 @@ class NewsCandidate:
     # 分类结果缓存（scripts/news_daily._classify 写入）：排序 / 软配额 / 落库会多次取用，
     # 挂在对象自身而非全局字典上，避免按对象 id 缓存时被回收后复用的 id 串号。
     classification: dict | None = None
+    # 标题与摘要是否已由 LLM 译成中文：只影响正文尾注，避免把日文原文标成「译文」。
+    translated: bool = False
 
 
 class NewsSourceError(RuntimeError):
@@ -138,11 +147,22 @@ def _attr_by_local(element: ET.Element, name: str, attr: str = "url") -> str:
     return ""
 
 
+def _to_local_naive(parsed: datetime) -> datetime:
+    """带时区的时间换算成本机时区后去掉 tzinfo（入库统一存本地 naive 时间）。"""
+    if parsed.tzinfo is None:
+        return parsed
+    return parsed.astimezone().replace(tzinfo=None)
+
+
 def parse_feed_date(raw: str) -> datetime | None:
     """解析订阅源时间：RFC822（RSS2.0）/ ISO-W3C（RDF 的 dc:date、Atom 的 updated）。
 
     旧版 Python 的 ``datetime.fromisoformat`` 不接受 ``+09:00`` 这类带冒号时区，
-    这里兜底去掉时区后缀再解析（入库只用本地 naive 时间）。
+    这里兜底去掉时区后缀再解析。
+
+    时区必须**换算**到本机时区后再转 naive：日文源是 JST(+09:00)，直接
+    ``replace(tzinfo=None)`` 会让 22:00 的日本新闻在中文站显示成 22:00
+    （实际是北京时间 21:00），时效差一小时；GMT 源更会差 8 小时。
     """
     text = (raw or "").strip()
     if not text:
@@ -150,7 +170,7 @@ def parse_feed_date(raw: str) -> datetime | None:
     try:
         parsed = parsedate_to_datetime(text)
         if parsed is not None:
-            return parsed.replace(tzinfo=None)
+            return _to_local_naive(parsed)
     except (TypeError, ValueError):
         pass
     candidate = text.replace("Z", "+00:00")
@@ -159,7 +179,7 @@ def parse_feed_date(raw: str) -> datetime | None:
             parsed = datetime.fromisoformat(attempt)
         except ValueError:
             continue
-        return parsed.replace(tzinfo=None)
+        return _to_local_naive(parsed)
     return None
 
 
@@ -254,9 +274,23 @@ GAMERSKY_LIST_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 GAMERSKY_PUBLISHED_RE = re.compile(r"发布时间：\s*(\d{4}-\d{2}-\d{2})(?:\s+(\d{2}:\d{2}))?")
+# 文章头部的真实发布时间：<div class="Mid2L_tit"><h1>标题</h1>
+#   <div class="detail">2024-04-24 16:21:26 来源：官方 作者：…</div>
+# 注意：页面里另有「发布时间：YYYY-MM-DD」（无时刻）出现在**侧栏推荐列表**里，
+# 照抄会把文章写成「抓取当天」，2024/9 月的旧文全变成当天的"最新"——时效全错。
+GAMERSKY_HEADER_TIME_RE = re.compile(
+    r'class="Mid2L_tit".{0,4000}?(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})(?::(\d{2}))?',
+    re.IGNORECASE | re.DOTALL,
+)
 GAMERSKY_SUMMARY_RE = re.compile(
     r'<meta[^>]+name="description"[^>]+content="([^"]*)"', re.IGNORECASE
 )
+# 列表锚点里的真标题：游民自己放在 <div class="tit"> 里。投票数 / 评论数在
+# <div class="tem"> 里，clean_text 整体折叠会把「标题 4354 0」这种尾巴混进标题
+# （线上实测：武侠动画《杯雪》PV 一文标题带上了浏览/评论数）。
+GAMERSKY_TIT_RE = re.compile(r'<div class="tit[^"]*">(.*?)</div>', re.S)
+GAMERSKY_COUNT_TAIL_RE = re.compile(r"\s+\d+\s+\d+$")
+
 GAMERSKY_BODY_START = 'class="Mid2L_con">'
 GAMERSKY_BODY_STOPS = (
     'class="liPage"',
@@ -266,13 +300,26 @@ GAMERSKY_BODY_STOPS = (
 )
 
 
+def _gamersky_title(inner: str) -> str:
+    """取列表锚点的真标题：优先游民自带的 ``<div class="tit">`` 字段。
+
+    tit 缺失时退回整体折叠文本，并剥掉尾部的「浏览数 评论数」计数尾巴
+    （仅当确实呈现 ``数字 数字`` 形态才剥，避免误删以数字结尾的正常标题）。
+    """
+    match = GAMERSKY_TIT_RE.search(inner or "")
+    if match:
+        return clean_text(match.group(1))
+    title = clean_text(inner)
+    return GAMERSKY_COUNT_TAIL_RE.sub("", title)
+
+
 def parse_gamersky_list(html: str, source: SourceSpec, *, limit: int = 20) -> list[NewsCandidate]:
     """解析游民星空 ACG 首页的资讯链接，按文章 id 倒序（约等于最新在前）。"""
     seen: set[str] = set()
     rows: list[tuple[int, str, str]] = []
     for match in GAMERSKY_LIST_RE.finditer(html or ""):
         url, article_id, inner = match.group(1), match.group(2), match.group(3)
-        title = clean_text(inner)
+        title = _gamersky_title(inner)
         if not title or len(title) < 6 or url in seen:
             continue
         seen.add(url)
@@ -284,16 +331,37 @@ def parse_gamersky_list(html: str, source: SourceSpec, *, limit: int = 20) -> li
     ]
 
 
+def _gamersky_published_at(text: str) -> datetime | None:
+    """取游民详情页的文章发布时间；拿不到就返回 None（由调用方决定兜底）。
+
+    两层：先取文章头部 ``class="Mid2L_tit"`` 里的 ``YYYY-MM-DD HH:MM:SS``（真值），
+    再用「发布时间：」兜底——但兜底**必须带上时刻**才算命中。真实页面的
+    「发布时间：」出现在侧栏推荐列表里且只有日期，认它会把 9 月的文章写成抓取当天。
+    """
+    header = GAMERSKY_HEADER_TIME_RE.search(text or "")
+    if header:
+        stamp = f"{header.group(1)} {header.group(2)}:{header.group(3) or '00'}"
+        try:
+            return datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            pass
+    fallback = GAMERSKY_PUBLISHED_RE.search(text or "")
+    if fallback and fallback.group(2):
+        try:
+            return datetime.strptime(
+                f"{fallback.group(1)} {fallback.group(2)}", "%Y-%m-%d %H:%M"
+            )
+        except ValueError:
+            return None
+    return None
+
+
 def parse_gamersky_detail(html: str, candidate: NewsCandidate) -> NewsCandidate:
     """补齐游民详情页的发布时间、摘要与正文（正文截到分页/页脚标记处）。"""
     text = html or ""
-    match = GAMERSKY_PUBLISHED_RE.search(text)
-    if match:
-        stamp = f"{match.group(1)} {match.group(2) or '00:00'}"
-        try:
-            candidate.published_at = datetime.strptime(stamp, "%Y-%m-%d %H:%M")
-        except ValueError:
-            pass
+    published = _gamersky_published_at(text)
+    if published is not None:
+        candidate.published_at = published
     summary_match = GAMERSKY_SUMMARY_RE.search(text)
     if summary_match:
         candidate.summary = clean_text(summary_match.group(1))[:SUMMARY_MAX]
@@ -310,6 +378,108 @@ def parse_gamersky_detail(html: str, candidate: NewsCandidate) -> NewsCandidate:
         candidate.body = html_to_text(body_html)[:BODY_MAX_CHARS]
     candidate.needs_detail = False
     return candidate
+
+
+# 详情页头图：og:image / twitter:image（两种属性顺序都要认）。
+# 日语 RSS（4Gamer / アニメ！アニメ！）的 feed 里不带图，只能从详情页的社交卡片取。
+OG_IMAGE_RES = (
+    re.compile(
+        r'<meta[^>]+(?:property|name)=["\'](?:og:image|twitter:image)["\'][^>]*'
+        r'content=["\']([^"\']+)',
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]*'
+        r'(?:property|name)=["\'](?:og:image|twitter:image)["\']',
+        re.IGNORECASE,
+    ),
+)
+
+
+def parse_og_image(html: str) -> str | None:
+    """从详情页取社交卡片头图（og:image / twitter:image）；取不到返回 None。"""
+    for pattern in OG_IMAGE_RES:
+        match = pattern.search(html or "")
+        if match:
+            url = match.group(1).strip()
+            if url.startswith("//"):
+                url = "https:" + url
+            if url.startswith("http"):
+                return url
+    return None
+
+
+def hydrate_head_image(candidate: NewsCandidate, *, fetch) -> NewsCandidate:
+    """给没有头图的候选补一张：抓详情页读 og:image；失败静默（不阻断入库）。
+
+    RSS 源（4Gamer / アニメ！アニメ！ 等）的 feed 不带图，不补的话整站资讯列表
+    会有一半是空白卡片。这里只抓一次页面、只读 meta，不解析正文。
+    """
+    if candidate.image_url:
+        return candidate
+    try:
+        html = fetch(candidate.url)
+    except Exception:  # noqa: BLE001 - 补图失败不该影响这条资讯入库
+        return candidate
+    found = parse_og_image(html)
+    if found:
+        candidate.image_url = found
+    return candidate
+
+
+# ---------- RSS 源正文提取（2026-10-21：详情页正文，不再拿摘要冒充正文） ----------
+#
+# 根因：RSS 候选 needs_detail=False，body 恒空，入库正文退化为 RSS 摘要
+# （animeanime / LN News 的 feed 甚至没有 description，正文=标题）。
+# 按实测样本页的各站正文容器提取真正文：
+# - LN News：TinyMCE 编辑器容器 div.mce-content-body（其后是 article-meta）；
+# - animeanime / ACGCH：正文在 <article> 内，段落干净；
+# - 4Gamer：正文由 JS 渲染，静态 HTML 无正文——提取不到就保留官方摘要
+#   （meta description，诚实的短讯形态，绝不编造扩写）。
+
+_BODY_CONTAINER_RES: tuple[re.Pattern, ...] = (
+    re.compile(
+        r'<div class="mce-content-body"[^>]*>(.*?)(?=<div class="article-meta|</main)',
+        re.S,
+    ),
+    re.compile(r"<article[^>]*>(.*?)</article>", re.S),
+)
+# 噪音行：短且没有句末标点的行多为导航 / 标签 / 关键词栏（4Gamer 页骨架曾混入
+# 「週間記事ランキング」「キーワード」这类行）。
+_BODY_LINE_NOISE_MAX = 12
+# ACGCH 文章容器自带的站点噪音（阅读时长元信息 / 投稿 CTA），实测 2026-10-21。
+_BODY_NOISE_WORDS: tuple[str, ...] = ("分钟读完", "来投个稿")
+_BODY_MIN_CHARS = 60
+
+
+def extract_body(html: str) -> str:
+    """详情页 HTML → 正文纯文本（复用 html_to_text：图片转 [图] 行、段落换行）。
+
+    找不到已知容器 / 提取结果过短时返回空串——由调用方保留 RSS 摘要，
+    绝不把短摘要扩写成「正文」。
+    """
+    if not html:
+        return ""
+    container = None
+    for pattern in _BODY_CONTAINER_RES:
+        match = pattern.search(html)
+        if match:
+            container = match.group(1)
+            break
+    if not container:
+        return ""
+    lines = []
+    for line in html_to_text(container).splitlines():
+        line = line.strip()
+        if not line or line == "&nbsp;":
+            continue
+        if any(word in line for word in _BODY_NOISE_WORDS):
+            continue
+        if len(line) < _BODY_LINE_NOISE_MAX and not re.search(r"[。！？…」』〕]", line):
+            continue
+        lines.append(line)
+    text = "\n".join(lines).strip()
+    return text[:BODY_MAX_CHARS] if len(text) >= _BODY_MIN_CHARS else ""
 
 
 def fetch_candidates(

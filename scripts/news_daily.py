@@ -50,8 +50,11 @@ from scripts.news_sources import (  # noqa: E402
     NewsCandidate,
     NewsSourceError,
     SourceSpec,
+    extract_body,
     fetch_candidates,
     hydrate,
+    hydrate_head_image,
+    parse_og_image,
 )
 
 # ---------- 取数优先级 ----------
@@ -70,7 +73,9 @@ def _classify(candidate: NewsCandidate) -> dict:
     cached = candidate.classification
     if cached is not None:
         return cached
-    subject = news_classify.normalize_subject(candidate.source.category)
+    subject = news_classify.classify_subject_from_text(
+        candidate.title, candidate.summary, fallback=candidate.source.category
+    )
     region = news_classify.detect_region(
         candidate.source.region, candidate.title, candidate.summary
     )
@@ -117,8 +122,9 @@ def _ordered_sources(sources: tuple[SourceSpec, ...]) -> list[SourceSpec]:
 
 
 # 同一主体类型在每日配额里最多占多少条，避免单一类别挤占全部位置（兼顾类别覆盖）。
-# 综合动态是兜底主体，压低占比；其余四类（动画 / 漫画 / 轻小说 / 游戏）不单独封顶。
-_PER_SUBJECT_CAP = {"综合动态": 6}
+# 2026-10-21 用户定稿「综合可以和游戏同权」：综合动态的封顶取消，与动画 / 漫画 /
+# 轻小说 / 游戏同级竞争配额；机制保留（要重新封顶只改这张表）。
+_PER_SUBJECT_CAP: dict[str, int] = {}
 
 # 同一事件的重复报道判定阈值：标题字符二元组 Jaccard 相似度超过该值视为同一事件，
 # 只保留优先级更高的那条（避免同一条新闻占掉多个位置）。
@@ -187,11 +193,16 @@ class DailyNewsSummary:
     existing: int = 0  # 库中已有（URL 或标题命中）
     added: int = 0
     failed: int = 0
-    skipped_sources: int = 0  # 因缺翻译能力跳过的日文源
+    skipped_sources: int = 0  # 因缺翻译能力跳过的日文源（保留字段，当前策略下为 0）
+    untranslated_sources: int = 0  # 无翻译能力、按日文原文入库的日文源个数
     translate_failed: int = 0  # 翻译失败退回原文的条数
     filtered: int = 0  # 被硬广过滤掉（不入主 feed）的条数
+    reviewed: int = 0  # 低置信度、照常入库但待人工复核的条数
     deduped: int = 0  # 同事件重复报道被合并掉的条数
     per_source: dict[str, int] = field(default_factory=dict)
+    # 每源链路统计（候选/新增/过滤/失败）：cron 日志靠它定位「某源零产出」——
+    # 2026-10-21 教训：5 个源整轮零产出且失败计数无处可见，排查无从下手。
+    per_source_stats: dict[str, str] = field(default_factory=dict)
     details: list[dict] = field(default_factory=list)
     message: str = ""
 
@@ -209,14 +220,21 @@ class DailyNewsSummary:
             f"硬广过滤：{self.filtered} 条",
             f"同事件合并：{self.deduped} 条",
             f"新增：{self.added} 条",
+            f"待人工复核（低置信度，已入库）：{self.reviewed} 条",
             f"跳过的日文源：{self.skipped_sources} 个",
         ]
+        if self.untranslated_sources:
+            lines.append(f"日文源按原文入库（未配置翻译 Key）：{self.untranslated_sources} 个")
         if self.translate_failed:
             lines.append(f"翻译失败（保留原文）：{self.translate_failed} 条")
         if self.per_source:
             lines.append(
                 "分源：" + "；".join(f"{key} {count}" for key, count in self.per_source.items())
             )
+        if self.per_source_stats:
+            lines.append("分源链路：")
+            for key, stat in self.per_source_stats.items():
+                lines.append(f"  - {key}: {stat}")
         return "\n".join(lines)
 
 
@@ -241,21 +259,29 @@ def _media_key(url: str) -> str:
 
 
 def _build_body(candidate: NewsCandidate, *, translated: bool) -> str:
-    """拼正文：中文源用摘要正文，日文源用译文摘要；尾部都带原文链接。"""
+    """拼正文：中文源用摘要正文；已翻译的日文源用译文摘要。
+
+    **不往正文里写「原文链接：URL」**：详情页模板已经有一个「原文链接 ↗」入口，
+    正文再塞一条长 URL 会撑破排版（还会和正文段落混在一起，看着像乱码）。
+    translated=False 时也不加「译文由自动翻译生成」尾注——无翻译 Key 的日文源
+    是按原文入库的，加这句会误导读者。
+    """
     body = (candidate.body or candidate.summary or "").strip()
     if not body:
         body = candidate.title
-    if not body.endswith(candidate.url):
-        body = f"{body}\n\n原文链接：{candidate.url}"
     if translated:
-        body = f"{body}\n（译文由自动翻译生成，原文见链接）"
+        body = f"{body}\n（译文由自动翻译生成）"
     return body
 
 
 def _translate_candidates(
     candidates: list[NewsCandidate], *, translate
 ) -> list[NewsCandidate]:
-    """就地翻译标题与摘要；翻译失败的条目被丢弃（日文必须翻译后才入库）。"""
+    """就地翻译标题与摘要，并把 candidate.translated 置真（正文尾注据此判断）。
+
+    翻译失败的条目被丢弃：有翻译能力时仍按「日文必须翻译后才入库」处理，
+    避免同一站里中英日混排。
+    """
     if not candidates:
         return []
     texts: list[str] = []
@@ -273,6 +299,7 @@ def _translate_candidates(
             continue  # 译文缺失按失败处理，不写日文原文进站
         candidate.title = title[:200]
         candidate.summary = (summary or candidate.summary)[:200]
+        candidate.translated = True
         kept.append(candidate)
     return kept
 
@@ -317,13 +344,22 @@ def run_import_daily(
         # 归集所有源的候选，再统一按 priority_score 填软配额。
         # 官方 PR 源排在最后；凑够配额后不再抓取低优先级源（尤其游民星空详情页）。
         ordered_sources = _ordered_sources(sources or SOURCES)
+        # 停用开关（NEWS_DISABLED_SOURCES，逗号分隔 key）：不改代码即可下线一个源。
+        disabled = {
+            key.strip() for key in settings.news_disabled_sources.split(",") if key.strip()
+        }
+        if disabled:
+            ordered_sources = [spec for spec in ordered_sources if spec.key not in disabled]
         pool: list[NewsCandidate] = []
         for source in ordered_sources:
             if remaining <= 0:
                 break
-            if source.lang == "ja" and not can_translate:
-                summary.skipped_sources += 1
-                continue
+            # 没有翻译能力时不再整源跳过（用户 2026-10-21 决定：宁可上日文原文，
+            # 也不要空着）。LLM 翻译接口保留——配好 NEWS_LLM_API_KEY 后自动改回
+            # 「先翻译再入库」，无需改代码。
+            untranslated_ja = source.lang == "ja" and not can_translate
+            if untranslated_ja:
+                summary.untranslated_sources += 1
             try:
                 candidates = fetch_candidates(
                     source, fetch=fetch, limit=max(remaining * 2, 10)
@@ -331,6 +367,7 @@ def run_import_daily(
             except (NewsSourceError, RuntimeError, OSError, TimeoutError) as exc:
                 # RuntimeError 覆盖旧导入器的 ArticleFetchError（也是 RuntimeError 子类）
                 summary.failed += 1
+                summary.per_source_stats[source.key] = f"抓取失败：{str(exc)[:70]}"
                 summary.details.append(
                     {"status": "failed", "title": f"{source.label} 抓取失败", "reason": str(exc)[:160]}
                 )
@@ -339,6 +376,7 @@ def run_import_daily(
             summary.requested += len(candidates)
             fresh = _filter_new(db, candidates)
             summary.existing += len(candidates) - len(fresh)
+            source_filtered = 0
             hydrated: list[NewsCandidate] = []
             for candidate in fresh:
                 try:
@@ -349,14 +387,37 @@ def run_import_daily(
                         {"status": "failed", "title": candidate.title, "reason": f"详情页失败：{exc}"[:160]}
                     )
                     continue
+                # RSS 源正文提取：抓一次详情页，正文与 og:image 同页取。
+                # 提取不到正文（JS 渲染站 / 快讯过短）时保留 RSS 摘要，不打假。
+                detail_html = ""
+                if source.kind == "rss" and not candidate.body:
+                    try:
+                        detail_html = fetch(candidate.url)
+                    except (NewsSourceError, RuntimeError, OSError, TimeoutError):
+                        detail_html = ""
+                    if detail_html:
+                        candidate.body = extract_body(detail_html)
+                    if len(candidate.body.strip()) < 60:
+                        candidate.body = ""  # 过短视为提取失败，保留摘要形态
                 if not candidate.summary:
                     candidate.summary = (candidate.body or "")[:200]
-                # 硬广过滤：只挡最露骨广告（营销活动 / galge 一律保留）。
+                # RSS 源（4Gamer / アニメ！アニメ！）的 feed 不带图，列表会全空；
+                # 缺图时优先复用已抓的详情页读 og:image，否则再单独抓一次。
+                if not candidate.image_url and source.kind == "rss":
+                    if detail_html:
+                        found = parse_og_image(detail_html)
+                        if found:
+                            candidate.image_url = found
+                    else:
+                        hydrate_head_image(candidate, fetch=fetch)
+                # 收录判定（news_filters 三层过滤）：硬广 / 非 ACGN 主体 /
+                # VOD 导流 / 抽奖 / 商业促销。不再看来源白名单，也不看来源类型。
                 skip_reason = news_filters.should_skip_article(
-                    candidate.title, candidate.summary, candidate.source.category
+                    candidate.title, candidate.summary
                 )
                 if skip_reason:
                     summary.filtered += 1
+                    source_filtered += 1
                     summary.details.append(
                         {
                             "status": "filtered",
@@ -365,6 +426,18 @@ def run_import_daily(
                         }
                     )
                     continue
+                # 第三层：低置信度不丢弃——照常入库、记入待复核明细，
+                # 由人工校准后再决定是补规则还是维持收录（见 news_filters.review_reason）。
+                review = news_filters.review_reason(candidate.title, candidate.summary)
+                if review:
+                    summary.reviewed += 1
+                    summary.details.append(
+                        {
+                            "status": "review",
+                            "title": candidate.title,
+                            "reason": review[:160],
+                        }
+                    )
                 hydrated.append(candidate)
 
             if source.lang == "ja" and translate is not None:
@@ -373,6 +446,11 @@ def run_import_daily(
                 hydrated = translated
 
             pool.extend(hydrated)
+            summary.per_source_stats[source.key] = (
+                f"候选 {len(candidates)}｜新增候选 {len(fresh)}｜"
+                f"过滤 {source_filtered}｜入池 {len(hydrated)}"
+                + ("｜日文原文" if untranslated_ja else "")
+            )
             if len(pool) >= remaining:
                 break  # 高优先级源已凑够，低优先级源不必再抓
 
@@ -381,6 +459,10 @@ def run_import_daily(
                 f"今日已入库 {summary.added_before} 条，剩余配额 {remaining} 条，"
                 f"但本轮各源无新增候选"
             )
+            if summary.per_source_stats:
+                summary.message += "（" + "；".join(
+                    f"{k} {v}" for k, v in summary.per_source_stats.items()
+                ) + "）"
             return summary
 
         # 软配额：按 priority_score 排序 + 类别覆盖封顶 + 同事件去重，不足不强行填满。
@@ -437,6 +519,10 @@ def run_import_daily(
             f"今日入库 {summary.added_before + summary.added} 条 / 上限 {limit_total} 条，"
             f"本轮新增 {summary.added} 条"
         )
+        if summary.per_source_stats:
+            summary.message += "（" + "；".join(
+                f"{k} {v}" for k, v in summary.per_source_stats.items()
+            ) + "）"
         return summary
     finally:
         db.close()
@@ -479,7 +565,7 @@ def _persist(db, candidate: NewsCandidate, *, now: datetime) -> Article | None:
     try:
         with db.begin_nested():
             localized = article_media.localize_media(
-                _build_body(candidate, translated=candidate.source.lang == "ja"),
+                _build_body(candidate, translated=candidate.translated),
                 candidate.image_url,
                 key=_media_key(candidate.url),
             )

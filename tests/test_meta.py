@@ -31,6 +31,11 @@ SUBJECT = {
     "date": "1995-10-04",
     "platform": "TV",
     "eps": 26,
+    # Bangumi 原始语言简介（多为日文）。与中文简介不同时，sync 才写入 summary_original；
+    # 详情页据此显示「中文 / 原文」语言切换入口。
+    "summary": "西暦2000年、南極大陸で「第一使徒アダム」と呼ばれる光の巨人に対し"
+               "国際科学調査隊が実験を行った。接触実験の際に「光の巨人」は自毀し、"
+               "「セカンドインパクト」が発生した。",
     "infobox": [
         {"key": "导演", "value": "庵野秀明"},
         {"key": "脚本", "value": "庵野秀明(1-3,5-26)、榎戸洋司(2,7)"},
@@ -96,6 +101,20 @@ class TestBuildMeta:
         facts = self._meta()["facts"]
         assert facts["放送星期"] == "星期三"
         assert facts["别名"].count("/") == 2  # 只留前 3 个别名
+
+    def test_summary_original_passthrough(self):
+        meta = self._meta()
+        assert "summary_original" in meta
+        # SUBJECT.summary 是日文，与中文简介不同 → 原样透传（已清洗内部换行）
+        assert meta["summary_original"].startswith("西暦2000年")
+        assert "\n" not in meta["summary_original"]
+
+    def test_summary_original_empty_when_subject_has_none(self):
+        meta = bangumi_meta.build_meta(
+            {k: v for k, v in SUBJECT.items() if k != "summary"},
+            CHARACTERS, PERSONS,
+        )
+        assert meta["summary_original"] == ""
 
 
 @pytest.fixture
@@ -179,6 +198,54 @@ class TestSync:
         finally:
             db.close()
 
+    def test_writes_summary_original(self, meta_env):
+        """原文简介：仅在为空、且与中文简介不同时写入。"""
+        db = meta_env["factory"]()
+        try:
+            content = db.get(Content, meta_env["content_id"])
+            # 中文简介是 fixture 里的「简介」，与日文 SUBJECT.summary 不同
+            bangumi_meta.sync_content_meta(
+                db, content,
+                payload={"subject": SUBJECT, "characters": CHARACTERS, "persons": PERSONS},
+            )
+            db.refresh(content)
+            assert content.summary_original.startswith("西暦2000年")
+        finally:
+            db.close()
+
+    def test_skips_summary_original_when_equal_to_chinese(self, meta_env):
+        """原文与中文相同时不写库：否则详情页会出现两份一样的文字、切换入口无意义。"""
+        db = meta_env["factory"]()
+        try:
+            content = db.get(Content, meta_env["content_id"])
+            # 把中文简介改成与日文原文一致，sync 应跳过
+            content.summary = SUBJECT["summary"]
+            db.commit()
+            bangumi_meta.sync_content_meta(
+                db, content,
+                payload={"subject": SUBJECT, "characters": CHARACTERS, "persons": PERSONS},
+            )
+            db.refresh(content)
+            assert (content.summary_original or "").strip() == ""
+        finally:
+            db.close()
+
+    def test_does_not_overwrite_existing_summary_original(self, meta_env):
+        """已有原文简介（可能人工维护）不被覆盖。"""
+        db = meta_env["factory"]()
+        try:
+            content = db.get(Content, meta_env["content_id"])
+            content.summary_original = "人工维护的原文"
+            db.commit()
+            bangumi_meta.sync_content_meta(
+                db, content,
+                payload={"subject": SUBJECT, "characters": CHARACTERS, "persons": PERSONS},
+            )
+            db.refresh(content)
+            assert content.summary_original == "人工维护的原文"
+        finally:
+            db.close()
+
 
 class TestPages:
     def test_detail_shows_cast_and_facts(self, meta_env):
@@ -201,6 +268,37 @@ class TestPages:
         assert "TV" in page.text and "26 话" in page.text
         # 原画只有 1 部作品，仍是候选：折叠区不该出现
         assert "更多制作人员" not in page.text
+
+    def test_detail_shows_language_switcher_when_both_exist(self, meta_env):
+        """中英双语简介：详情页出现「中文 / 原文」切换入口，且原文默认隐藏。"""
+        db = meta_env["factory"]()
+        try:
+            content = db.get(Content, meta_env["content_id"])
+            bangumi_meta.sync_content_meta(
+                db, content,
+                payload={"subject": SUBJECT, "characters": CHARACTERS, "persons": PERSONS},
+            )
+            db.refresh(content)
+            assert content.summary_original  # 已写入
+        finally:
+            db.close()
+
+        page = meta_env["client"].get(f"/contents/{meta_env['content_id']}")
+        assert page.status_code == 200
+        assert 'data-summary-lang="zh"' in page.text
+        assert 'data-summary-lang="orig"' in page.text
+        # 原文段落初始 hidden（同一时刻只显示中文，不出现两份简介）
+        assert "detail-summary-orig" in page.text
+        # 中文是默认激活态
+        assert 'class="detail-lang-btn is-active" data-summary-lang="zh"' in page.text
+
+    def test_detail_hides_language_switcher_with_single_language(self, meta_env):
+        """只有中文简介（无原文）时，不渲染语言切换入口。"""
+        page = meta_env["client"].get(f"/contents/{meta_env['content_id']}")
+        assert page.status_code == 200
+        assert 'data-summary-lang="orig"' not in page.text
+        # 单语时不渲染原文段落元素（JS 里的变量名不算）
+        assert 'id="detail-summary-orig"' not in page.text
 
     def test_cast_page(self, meta_env):
         db = meta_env["factory"]()
@@ -257,6 +355,42 @@ class TestLegacyColumns:
             assert crud.ensure_content_meta_columns(engine) == []
         finally:
             engine.dispose()
+
+    def test_ensure_adds_summary_original_column(self, tmp_path):
+        """历史库无 summary_original 列时幂等补列；已有则跳过。"""
+        engine = create_engine(f"sqlite:///{tmp_path / 'legacy_summary.db'}")
+        try:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "CREATE TABLE contents (id INTEGER PRIMARY KEY,"
+                        " title VARCHAR(200) NOT NULL, type VARCHAR(20) NOT NULL,"
+                        " summary TEXT NOT NULL, rating FLOAT NOT NULL,"
+                        " summary_original TEXT)"
+                    )
+                )
+            added = crud.ensure_content_summary_original_column(engine)
+            assert added == []  # 列已存在，幂等跳过
+        finally:
+            engine.dispose()
+
+        # 第二次：表无该列，应补上
+        engine2 = create_engine(f"sqlite:///{tmp_path / 'legacy_summary2.db'}")
+        try:
+            with engine2.begin() as conn:
+                conn.execute(
+                    text(
+                        "CREATE TABLE contents (id INTEGER PRIMARY KEY,"
+                        " title VARCHAR(200) NOT NULL, type VARCHAR(20) NOT NULL,"
+                        " summary TEXT NOT NULL, rating FLOAT NOT NULL)"
+                    )
+                )
+            added2 = crud.ensure_content_summary_original_column(engine2)
+            assert added2 == ["summary_original"]
+            # 再跑一次确认幂等
+            assert crud.ensure_content_summary_original_column(engine2) == []
+        finally:
+            engine2.dispose()
 
 
 class TestPromotion:

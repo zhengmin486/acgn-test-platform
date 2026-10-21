@@ -38,7 +38,16 @@ from scripts.import_articles import (
 from scripts.import_bangumi import ImportSummary, run_import
 from scripts.news_daily import DailyNewsSummary, run_import_daily
 from scripts.fill_schedule_works import fill_works_for_season
-from scripts.sync_yuc_schedule import SyncSummary, resolve_insecure, run_sync
+from scripts.sync_yuc_schedule import (
+    ATOM_URL,
+    SeasonNotFoundError,
+    SyncSummary,
+    build_opener,
+    fetch_url,
+    find_special_category,
+    resolve_insecure,
+    run_sync,
+)
 
 # ---------- 任务标识与状态 ----------
 
@@ -291,6 +300,11 @@ def prepare_scope(spec: TaskSpec, scope_text: str, limit_text: str | None = None
         return ParsedScope(display=", ".join(str(i) for i in ids), ids=tuple(ids))
 
     if spec.scope_kind == "season":
+        text = (scope_text or "").strip()
+        if text in crud.SCHEDULE_CATEGORY_LABELS:
+            # 特殊档期分类（未上线新番 / 剧场版ova与特别篇 / 大陆引进剧场版）：
+            # 码即分类标识，展示名用本站统一名称。
+            return ParsedScope(display=crud.SCHEDULE_CATEGORY_LABELS[text], season_code=text)
         code = parse_season_code(scope_text)
         return ParsedScope(display=code, season_code=code)
 
@@ -523,6 +537,25 @@ def _from_daily(
     return result
 
 
+def _resolve_special_category(code: str) -> tuple[str, str]:
+    """从 Atom 解析特殊档期分类的页面 URL 与展示名；取不到抛 ScopeError。
+
+    特殊分类（未上线新番 / 剧场版ova与特别篇 / 大陆引进剧场版）不在季度档期发现
+    路径里，需读 Atom 用 find_special_category 定位其页面地址与本站展示名。
+    """
+    try:
+        text = fetch_url(
+            ATOM_URL, opener=build_opener(None, resolve_insecure(None)), timeout=15.0
+        )
+    except Exception as exc:  # noqa: BLE001 - 取不到 Atom 直接回显原因，不抛栈
+        raise ScopeError(f"无法读取 Atom 以定位特殊分类：{_short_reason(exc)}")
+    try:
+        info = find_special_category(text, code)
+    except SeasonNotFoundError as exc:
+        raise ScopeError(f"Atom 中未发现特殊档期分类：{code}") from exc
+    return info.url, info.title
+
+
 def _auto_fill_works(
     season_code: str, *, apply: bool, session_factory, trigger: str
 ) -> str:
@@ -564,8 +597,24 @@ def _execute(
         return _from_bangumi(summary, spec, parsed, mode)
 
     if spec.key == TASK_YUC:
+        season_code = parsed.season_code
+        if season_code in crud.SCHEDULE_CATEGORY_LABELS:
+            # 特殊档期分类：从 Atom 解析页面 URL 与展示名后直接抓页面（不经档期发现），
+            # 写入时带 category；特殊分类不做自动补库（不是 YYYYMM 档期，填库无意义）。
+            url, label = _resolve_special_category(season_code)
+            summary = run_sync(
+                season_code,
+                session_factory=session_factory,
+                apply=apply,
+                insecure=resolve_insecure(None),
+                season_url=url,
+                season_title=label,
+                category=season_code,
+            )
+            result = _from_yuc(summary, spec, parsed, mode)
+            return result
         summary = run_sync(
-            parsed.season_code,
+            season_code,
             session_factory=session_factory,
             apply=apply,
             insecure=resolve_insecure(None),
@@ -573,7 +622,7 @@ def _execute(
         result = _from_yuc(summary, spec, parsed, mode)
         # 自动接力补库：档期里有、作品库里没有的作品直接入库。
         note = _auto_fill_works(
-            parsed.season_code,
+            season_code,
             apply=apply,
             session_factory=session_factory,
             trigger=trigger,

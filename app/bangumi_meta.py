@@ -57,6 +57,8 @@ LONG_ROLES = (
 
 # 长尾职员转正门槛：在本站累计出现 ≥10 部作品才展示（数据驱动，不维护名单）。
 LONG_TIER_MIN_WORKS = 10
+# 原文简介入库上限（Bangumi 个别条目简介极长，避免把整页撑爆）
+SUMMARY_MAX_LEN = 4000
 
 # 客观信息里值得展示的键（其余 infobox 一律丢弃，避免「没人关心的信息占服务器」）。
 FACT_KEYS = ("放送星期", "播放结束", "放送开始", "官方网站", "别名", "制作", "企画")
@@ -131,6 +133,19 @@ def media_label(payload: dict) -> str | None:
 def parse_year(date_text) -> int | None:
     head = str(date_text or "")[:4]
     return int(head) if head.isdigit() else None
+
+
+def clean_summary(raw) -> str:
+    """Bangumi 简介清洗：去首尾空白、压掉内部连续空行，超长截断。
+
+    返回空串表示这部没有原文简介（调用方据此不写库、详情页不显示切换入口）。
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    # Bangumi 的 summary 常带成对换行，HTML 里会变成额外空行；压成单行更贴近阅读习惯
+    text = re.sub(r"\s*\n\s*", " ", text)
+    return text[:SUMMARY_MAX_LEN]
 
 
 def build_meta(
@@ -237,6 +252,9 @@ def build_meta(
         "credits": credits,
         "cast": cast,
         "facts": facts,
+        # Bangumi 条目自带的简介（原始语言，多为日文）→ 详情页语言切换的「原文」。
+        # 与中文简介相同的条目由 sync_content_meta 挡掉，不会出现两份一样的文字。
+        "summary_original": clean_summary(subject.get("summary")),
     }
 
 
@@ -329,6 +347,16 @@ def sync_content_meta(
         content.episodes = meta["episodes"]
     if meta["year"] and not content.year:
         content.year = meta["year"]
+    # 原文简介：只在为空、且确实与中文简介不同时写入。
+    # 不覆盖已有值（可能是人工维护）；相同则跳过，否则详情页会出现两份一样的文字、
+    # 语言切换入口也变得没有意义。
+    original_summary = meta.get("summary_original") or ""
+    if (
+        original_summary
+        and not (content.summary_original or "").strip()
+        and original_summary != (content.summary or "").strip()
+    ):
+        content.summary_original = original_summary
     content.meta_fetched_at = content.meta_fetched_at or datetime.now()
     # 补全成功即清除失败标记：下一轮 TTL 到期前不再重复请求。
     content.meta_failed_at = None

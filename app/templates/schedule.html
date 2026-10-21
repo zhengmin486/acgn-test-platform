@@ -11,7 +11,7 @@
     <a class="work-cover-box" href="/contents?q={{ item.title_main|urlencode }}" tabindex="-1" aria-hidden="true">
         <span class="work-cover">{{ item.title_main[:1] }}</span>
         {% if item.image_url %}
-        <img class="work-cover" src="{{ item.image_url }}" referrerpolicy="no-referrer" loading="lazy" alt="{{ item.title_main }}" onerror="this.style.display='none'">
+        <img class="work-cover" src="{{ item.image_url }}" referrerpolicy="no-referrer" loading="lazy" width="400" height="600" decoding="async" alt="{{ item.title_main }}" onerror="this.style.display='none'">
         {% endif %}
         {% if item.broadcast_time %}
         <span class="schedule-time">{{ item.broadcast_time }}</span>
@@ -54,19 +54,36 @@
 <div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-3">
     <div>
         <h1 class="h3 mb-1 section-heading">新番档期</h1>
-        {% if seasons %}
+        {% if seasons or categories %}
         <p class="text-muted small mb-0">档期数据每日自动更新，欢迎收藏追番。</p>
         {% endif %}
     </div>
 </div>
 
-{% if not seasons %}
+{# ===== 特殊分类 tab：未上线新番 / 剧场版ova与特别篇 / 大陆引进剧场版 ===== #}
+{% if categories %}
+<div class="season-nav mb-3">
+    <a class="season-pill{% if not current_category %} active{% endif %}"
+       href="/schedule">季度档期</a>
+    {% for c in categories %}
+    <a class="season-pill{% if c.code == current_category %} active{% endif %}"
+       href="/schedule?category={{ c.code }}"
+       title="已同步 {{ c.count }} 部">
+        {{ c.label }}
+        <span class="season-count">{{ c.count }}</span>
+    </a>
+    {% endfor %}
+</div>
+{% endif %}
+
+{% if not has_schedule_data %}
 <div class="detail-empty">
     新番档期数据整理中，稍后再来看看；也可以先去 <a href="/contents">全部作品</a> 逛逛。
 </div>
 {% else %}
 
-{# ===== 季度导航 ===== #}
+{# ===== 季度导航（仅季度档期维度显示） ===== #}
+{% if not current_category %}
 <div class="season-nav mb-3">
     {% for s in seasons %}
     <a class="season-pill{% if s.season_code == current_season %} active{% endif %}"
@@ -77,10 +94,12 @@
     </a>
     {% endfor %}
 </div>
+{% endif %}
 
-{# ===== 筛选（保留当前档期）：与作品页 / 资讯页同款面板 ===== #}
+{# ===== 筛选（保留当前维度）：与作品页 / 资讯页同款面板 ===== #}
 <form class="filter-panel row g-2 align-items-end mb-3" method="get">
-    <input type="hidden" name="season" value="{{ current_season }}">
+    {% if current_category %}<input type="hidden" name="category" value="{{ current_category }}">
+    {% else %}<input type="hidden" name="season" value="{{ current_season }}">{% endif %}
     <div class="col-5 col-sm-3 col-lg-2">
         <label class="form-label small mb-0" for="schedule-weekday">星期</label>
         <select name="weekday" id="schedule-weekday" class="form-select form-select-sm">
@@ -101,7 +120,7 @@
 </form>
 
 <p class="text-muted small">
-    档期 {{ current_season }} · 共 {{ total }} 部作品
+    {% if current_category %}分类 {{ current_label }}{% else %}档期 {{ current_season }}{% endif %} · 共 {{ total }} 部作品
     {% if not grouped_mode %} · 第 {{ page }}/{{ total_pages }} 页{% endif %}
 </p>
 
@@ -131,7 +150,7 @@
 </div>
 
 {% if total_pages > 1 %}
-{% set page_query = '/schedule?season=' ~ (current_season|urlencode) ~ '&weekday=' ~ (weekday if weekday else '') ~ '&q=' ~ (q|urlencode) ~ '&page=' %}
+{% set page_query = '/schedule?' ~ ('category=' ~ (current_category|urlencode) ~ '&' if current_category else 'season=' ~ (current_season|urlencode) ~ '&') ~ 'weekday=' ~ (weekday if weekday else '') ~ '&q=' ~ (q|urlencode) ~ '&page=' %}
 <nav class="mt-3">
     <ul class="pagination pagination-sm mb-0">
         {% if page > 1 %}

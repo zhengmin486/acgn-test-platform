@@ -216,7 +216,7 @@
 
 {% if not contents %}
 <div class="detail-empty detail-empty--illustration">
-    <img class="contents-empty-img" src="/static/img/contents/contents-empty.png" alt="" width="240" height="179" loading="lazy">
+    <img class="contents-empty-img" src="/static/img/contents/contents-empty.png" alt="" width="240" height="179" loading="lazy" decoding="async">
     <div>
         {% if search_mode %}
         没有找到匹配的内容。试试更短的关键词，或<a href="/contents">清除筛选</a>查看全部作品。
@@ -241,7 +241,7 @@
         <span class="work-row-cover">
             <span class="work-cover" aria-hidden="true">{{ item.title[:1] }}</span>
             {% if item.image_url %}
-            <img class="work-cover" src="{{ thumb_src(item.image_url) }}" alt="{{ item.title }}封面" loading="lazy" onerror="this.style.display='none'">
+            <img class="work-cover" src="{{ thumb_src(item.image_url) }}" alt="{{ item.title }}封面" loading="lazy" width="400" height="600" decoding="async" onerror="this.style.display='none'">
             {% endif %}
         </span>
         <span class="work-row-main">
@@ -276,7 +276,7 @@
         <span class="work-cover-box">
             <span class="work-cover" aria-hidden="true">{{ item.title[:1] }}</span>
             {% if item.image_url %}
-            <img class="work-cover" src="{{ thumb_src(item.image_url) }}" alt="{{ item.title }}封面" loading="lazy" onerror="this.style.display='none'">
+            <img class="work-cover" src="{{ thumb_src(item.image_url) }}" alt="{{ item.title }}封面" loading="lazy" width="400" height="600" decoding="async" onerror="this.style.display='none'">
             {% endif %}
             {% if item.year %}<span class="work-card-year">{{ item.year }}</span>{% endif %}
         </span>
@@ -317,7 +317,7 @@
         <span class="bili-cover work-cover-box">
             <span class="work-cover" aria-hidden="true">{{ item.title[:1] }}</span>
             {% if item.image_url %}
-            <img class="work-cover" src="{{ thumb_src(item.image_url) }}" alt="{{ item.title }}封面" loading="lazy" onerror="this.style.display='none'">
+            <img class="work-cover" src="{{ thumb_src(item.image_url) }}" alt="{{ item.title }}封面" loading="lazy" width="400" height="600" decoding="async" onerror="this.style.display='none'">
             {% endif %}
             {# 封面左上徽标列：四色类型签 + 「文学」细分角标（book_kind=literature 时，
                与网格视图同口径——默认视图也不能丢了这个区分） #}

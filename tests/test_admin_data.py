@@ -375,6 +375,74 @@ def test_resync_unexpected_error_is_reported(data_env, monkeypatch):
     assert "重新同步未完成" in page
 
 
+# ---------- 特殊档期分类（未上线新番 / 剧场版ova与特别篇 / 大陆引进剧场版） ----------
+
+
+def test_schedules_page_lists_special_categories(data_env):
+    """管理页的分类下拉给出三个固定分类及其条数。"""
+    body = data_env.admin.get("/manage/schedules").text
+    for label in ("未上线新番", "剧场版ova与特别篇", "大陆引进剧场版"):
+        assert label in body
+
+
+def test_schedules_page_filters_by_category(data_env):
+    """按分类筛选：只列出该分类作品，季度档期作品不串入。"""
+    db = data_env.session_factory()
+    try:
+        db.add(AnimeSchedule(season_code="unreleased", source_key="未上线作品",
+                             title_main="未上线作品", category="unreleased",
+                             weekday=3, platforms=[], source_url="https://yuc.wiki/new/"))
+        db.commit()
+    finally:
+        db.close()
+
+    body = data_env.admin.get("/manage/schedules", params={"category": "unreleased"}).text
+    assert "未上线作品" in body
+    assert "作品X" not in body
+    assert "作品Z" not in body
+    # 分类维度以中文点名呈现，不裸奔分类码
+    assert "未上线新番" in body
+
+
+def test_schedules_page_ignores_unknown_category(data_env):
+    """非法分类码宽容忽略（回落全部），不 500。"""
+    resp = data_env.admin.get("/manage/schedules", params={"category": "不存在"})
+    assert resp.status_code == 200
+    assert "作品X" in resp.text
+
+
+def test_special_category_record_shows_label_not_raw_code(data_env):
+    """特殊分类记录在列表里显示中文点名，查看链接指向分类视图。"""
+    db = data_env.session_factory()
+    try:
+        db.add(AnimeSchedule(season_code="cn_movie", source_key="引进剧场",
+                             title_main="引进剧场", category="cn_movie",
+                             weekday=5, platforms=[], source_url="https://yuc.wiki/cnmovie/"))
+        db.commit()
+    finally:
+        db.close()
+
+    body = data_env.admin.get("/manage/schedules").text
+    assert "大陆引进剧场版" in body
+    assert "/schedule?category=cn_movie" in body
+
+
+def test_resync_special_category_uses_category_flow(data_env, monkeypatch):
+    """重新同步特殊分类：走分类同步通道（run_sync_special_category），不按季度档期抓。"""
+    calls: list[str] = []
+
+    def _stub(code, **kwargs):
+        calls.append(code)
+        return _StubSummary()
+
+    monkeypatch.setattr(content_admin_pages, "run_sync_special_category", _stub)
+    resp = data_env.admin.post("/manage/schedules/resync",
+                                data={"season_code": "unreleased"}, follow_redirects=False)
+    assert resp.status_code == 303
+    assert calls == ["unreleased"]
+    assert "resync=ok" in resp.headers["location"]
+
+
 # ---------- 导航与布局 ----------
 
 def test_manage_pages_render_in_content_platform(data_env):

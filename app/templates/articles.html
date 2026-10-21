@@ -1,16 +1,19 @@
 {% extends "base_content.html" %}
+{% from "_pager.html" import pager %}
 
 {% block title %}ACGN 资讯{% endblock %}
 
 {# 列表版式：头条卡（左图右文）+ 卡片网格。
-   全部资讯按发布时间从新到旧排列，第一篇天然是「最新」，用头条位承载；
-   搜索态不分主次，结果一律进网格。 #}
+   本页契约是「全部资讯」：不折叠官方 PR、不做类别配额，只分页（每页 20）。
+   首页 / 的精选位才是折叠 PR + 优先级 + 类别配额那一套（crud.list_home_feed）。
+   全部资讯按发布时间从新到旧排列，第一页第一篇天然是「最新」，用头条位承载；
+   搜索 / 分类筛选 / 翻页后不再分主次，结果一律进网格。 #}
 {% block content %}
 <div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-3">
     <div>
         <h1 class="h3 mb-1 section-heading">ACGN 资讯</h1>
         <p class="text-muted small mb-0">
-            {% if q %}搜索“{{ q }}” · 共 {{ articles|length }} 篇结果{% else %}共 {{ articles|length }} 篇资讯 · 按发布时间从新到旧排列{% endif %}
+            {% if q %}搜索“{{ q }}” · 共 {{ total }} 篇结果{% elif category %}分类「{{ category }}」 · 共 {{ total }} 篇资讯 · 按发布时间从新到旧排列{% else %}共 {{ total }} 篇资讯 · 按发布时间从新到旧排列{% endif %}
         </p>
     </div>
     <a class="btn btn-outline-secondary btn-sm" href="/">&larr; 返回首页</a>
@@ -18,23 +21,36 @@
 
 {# ===== 资讯搜索：标题/摘要/正文关键词（GET，无 JS），与作品页筛选栏同款式 ===== #}
 <form class="filter-panel row g-2 align-items-end mb-3" method="get" action="/articles">
+    {% if category %}<input type="hidden" name="category" value="{{ category }}">{% endif %}
     <div class="col-12 col-md">
         <label class="form-label small mb-0" for="articles-q">关键词</label>
         <input type="text" name="q" id="articles-q" value="{{ q }}" class="form-control form-control-sm" placeholder="搜索标题 / 摘要 / 正文">
     </div>
     <div class="col-auto">
         <button class="btn btn-primary btn-sm" type="submit">搜索</button>
-        <a class="btn btn-outline-secondary btn-sm" href="/articles">重置</a>
+        <a class="btn btn-outline-secondary btn-sm" href="/articles{% if category %}?category={{ category|urlencode }}{% endif %}">重置</a>
     </div>
 </form>
 
+{# ===== ACGN 分类筛选：动画 / 漫画 / 游戏 / 轻小说；分不出类型的归「综合动态」兜底桶。
+   来源不做筛选入口（资讯仍保留来源信息，只在详情页可见）。 #}
+{% if categories|length > 1 %}
+<div class="d-flex flex-wrap align-items-center gap-2 mb-3">
+    <span class="text-muted small">分类</span>
+    <a class="tag-chip{% if not category %} active{% endif %}" href="/articles{% if q %}?q={{ q|urlencode }}{% endif %}">全部<span class="tag-count">{{ total_all }}</span></a>
+    {% for name, count in categories %}
+    <a class="tag-chip{% if category == name %} active{% endif %}" href="/articles?category={{ name|urlencode }}{% if q %}&amp;q={{ q|urlencode }}{% endif %}">{{ name }}<span class="tag-count">{{ count }}</span></a>
+    {% endfor %}
+</div>
+{% endif %}
+
 {% if not articles %}
 <div class="detail-empty">
-    {% if q %}没有匹配“{{ q }}”的资讯，换个关键词试试。<br><a class="small" href="/articles">查看全部资讯</a>{% else %}暂无资讯内容。{% endif %}
+    {% if q %}没有匹配“{{ q }}”的资讯，换个关键词试试。<br><a class="small" href="/articles">查看全部资讯</a>{% elif category %}该分类暂无资讯。<br><a class="small" href="/articles">查看全部资讯</a>{% else %}暂无资讯内容。{% endif %}
 </div>
 {% else %}
-{% set featured = articles[0] if not q else None %}
-{% set rest = articles[1:] if not q else articles %}
+{% set featured = articles[0] if (page == 1 and not q and (not category or category == '动画')) else None %}
+{% set rest = articles[1:] if featured else articles %}
 {# 成人内容全局显示设置：开启时隐藏已标记资讯的图片与露骨摘要，以普通提示替代；
    作品名 / 日期 / 非露骨信息照常展示（这不是年龄验证）。 #}
 {% macro adult_summary(article, limit) %}
@@ -52,7 +68,7 @@
         {% if hide_adult and featured.is_adult %}
         <span class="article-thumb-fallback">{{ featured.category }}</span>
         {% elif featured.image_url %}
-        <img src="{{ featured.image_url }}" alt="" loading="eager">
+        <img src="{{ featured.image_url }}" alt="" width="640" height="360" loading="eager" decoding="async">
         {% else %}
         <span class="article-thumb-fallback">{{ featured.category }}</span>
         {% endif %}
@@ -60,7 +76,7 @@
     <div class="article-feature-body">
         <div class="article-meta">
             <span class="badge detail-type-badge-sm">{{ featured.category }}</span>
-            <span>{{ featured.published_at.strftime('%Y-%m-%d %H:%M') }}</span>
+            <span>{{ news_time(featured.published_at) }}</span>
             <span class="article-flag">最新</span>
         </div>
         <h2 class="article-feature-title">
@@ -89,7 +105,7 @@
             {% if hide_adult and article.is_adult %}
             <span class="article-thumb-fallback">{{ article.category }}</span>
             {% elif article.image_url %}
-            <img src="{{ article.image_url }}" alt="" loading="lazy">
+            <img src="{{ article.image_url }}" alt="" width="320" height="180" loading="lazy" decoding="async">
             {% else %}
             <span class="article-thumb-fallback">{{ article.category }}</span>
             {% endif %}
@@ -97,7 +113,7 @@
         <div class="article-card-main">
             <div class="article-meta">
                 <span class="badge detail-type-badge-sm">{{ article.category }}</span>
-                <span>{{ article.published_at.strftime('%Y-%m-%d %H:%M') }}</span>
+                <span>{{ news_time(article.published_at) }}</span>
                 {% if hide_adult and article.is_adult %}<span class="article-flag">成人内容已隐藏</span>{% endif %}
             </div>
             <h2 class="article-card-heading">
@@ -117,6 +133,12 @@
         </div>
     </article>
     {% endfor %}
+</div>
+{% endif %}
+
+{% if total_pages > 1 %}
+<div class="d-flex justify-content-center mt-4">
+    {{ pager(pager_base, page, total_pages) }}
 </div>
 {% endif %}
 {% endif %}

@@ -41,7 +41,8 @@
                 <h2 class="h5 mb-1">新番档期</h2>
                 <p class="text-muted small mb-3">
                     共 <strong>{{ schedule_total }}</strong> 条档期作品，覆盖
-                    <strong>{{ season_total }}</strong> 个档期。
+                    <strong>{{ season_total }}</strong> 个档期{% if category_total %}、
+                    <strong>{{ category_total }}</strong> 个特殊分类{% endif %}。
                 </p>
                 <p class="small text-secondary mb-3">支持查看、删除与按档期重新同步。</p>
                 <a class="btn btn-sm btn-outline-primary mt-auto align-self-start"

@@ -35,13 +35,18 @@
             <div class="detail-cover-box">
                 <div class="detail-cover" aria-hidden="true">{{ content.title[:1] }}</div>
                 {% if content.image_url %}
-                <img class="detail-cover" src="{{ full_src(content.image_url) }}" alt="{{ content.title }}封面" onerror="this.style.display='none'">
+                <img class="detail-cover" src="{{ full_src(content.image_url) }}" alt="{{ content.title }}封面" width="168" height="252" loading="eager" fetchpriority="high" decoding="async" onerror="this.style.display='none'">
                 {% endif %}
             </div>
 
             <div class="detail-hero-main">
                 <div class="detail-title-row">
-                    <h1 class="detail-title mb-0">{{ content.title }}</h1>
+                    <div class="detail-title-main">
+                        <h1 class="detail-title mb-0">{{ content.title }}</h1>
+                        {% if content.title_original %}
+                        <p class="detail-title-orig mb-0">{{ content.title_original }}</p>
+                        {% endif %}
+                    </div>
                     <span class="badge detail-type-badge">{{ type_label }}</span>
                     {% if content.book_kind == 'literature' %}
                     <span class="badge detail-kind-badge" title="日本普通小说：不是文库出身的轻小说">文学</span>
@@ -68,11 +73,42 @@
                         {% if content.episodes %}<span class="detail-chip">{{ content.episodes }} 话</span>{% endif %}
                     </span>
                 </div>
+            </div>
 
-                {# 常用操作（拇指区）：收藏主按钮 + 标注 pill。data-* 标记供 base.html 脚本做无刷新切换；
-                   无 JS 时仍是普通表单 POST + 303 整页回跳。
-                   注意：标注表单与其「清除标注」表单必须是同级兄弟节点（脚本按 parentNode 定位）。 #}
-                <div class="detail-actions">
+                {% if content.summary or content.summary_original %}
+                {# 简介：PC 上是独立右栏（跟封面/信息列并排，吃满右半宽度），
+                   手机退回右列跟随评分行；默认裁 4 行，超出才出「展开」。
+                   有原文简介时才出现「中文 / 原文」切换，只有一种语言时不显示入口；
+                   两段文字都在 DOM 里但同一时刻只显示一段，切换只是换 hidden。 #}
+                <div class="detail-summary-block">
+                    <div class="detail-summary-head">
+                        <span class="detail-summary-title">简介</span>
+                        {% if content.summary and content.summary_original %}
+                        <span class="detail-summary-lang" role="group" aria-label="简介语言">
+                            <button type="button" class="detail-lang-btn is-active" data-summary-lang="zh"
+                                    aria-pressed="true">中文</button>
+                            <button type="button" class="detail-lang-btn" data-summary-lang="orig"
+                                    aria-pressed="false">原文</button>
+                        </span>
+                        {% endif %}
+                    </div>
+                    {% if content.summary %}
+                    <p class="detail-summary mb-0{% if content.summary|length > 150 %} is-clamped{% endif %}"
+                       id="detail-summary">{{ content.summary }}</p>
+                    {% endif %}
+                    {% if content.summary_original %}
+                    <p class="detail-summary mb-0{% if content.summary_original|length > 150 %} is-clamped{% endif %}"
+                       id="detail-summary-orig"{% if content.summary %} hidden{% endif %}>{{ content.summary_original }}</p>
+                    {% endif %}
+                    <button class="detail-summary-toggle" type="button" data-summary-toggle
+                            aria-controls="detail-summary" aria-expanded="false" hidden><span data-toggle-label>展开简介</span></button>
+                </div>
+                {% endif %}
+
+        {# 收藏 / 标注：整条操作栏移到封面与信息两列之下，占满整宽。
+           原先挤在右列里会把简介顶出封面下沿；放下方后右列只留「标题/原名/评分/简介」，
+           高度刚好和 168px 封面齐平，拇指区也仍然在同一屏内。 #}
+        <div class="detail-actions">
                     {% if current_user %}
                     <form method="post" action="/contents/{{ content.id }}/favorite" class="m-0"
                           data-ajax-fav data-label-add="收藏作品" data-label-remove="取消收藏"
@@ -103,33 +139,251 @@
                     </span>
                     <a class="small detail-actions-link" href="/me?tab=favorites">我的收藏 &rarr;</a>
                     {% else %}
-                    <a class="btn btn-sm btn-outline-primary" href="/login?next=/contents/{{ content.id }}">登录后可收藏作品</a>
-                    <span class="small text-muted">登录后可标注「看过 / 未看 / 想看」，标注会自动加入收藏</span>
+                    {# 游客：不再常驻登录提示条。需要登录的操作照常展示，点了才弹登录窗，
+                       关掉后仍停在本页。按钮不带 name/action，游客页不会出现 status 表单。 #}
+                    <button class="btn btn-sm btn-primary" type="button" data-login-gate="收藏">
+                        <svg class="svg-ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20.5s-7.6-4.8-9.3-9.1A5.2 5.2 0 0 1 12 6.5a5.2 5.2 0 0 1 9.3 4.9c-1.7 4.3-9.3 9.1-9.3 9.1z"/></svg><span>收藏作品</span>
+                    </button>
+                    <span class="detail-status-group">
+                        <span class="detail-status-label">标注</span>
+                        {% for key, label in status_labels.items() %}
+                        <button class="status-pill" type="button" data-login-gate="{{ label }}">{{ label }}</button>
+                        {% endfor %}
+                    </span>
                     {% endif %}
-                </div>
-
-                {% if content.summary %}
-                <p class="detail-summary mb-0">{{ content.summary }}</p>
-                {% endif %}
-            </div>
         </div>
     </div>
 </section>
 
-{# 系列作品（续接区）：紧凑横向关系条，不做大型内容区块。
-   职责是「我在第几季、前后是什么」——关系类型 + 作品入口，点进即跳。
-   手机横向滚动并带右侧溢出暗示（is-scrollable 由本页脚本按 scrollWidth 判定，只在不溢出时隐藏）；
-   ≥992 改为换行排布，全部可见、无需滚动。
-   数据来自 crud.list_series_section：真实关系 ∪ 同系列，已去重并按关系远近 + 年份排序。 #}
+
+
+{# 资料区：标签 / 基本信息 / 制作 / 关系 / 演员与职员。
+   只做展示与跳转，不参与筛选逻辑；字段缺失时整行不渲染（模板不编造数据）。
+   排版为编辑式平铺（无卡片外壳），靠细线分隔行，避免与三个模块叠成卡片墙。 #}
+<section class="detail-meta">
+    <div class="detail-meta-head">
+        <h2 class="detail-block-title">作品资料</h2>
+        {% if current_user %}
+        <button class="detail-meta-action" type="button" data-ops-toggle
+                aria-expanded="false" aria-controls="detail-ops"><span data-toggle-label>资料维护</span></button>
+        {% else %}
+        <a class="detail-meta-action" href="/contents/{{ content.id }}/edit">申请修改资料</a>
+        {% endif %}
+    </div>
+
+    {# 资料维护：低频入口挂在标题右侧，点开才出现一块小面板，不再单独占一行 #}
+    {% if current_user %}
+    <div class="detail-ops-panel" id="detail-ops" hidden>
+        <a class="btn btn-outline-secondary btn-sm"
+           href="/contents/{{ content.id }}/edit">申请修改资料</a>
+        {% if current_user.role != 'user' %}
+        {% if request.query_params.get('cover') == 'ok' %}
+        <div class="alert alert-success py-2 mb-0 w-100">封面已更新。</div>
+        {% elif request.query_params.get('cover') == 'error' %}
+        {% set why = request.query_params.get('why') %}
+        <div class="alert alert-warning py-2 mb-0 w-100">封面上传失败：{% if why == 'too_big' %}图片超过大小上限{% elif why == 'not_image' %}只支持 jpg / png / webp / gif 图片{% elif why == 'corrupt' %}图片文件无法解码{% elif why == 'empty' %}没有选择文件{% else %}请换一张图片重试{% endif %}。</div>
+        {% endif %}
+        <form method="post" action="/manage/contents/{{ content.id }}/cover" enctype="multipart/form-data"
+              class="detail-upload">
+            <input type="hidden" name="next" value="/contents/{{ content.id }}">
+            <div class="detail-upload-field">
+                <label class="form-label small fw-semibold mb-1" for="cover-file">上传封面（jpg / png / webp / gif，≤ 5 MB）</label>
+                <input class="form-control form-control-sm" type="file" id="cover-file" name="cover"
+                       accept="image/jpeg,image/png,image/webp,image/gif" required>
+            </div>
+            <button class="btn btn-sm btn-outline-primary" type="submit">上传封面</button>
+        </form>
+        {% endif %}
+    </div>
+    {% endif %}
+
+    <div class="detail-meta-cols">
+        {# 左：基本信息卡 #}
+        <div class="detail-meta-card">
+            <h3 class="detail-meta-card-title">基本信息</h3>
+            <dl class="detail-facts">
+                {% if content.title_original %}
+                <div class="detail-fact-row"><dt>原名</dt><dd>{{ content.title_original }}</dd></div>
+                {% endif %}
+                <div class="detail-fact-row"><dt>类型</dt><dd>{{ type_label }}</dd></div>
+                {% if content.year %}<div class="detail-fact-row"><dt>年份</dt><dd>{{ content.year }}</dd></div>{% endif %}
+                {% if content.media %}<div class="detail-fact-row"><dt>媒介</dt><dd>{{ content.media }}</dd></div>{% endif %}
+                {% if content.episodes %}<div class="detail-fact-row"><dt>话数</dt><dd>{{ content.episodes }} 话</dd></div>{% endif %}
+                {% if content.source_material %}<div class="detail-fact-row"><dt>原作载体</dt><dd>{{ content.source_material }}</dd></div>{% endif %}
+                {% if content_tags %}
+                <div class="detail-fact-row">
+                    <dt>标签</dt>
+                    <dd class="detail-relation-names">
+                        {% for name in content_tags %}
+                        <a class="tag-chip" href="/contents?type={{ (content.type or '')|urlencode }}&amp;tag={{ name|urlencode }}">{{ name }}</a>
+                        {% endfor %}
+                    </dd>
+                </div>
+                {% endif %}
+                {% if content_studios %}
+                <div class="detail-fact-row">
+                    <dt>制作</dt>
+                    <dd class="detail-relation-names">
+                        {% for name in content_studios %}
+                        <a class="tag-chip" href="/studios/{{ name|urlencode }}">{{ name }}</a>
+                        {% endfor %}
+                    </dd>
+                </div>
+                {% endif %}
+                {% if content_entity_roles %}
+                <div class="detail-fact-row">
+                    <dt>关系</dt>
+                    <dd class="detail-relations">
+                        {% for role, names in content_entity_roles.items() %}
+                        <span class="detail-relation-row">
+                            <span class="detail-spec-k">{{ role }}</span>
+                            <span class="detail-relation-names">
+                                {% for name in names %}
+                                <a class="tag-chip" href="/creators/{{ name|urlencode }}">{{ name }}</a>
+                                {% endfor %}
+                            </span>
+                        </span>
+                        {% endfor %}
+                    </dd>
+                </div>
+                {% endif %}
+            </dl>
+
+            {# 补充资料（放送信息等）：只在真有次要资料时才出折叠区——
+                没有条目时展开只有「条目 ID」一行，是个空入口（见验收：空数据不出假入口）；
+                条目 ID 属次要资料，随本区一起隐藏。 #}
+            {% if content_facts %}
+            <div class="detail-facts-more">
+                <button class="detail-facts-toggle" type="button" data-facts-toggle aria-expanded="false">
+                    <span class="detail-facts-toggle-main">放送信息、电视台、官网等</span>
+                    <span class="detail-facts-toggle-sub">放送时间、官方网站及其他次要资料</span>
+                </button>
+                <div class="detail-facts-panel" data-facts-panel>
+                    {% for key, value in content_facts %}
+                    {% set raw_url = value|replace(' ', '') %}
+                    {% set fact_url = raw_url if '//' in raw_url else raw_url|replace(':/', '://', 1) %}
+                    <div class="detail-fact-row">
+                        <dt>{{ key }}</dt>
+                        <dd>{% if fact_url[:4] == 'http' %}<a class="detail-spec-link" href="{{ fact_url }}" target="_blank" rel="noopener noreferrer">{{ fact_url.split('//')[1].split('/')[0] }} &#8599;</a>{% else %}{{ value }}{% endif %}</dd>
+                    </div>
+                    {% endfor %}
+                    <div class="detail-fact-row"><dt>条目 ID</dt><dd>{{ content.id }}</dd></div>
+                </div>
+            </div>
+            {% endif %}
+
+            {% if not content_tags and not content_studios and not content_entity_roles and not content_cast and not content_credits and not content_facts %}
+            <p class="detail-facts-empty text-muted small mb-0">暂无其他标签数据</p>
+            {% endif %}
+        </div>
+
+        {# 右：角色与声优 / Staff #}
+        <div class="detail-meta-card detail-meta-card--people">
+            {% set main_credits = content_credits | selectattr('tier', 'equalto', 'main') | list %}
+            {% set long_credits = content_credits | selectattr('tier', 'equalto', 'long') | list %}
+
+            {% if content_cast %}
+            <section class="detail-people detail-people--cast">
+                <div class="detail-people-head">
+                    <h3 class="detail-people-title">角色与声优</h3>
+                    <span class="detail-rail-hint" aria-hidden="true">滑动 &rarr;</span>
+                    <button class="detail-people-link" type="button" data-credits-toggle
+                            aria-controls="cast-all" aria-expanded="false"><span data-toggle-label>查看全部</span></button>
+                </div>
+                <div class="detail-people-wrap">
+                    <ul class="detail-people-rail" data-credits-rail>
+                        {% for item in content_cast[:6] %}
+                        {# 有剧照才留图位；现在库里没有人物图，就走纯文字卡，避免大片空色块 #}
+                        <li class="detail-person-card{% if item.image_url %} detail-person-card--photo{% endif %}">
+                            {% if item.image_url %}
+                            <span class="detail-person-photo">
+                                <img src="{{ thumb_src(item.image_url) }}" alt="" loading="lazy" width="300" height="400" decoding="async">
+                            </span>
+                            {% endif %}
+                            <span class="detail-person-name">{{ item.character }}</span>
+                            {% if item.person_id %}
+                            <a class="detail-person-role" href="/cast/{{ item.person_id }}">CV {{ item.actor }}</a>
+                            {% else %}
+                            <span class="detail-person-role">CV {{ item.actor }}</span>
+                            {% endif %}
+                        </li>
+                        {% endfor %}
+                    </ul>
+                </div>
+                <div class="detail-people-all" id="cast-all" hidden>
+                    <p class="detail-credit-group">主要声优</p>
+                    <div class="detail-cast-grid">
+                        {% for item in content_cast %}
+                        <span class="detail-cast-cell">
+                            <span class="detail-cast-char">{{ item.character }}</span>
+                            {% if item.person_id %}
+                            <a class="detail-cast-actor" href="/cast/{{ item.person_id }}">{{ item.actor }}</a>
+                            {% else %}
+                            <span class="detail-cast-actor">{{ item.actor }}</span>
+                            {% endif %}
+                        </span>
+                        {% endfor %}
+                    </div>
+                </div>
+            </section>
+
+            {% endif %}
+
+            {% if main_credits or long_credits %}
+            <section class="detail-people detail-people--staff">
+                <div class="detail-people-head">
+                    <h3 class="detail-people-title">Staff</h3>
+                    <span class="detail-rail-hint" aria-hidden="true">滑动 &rarr;</span>
+                    <button class="detail-people-link" type="button" data-credits-toggle
+                            aria-controls="staff-all" aria-expanded="false"><span data-toggle-label>查看全部</span></button>
+                </div>
+                <div class="detail-people-wrap">
+                    <ul class="detail-people-rail" data-credits-rail>
+                        {% for item in main_credits[:6] %}
+                        <li class="detail-person-card{% if item.image_url %} detail-person-card--photo{% endif %}">
+                            {% if item.image_url %}
+                            <span class="detail-person-photo">
+                                <img src="{{ thumb_src(item.image_url) }}" alt="" loading="lazy" width="300" height="400" decoding="async">
+                            </span>
+                            {% endif %}
+                            <span class="detail-person-name">{{ item.name }}</span>
+                            <span class="detail-person-role">{{ item.role }}</span>
+                        </li>
+                        {% endfor %}
+                    </ul>
+                </div>
+                <div class="detail-people-all" id="staff-all" hidden>
+                    <p class="detail-credit-group">制作人员</p>
+                    <div class="detail-credit-grid">
+                        {% for item in main_credits %}
+                        <span class="detail-credit-cell"><span class="detail-credit-role">{{ item.role }}</span><span class="detail-credit-name">{{ item.name }}</span></span>
+                        {% endfor %}
+                        {% for item in long_credits %}
+                        <span class="detail-credit-cell"><span class="detail-credit-role">{{ item.role }}</span><span class="detail-credit-name">{{ item.name }}</span></span>
+                        {% endfor %}
+                    </div>
+                </div>
+            </section>
+            {% endif %}
+        </div>
+    </div>
+</section>
+
+{# 系列作品（同系列 / 前作续作导航）：放在资料之后、资讯之前。
+   紧凑横向关系条——关系类型 + 作品入口，不重复展开大型内容。
+   手机横向滚动并带右侧溢出暗示；≥992 换成换行排布，全部可见。 #}
 {% if series_contents %}
 <section class="detail-series" aria-labelledby="detail-series-heading">
     <div class="detail-series-head">
         <h2 class="detail-series-title" id="detail-series-heading">
             系列作品{% if content_series %} · {{ content_series.name }}{% endif %}
         </h2>
-        {% if content_series %}
-        <a class="detail-series-more" href="/creators/{{ content_series.name|urlencode }}">系列详情 &rarr;</a>
-        {% endif %}
+        <span class="detail-series-side">
+            <span class="detail-series-count">共 {{ series_contents|length }} 部</span>
+            {% if content_series %}
+            <a class="detail-series-more" href="/creators/{{ content_series.name|urlencode }}">系列详情 &rarr;</a>
+            {% endif %}
+        </span>
     </div>
     <div class="detail-series-wrap">
         <ul class="detail-series-rail" data-series-rail>
@@ -139,7 +393,7 @@
                     <span class="detail-series-thumb">
                         <span class="detail-series-ph" aria-hidden="true">{{ rel.title[:1] }}</span>
                         {% if rel.image_url %}
-                        <img src="{{ thumb_src(rel.image_url) }}" alt="" loading="lazy" onerror="this.style.display='none'">
+                        <img src="{{ thumb_src(rel.image_url) }}" alt="" loading="lazy" width="400" height="600" decoding="async" onerror="this.style.display='none'">
                         {% endif %}
                     </span>
                     <span class="detail-series-body">
@@ -160,158 +414,7 @@
 </section>
 {% endif %}
 
-{# 资料区：标签 / 基本信息 / 制作 / 关系 / 演员与职员。
-   只做展示与跳转，不参与筛选逻辑；字段缺失时整行不渲染（模板不编造数据）。
-   排版为编辑式平铺（无卡片外壳），靠细线分隔行，避免与三个模块叠成卡片墙。 #}
-<section class="detail-meta">
-    <h2 class="detail-block-title">作品资料</h2>
-    <dl class="detail-meta-list">
-            {% if content_tags %}
-            <div class="detail-meta-item">
-                <dt>标签</dt>
-                <dd>
-                    {% for name in content_tags %}
-                    {# 点击跳全部作品页按该标签筛选 #}
-                    <a class="tag-chip" href="/contents?type={{ (content.type or '')|urlencode }}&amp;tag={{ name|urlencode }}">{{ name }}</a>
-                    {% endfor %}
-                </dd>
-            </div>
-            {% endif %}
-            <div class="detail-meta-item">
-                <dt>基本信息</dt>
-                <dd>
-                    <span class="detail-fact"><span class="detail-fact-key">类型</span>{{ type_label }}</span>
-                    {% if content.year %}<span class="detail-fact"><span class="detail-fact-key">年份</span>{{ content.year }}</span>{% endif %}
-                    {% if content.media %}<span class="detail-fact"><span class="detail-fact-key">媒介</span>{{ content.media }}</span>{% endif %}
-                    {% if content.episodes %}<span class="detail-fact"><span class="detail-fact-key">话数</span>{{ content.episodes }} 话</span>{% endif %}
-                    {% if content.source_material %}<span class="detail-fact"><span class="detail-fact-key">原作载体</span>{{ content.source_material }}</span>{% endif %}
-                    {% for key, value in content_facts %}
-                    <span class="detail-fact"><span class="detail-fact-key">{{ key }}</span>{{ value }}</span>
-                    {% endfor %}
-                    <span class="detail-fact"><span class="detail-fact-key">条目 ID</span>{{ content.id }}</span>
-                </dd>
-            </div>
-            {% if content_studios %}
-            <div class="detail-meta-item">
-                <dt>制作</dt>
-                <dd>
-                    {% for name in content_studios %}
-                    <a class="tag-chip" href="/studios/{{ name|urlencode }}">{{ name }}</a>
-                    {% endfor %}
-                </dd>
-            </div>
-            {% endif %}
-            {# 作者 / 公司关系（Bangumi 信息卡识别，见 app/entity_links.py）：
-                按角色分组，点击姓名进索引页反查其全部作品；系列 chip 进系列详情页 #}
-            {% if content_entity_roles or content_series %}
-            <div class="detail-meta-item">
-                <dt>关系</dt>
-                <dd>
-                    {% for role, names in content_entity_roles.items() %}
-                    <span class="detail-role-group">
-                        <span class="detail-role-name">{{ role }}</span>
-                        {% for name in names %}
-                        <a class="tag-chip" href="/creators/{{ name|urlencode }}">{{ name }}</a>
-                        {% endfor %}
-                    </span>
-                    {% endfor %}
-                    {% if content_series %}
-                    <span class="detail-role-group">
-                        <span class="detail-role-name">系列</span>
-                        <a class="tag-chip" href="/creators/{{ content_series.name|urlencode }}">{{ content_series.name }}</a>
-                    </span>
-                    {% endif %}
-                </dd>
-            </div>
-            {% endif %}
-            {# 制作人员与主要声优：来自 Bangumi 元数据补全（app/bangumi_meta.py）。
-                主创（导演 / 音乐 / 系列构成 等）在上面的「关系」里已有入口，
-                这里只展示实体体系未覆盖的职位与长尾职员，避免重复。 #}
-            {% set main_credits = content_credits | selectattr('tier', 'equalto', 'main') | list %}
-            {% set long_credits = content_credits | selectattr('tier', 'equalto', 'long') | list %}
-            {% if content_cast or main_credits or long_credits %}
-            <div class="detail-meta-item">
-                <dt>演员与职员</dt>
-                <dd>
-                    {% if content_cast %}
-                    <div class="detail-role-block">
-                        <span class="detail-role-name">主要声优</span>
-                        <span class="detail-cast-list">
-                            {% for item in content_cast[:6] %}
-                            <span class="detail-cast-pair">
-                                {% if item.person_id %}
-                                <a class="tag-chip" href="/cast/{{ item.person_id }}">{{ item.actor }}</a>
-                                {% else %}
-                                <span class="tag-chip">{{ item.actor }}</span>
-                                {% endif %}
-                                <span class="detail-cast-role">&larr; {{ item.character }}</span>
-                            </span>
-                            {% endfor %}
-                        </span>
-                    </div>
-                    {% endif %}
-                    {% if main_credits %}
-                    <div class="detail-role-block">
-                        <span class="detail-role-name">制作人员</span>
-                        <span class="detail-credit-list">
-                            {% for item in main_credits %}
-                            <span class="detail-fact"><span class="detail-fact-key">{{ item.role }}</span>{{ item.name }}</span>
-                            {% endfor %}
-                        </span>
-                    </div>
-                    {% endif %}
-                    {% if long_credits %}
-                    <details class="detail-credit-more">
-                        <summary>更多制作人员（{{ long_credits|length }}）</summary>
-                        <span class="detail-credit-list mt-2">
-                            {% for item in long_credits %}
-                            <span class="detail-fact"><span class="detail-fact-key">{{ item.role }}</span>{{ item.name }}</span>
-                            {% endfor %}
-                        </span>
-                    </details>
-                    {% endif %}
-                </dd>
-            </div>
-            {% endif %}
-            {% if not content_tags and not content_studios and not content_entity_roles and not content_series and not content_cast and not content_credits and not content_facts %}
-            <div class="detail-meta-item">
-                <dt>资料</dt>
-                <dd><span class="text-muted small">暂无其他标签数据</span></dd>
-            </div>
-            {% endif %}
-        </dl>
-</section>
-
-{# 维护操作（申请修改资料 / 封面上传）：保留功能但降为次级入口，收进折叠区。
-   封面上传仅 staff（管理员 / 站长）：校验后与导入封面同管线生成缩略图与全图。 #}
-<details class="detail-ops">
-    <summary class="detail-ops-summary">维护操作</summary>
-    <div class="detail-ops-body">
-        <a class="btn btn-outline-secondary btn-sm"
-           href="/contents/{{ content.id }}/edit">申请修改资料</a>
-        {% if current_user and current_user.role != 'user' %}
-        <div class="detail-ops-block">
-            {% if request.query_params.get('cover') == 'ok' %}
-            <div class="alert alert-success py-2">封面已更新。</div>
-            {% elif request.query_params.get('cover') == 'error' %}
-            {% set why = request.query_params.get('why') %}
-            <div class="alert alert-warning py-2">封面上传失败：{% if why == 'too_big' %}图片超过大小上限{% elif why == 'not_image' %}只支持 jpg / png / webp / gif 图片{% elif why == 'corrupt' %}图片文件无法解码{% elif why == 'empty' %}没有选择文件{% else %}请换一张图片重试{% endif %}。</div>
-            {% endif %}
-            <form method="post" action="/manage/contents/{{ content.id }}/cover" enctype="multipart/form-data"
-                  class="detail-upload">
-                <input type="hidden" name="next" value="/contents/{{ content.id }}">
-                <div class="detail-upload-field">
-                    <label class="form-label small fw-semibold mb-1" for="cover-file">上传封面（jpg / png / webp / gif，≤ 5 MB）</label>
-                    <input class="form-control form-control-sm" type="file" id="cover-file" name="cover"
-                           accept="image/jpeg,image/png,image/webp,image/gif" required>
-                </div>
-                <button class="btn btn-sm btn-outline-primary" type="submit">上传封面</button>
-            </form>
-        </div>
-        {% endif %}
-    </div>
-</details>
-
+<div class="detail-bottom">
 {# 相关资讯（跟进区）：默认紧凑显示标题、日期、来源；摘要按需展开，不占首屏高度。
    空态文案沿用既有措辞（真实匹配不到时不编造关联）。 #}
 <section class="detail-block" aria-labelledby="detail-news-heading">
@@ -366,11 +469,14 @@
             <span class="detail-poster-cover">
                 <span class="detail-poster-ph" aria-hidden="true">{{ rel.title[:1] }}</span>
                 {% if rel.image_url %}
-                <img src="{{ thumb_src(rel.image_url) }}" alt="" loading="lazy" onerror="this.style.display='none'">
+                <img src="{{ thumb_src(rel.image_url) }}" alt="" loading="lazy" width="400" height="600" decoding="async" onerror="this.style.display='none'">
                 {% endif %}
+                {# 评分放到封面角标：窄卡片里「类型 · 年份 · 评分」一行放不下会折行，
+                   角标既省一行又更容易扫到探索价值 #}
+                {% if rel.rating > 0 %}<span class="detail-poster-score">{{ '%.1f' % rel.rating }}</span>{% endif %}
             </span>
             <span class="detail-poster-title">{{ rel.title }}</span>
-            <span class="detail-poster-meta">{{ type_labels.get(rel.type, rel.type) }}{% if rel.year %} · {{ rel.year }}{% endif %}{% if rel.rating > 0 %} · 评分 {{ '%.1f' % rel.rating }}{% endif %}</span>
+            <span class="detail-poster-meta">{{ type_labels.get(rel.type, rel.type) }}{% if rel.year %} · {{ rel.year }}{% endif %}</span>
             {% if related_reasons.get(rel.id) %}
             <span class="detail-poster-why">{{ related_reasons[rel.id] }}</span>
             {% endif %}
@@ -381,24 +487,171 @@
     <div class="detail-empty">暂无相关作品可推荐。</div>
     {% endif %}
 </section>
+</div>
+
 
 <div class="mt-4">
     <a class="btn btn-outline-secondary btn-sm" href="/contents" data-back-nav>返回列表</a>
 </div>
 
+{# 登录门槛弹窗：只在点了「收藏 / 看过 / 想看 / 在看」这类需要账号的操作时弹出。
+   关闭方式：右上「留在本页」、点遮罩、Esc 均可，关闭后页面状态与滚动位置不变。 #}
+<dialog class="login-gate" id="login-gate" aria-labelledby="login-gate-title">
+    <h2 class="login-gate-title" id="login-gate-title">登录后继续</h2>
+    <p class="login-gate-text">登录后可标注「看过 / 未看 / 想看」，标注会自动加入收藏</p>
+    <div class="login-gate-actions">
+        <a class="btn btn-sm btn-primary" href="/login?next=/contents/{{ content.id }}">去登录</a>
+        <a class="btn btn-sm btn-outline-secondary" href="/register">注册</a>
+        <button class="btn btn-link btn-sm text-muted p-0" type="button" data-gate-close>留在本页</button>
+    </div>
+</dialog>
+
 <script>
-/* 系列关系条的横向溢出暗示：只有真的能横向滚动时才显示右侧渐隐，
-   条目少、能排下时不出现假的「还能滑」提示。纯渐进增强，无脚本也能滚动。 */
-(function () {
-    var rail = document.querySelector("[data-series-rail]");
-    if (!rail) return;
+/* 系列 / 角色 / Staff 横向轨道：只有真能滑动时才亮右侧渐隐（与「滑动 →」提示同步） */
+Array.prototype.forEach.call(document.querySelectorAll("[data-credits-rail]"), function (rail) {
     var wrap = rail.parentNode;
+    var group = rail.closest(".detail-people");
     function sync() {
-        wrap.classList.toggle("is-scrollable", rail.scrollWidth - rail.clientWidth > 4);
+        var scrollable = rail.scrollWidth - rail.clientWidth > 4;
+        wrap.classList.toggle("is-scrollable", scrollable);
+        if (group) group.classList.toggle("is-scrollable", scrollable);
     }
     sync();
     window.addEventListener("resize", sync);
     if (window.ResizeObserver) { new ResizeObserver(sync).observe(rail); }
+});
+
+/* 查看全部 / 收起：每条轨道各自独立，展开时把横滑条收起，避免两份名单并存。
+   按钮文字只换 label span——旋转箭头由 CSS 依 aria-expanded 管理，不参与文字替换。 */
+Array.prototype.forEach.call(document.querySelectorAll("[data-credits-toggle]"), function (btn) {
+    var panel = document.getElementById(btn.getAttribute("aria-controls"));
+    if (!panel) return;
+    var group = btn.closest(".detail-people");
+    var railWrap = group ? (group.querySelector(".detail-people-wrap") || group.querySelector(".detail-credits-wrap")) : null;
+    var label = btn.querySelector("[data-toggle-label]");
+    btn.addEventListener("click", function () {
+        var expand = panel.hasAttribute("hidden");
+        if (expand) {
+            panel.removeAttribute("hidden");
+            if (railWrap) railWrap.hidden = true;
+        } else {
+            panel.setAttribute("hidden", "");
+            if (railWrap) railWrap.hidden = false;
+        }
+        if (label) label.textContent = expand ? "收起" : "查看全部";
+        btn.setAttribute("aria-expanded", expand ? "true" : "false");
+    });
+});
+
+/* 「更多信息」折叠：手机默认收起，桌面由 CSS 强制展开、按钮隐藏 */
+(function () {
+    var btn = document.querySelector("[data-facts-toggle]");
+    var panel = document.querySelector("[data-facts-panel]");
+    if (!btn || !panel) return;
+    btn.addEventListener("click", function () {
+        var open = panel.classList.toggle("is-open");
+        btn.classList.toggle("is-open", open);
+        btn.setAttribute("aria-expanded", open ? "true" : "false");
+    });
+})();
+
+/* 资料维护：标题右侧入口切一个小面板，默认关闭，不占整行 */
+(function () {
+    var btn = document.querySelector("[data-ops-toggle]");
+    var panel = document.getElementById("detail-ops");
+    if (!btn || !panel) return;
+    var label = btn.querySelector("[data-toggle-label]");
+    btn.addEventListener("click", function () {
+        var open = panel.hasAttribute("hidden");
+        if (open) panel.removeAttribute("hidden");
+        else panel.setAttribute("hidden", "");
+        btn.setAttribute("aria-expanded", open ? "true" : "false");
+        if (label) label.textContent = open ? "收起" : "资料维护";
+    });
+})();
+
+/* 登录门槛：点「收藏 / 标注」才弹窗；<dialog> 不支持时退回登录页 */
+(function () {
+    var dlg = document.getElementById("login-gate");
+    if (!dlg) return;
+    var loginHref = dlg.querySelector(".btn-primary") ? dlg.querySelector(".btn-primary").href : "/login";
+    document.addEventListener("click", function (event) {
+        var trigger = event.target.closest && event.target.closest("[data-login-gate]");
+        if (!trigger) return;
+        event.preventDefault();
+        if (typeof dlg.showModal === "function") {
+            dlg.showModal();
+        } else {
+            window.location.href = loginHref;
+        }
+    });
+    dlg.addEventListener("click", function (event) {
+        if (event.target === dlg || (event.target.closest && event.target.closest("[data-gate-close]"))) {
+            dlg.close();
+        }
+    });
+})();
+
+/* 简介：折叠 / 展开 / 语言切换（中文 · 原文）。
+   是否出「展开」按真实溢出判定（scrollHeight > clientHeight），不靠字数阈值。
+   展开态在 CSS 里写 -webkit-line-clamp: none——写 unset 在 Chrome 里不生效。 */
+(function () {
+    var btn = document.querySelector("[data-summary-toggle]");
+    var label = btn ? btn.querySelector("[data-toggle-label]") : null;
+    var zh = document.getElementById("detail-summary");
+    var orig = document.getElementById("detail-summary-orig");
+    if (!btn || !zh) return;
+
+    function visible() {
+        return orig && !orig.hidden ? orig : zh;
+    }
+
+    /* 统一走 label：箭头由 CSS 依 aria-expanded 旋转，文字不掺箭头字符 */
+    function setBtn(text, open) {
+        if (label) label.textContent = text;
+        btn.setAttribute("aria-expanded", open ? "true" : "false");
+    }
+
+    function sync() {
+        var body = visible();
+        // 展开态：按钮留着，文案变成「收起简介」（不然展开完就没法收起）。
+        // 收起态：只在真的放不下时才出现按钮，短文案自然结束、不占一行。
+        if (body.classList.contains("is-open")) {
+            btn.hidden = false;
+            setBtn("收起简介", true);
+            return;
+        }
+        setBtn("展开简介", false);
+        btn.hidden = body.scrollHeight - body.clientHeight <= 2;
+    }
+
+    /* 语言切换：只换 hidden，不跳转不刷新；同时重置折叠态，按新语言重算行数 */
+    Array.prototype.forEach.call(document.querySelectorAll("[data-summary-lang]"), function (item) {
+        item.addEventListener("click", function () {
+            var lang = item.getAttribute("data-summary-lang");
+            if (orig) orig.hidden = (lang !== "orig");
+            zh.hidden = (lang === "orig");
+            Array.prototype.forEach.call(document.querySelectorAll("[data-summary-lang]"), function (other) {
+                var on = other === item;
+                other.classList.toggle("is-active", on);
+                other.setAttribute("aria-pressed", on ? "true" : "false");
+            });
+            [zh, orig].forEach(function (p) { if (p) p.classList.remove("is-open"); });
+            btn.setAttribute("aria-controls", lang === "orig" ? "detail-summary-orig" : "detail-summary");
+            setBtn("展开简介", false);
+            requestAnimationFrame(sync);
+        });
+    });
+
+    sync();
+    window.addEventListener("resize", sync);
+
+    btn.addEventListener("click", function () {
+        var body = visible();
+        var open = body.classList.toggle("is-open");
+        setBtn(open ? "收起简介" : "展开简介", open);
+        sync();
+    });
 })();
 </script>
 {% endblock %}

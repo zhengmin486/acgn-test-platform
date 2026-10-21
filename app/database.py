@@ -21,6 +21,10 @@ def build_engine(url: str, *, busy_timeout: float | None = None) -> Engine:
 
     busy_timeout：SQLite 写锁等待秒数。脚本与线上服务共用同一个库文件时，
     并发写会抛 `database is locked`，把等待时间调宽即可（MySQL 无此问题）。
+
+    连接池参数（pool_size / max_overflow / 超时与回收 / pre_ping）走配置
+    （app.config 的 DB_POOL_*），只对非 SQLite URL 生效——SQLite 沿用
+    默认池行为，本地开发与测试不受影响。
     """
     kwargs: dict = {}
     if url.startswith("sqlite"):
@@ -28,6 +32,14 @@ def build_engine(url: str, *, busy_timeout: float | None = None) -> Engine:
         if busy_timeout is not None:
             connect_args["timeout"] = busy_timeout
         kwargs["connect_args"] = connect_args
+    else:
+        kwargs.update(
+            pool_size=settings.db_pool_size,
+            max_overflow=settings.db_max_overflow,
+            pool_timeout=settings.db_pool_timeout_seconds,
+            pool_recycle=settings.db_pool_recycle_seconds,
+            pool_pre_ping=settings.db_pool_pre_ping,
+        )
     return create_engine(url, **kwargs)
 
 

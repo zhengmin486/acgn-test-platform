@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 import zipfile
 from collections import Counter
 from pathlib import Path
@@ -28,7 +29,17 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from scripts.import_bangumi import resolve_content_type  # noqa: E402
+from scripts.fill_schedule_works import resolve_base_url  # noqa: E402
+from scripts.import_bangumi import (  # noqa: E402
+    DEFAULT_RETRIES,
+    DEFAULT_TIMEOUT,
+    DEFAULT_USER_AGENT,
+    build_opener,
+    fetch_related_subjects,
+    is_galge_payload,
+    resolve_book,
+    resolve_content_type,
+)
 
 SUBJECT_MEMBER_RE = "subject"
 
@@ -229,6 +240,106 @@ def natural_quota(total: int) -> dict[str, int]:
     }
 
 
+# ---------- 收录口径过滤（2026-10-21 用户定稿） ----------
+# - 小说只留轻小说（classify_book 判成 literature / 判不出文库信号的一律剔除）；
+# - 游戏：galge（tags 可判，不出网）直接收；非 galge 查镜像关联条目
+#   （/v0/subjects/{id}/subjects），确认有动画/漫画相关 -> payload 打
+#   ``_site_related_ip=True`` 标记（服务端 map_subject 凭此放行）；
+#   未命中或查询失败 -> 剔除（宁缺勿错：不推明知会被服务端跳过的候选）。
+# 服务端 map_subject 有同一套规则的兜底闸口，标记不可伪造绕过业务约束
+# 之外的场景（随机导入 / 手动 run_sync 的游戏走总闸）。
+
+ANIME_TYPE = 2  # Bangumi 动画；关联条目列表的 item.type 命中即算动画相关
+
+
+def has_anime_manga_relation(rel_payload) -> bool:
+    """关联条目列表里是否有动画（type=2）或漫画（关系文案带「漫画/动画」）。
+
+    端点响应的 item 结构未完全定死（见 app.entity_links.parse_related_subjects
+    的防御性注释），这里只认 dict；type 缺失时退回关系文案兜底——
+    游戏条目上出现「动画化 / 漫画化」即说明有对应改编。
+    """
+    if not isinstance(rel_payload, list):
+        return False
+    for item in rel_payload:
+        if not isinstance(item, dict):
+            continue
+        relation = str(item.get("relation") or "")
+        if item.get("type") == ANIME_TYPE:
+            return True
+        if "动画" in relation or "漫画" in relation:
+            return True
+    return False
+
+
+def apply_ingest_policy(
+    payloads: list[dict],
+    *,
+    base_url: str | None = None,
+    opener=None,
+    timeout: float = DEFAULT_TIMEOUT,
+    retries: int = DEFAULT_RETRIES,
+    user_agent: str = DEFAULT_USER_AGENT,
+    sleep=time.sleep,
+    related_fetcher=None,
+) -> tuple[list[dict], dict]:
+    """按站点收录口径过滤选品结果，返回 ``(保留的 payload, 统计)``。
+
+    只对小说 / 游戏动手（动画、漫画原样保留）；非 galge 游戏逐个查镜像
+    关联条目，命中动画 / 漫画就打 ``_site_related_ip`` 标记，查询失败按
+    「无相关」剔除——宁缺勿错，与补库 / 选品的一贯口径一致。
+    """
+    base = base_url or resolve_base_url()
+    opener = opener or build_opener(None)
+    fetch = related_fetcher or fetch_related_subjects
+
+    kept: list[dict] = []
+    stats = {
+        "novel_dropped": 0,      # 文学 / 判不出文库信号的小说
+        "game_galge": 0,         # galge（tags 命中）直接收
+        "game_related": 0,       # 非 galge 但有动画/漫画相关（打标记收）
+        "game_dropped": 0,       # 非 galge 且无相关
+        "game_fetch_failed": 0,  # 关联查询失败（该候选按剔除计）
+    }
+    for payload in payloads:
+        content_type = payload.get("_content_type")
+        if content_type == "novel":
+            _type, kind = resolve_book(payload)
+            if kind != "light_novel":
+                stats["novel_dropped"] += 1
+                continue
+            kept.append(payload)
+        elif content_type == "game":
+            if is_galge_payload(payload):
+                stats["game_galge"] += 1
+                kept.append(payload)
+                continue
+            subject_id = payload.get("id")
+            try:
+                related = fetch(
+                    int(subject_id),
+                    opener=opener,
+                    base_url=base,
+                    timeout=timeout,
+                    retries=retries,
+                    user_agent=user_agent,
+                    sleep=sleep,
+                )
+            except Exception:  # noqa: BLE001 - 查询失败按「无相关」处理，不中断选品
+                related = None
+                stats["game_fetch_failed"] += 1
+            if has_anime_manga_relation(related):
+                marked = dict(payload)
+                marked["_site_related_ip"] = True
+                kept.append(marked)
+                stats["game_related"] += 1
+            else:
+                stats["game_dropped"] += 1
+        else:
+            kept.append(payload)
+    return kept, stats
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="从官方归档按 rank 选品")
     parser.add_argument("--dump", default=str(PROJECT_ROOT / ".workbuddy/archive/dump.zip"))
@@ -265,6 +376,21 @@ def main(argv: list[str] | None = None) -> int:
         year_from=str(args.year_from) if args.year_from else "",
     )
     print(f"扫描 {scanned} 行；候选分布：{dict(type_counter)}；选中 {len(payloads)} 条")
+
+    # 收录口径过滤（2026-10-21）：小说只留轻小说，游戏只留 galge / 有动画漫画相关
+    if payloads:
+        payloads, policy_stats = apply_ingest_policy(payloads)
+        print(
+            "收录口径过滤：剔除文学小说 "
+            f"{policy_stats['novel_dropped']}、普通游戏 {policy_stats['game_dropped']}"
+            f"（galge 收 {policy_stats['game_galge']}、"
+            f"标记动画/漫画相关游戏 {policy_stats['game_related']}）"
+        )
+        if policy_stats["game_fetch_failed"]:
+            print(
+                f"  ⚠ {policy_stats['game_fetch_failed']} 个游戏的关联条目查询失败，"
+                "按「无动画/漫画相关」剔除（宁缺勿错）"
+            )
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)

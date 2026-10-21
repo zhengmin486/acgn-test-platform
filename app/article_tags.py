@@ -244,6 +244,16 @@ def _rank(scored: list[tuple[int, str]], limit: int) -> list[str]:
     return [term for _, term in scored[:limit]]
 
 
+def _is_meaningful_tag(name: str) -> bool:
+    """标签名是否值得当关键词用：纯数字 / 纯符号的直接排除。
+
+    Tag 表里混进了 `10`、`01`、`201504`、`0_` 这类历史遗留名。识别是「拿标签
+    词表去匹配正文」，数字标签会命中日期与集数（「10月」「第1话」），把 80 多篇
+    资讯全打上「10」这种毫无意义的标签。词表侧直接挡掉，比事后清洗更省事。
+    """
+    return any(char.isalpha() for char in name)
+
+
 def match_tags(
     title: str = "",
     summary: str = "",
@@ -256,7 +266,7 @@ def match_tags(
     seen: set[str] = set()
     for raw in tag_names:
         name = (raw or "").strip()
-        if not name or name in seen:
+        if not name or name in seen or not _is_meaningful_tag(name):
             continue
         seen.add(name)
         score = score_term(name, title, summary, body)
@@ -363,9 +373,12 @@ def load_vocabulary(db) -> tuple[list[str], list[tuple[int, str]], list[WorkInfo
     """一次查全三类词表（导入批次 / 回填共用，避免每篇资讯重复查询）。
 
     返回 (题材标签名, 作品标题 (id, title), 作品信息词表)。
+    标签名先过滤掉纯数字/纯符号（见 _is_meaningful_tag），免得词表里几千个
+    垃圾名参与匹配。
     """
+    tag_names = [name for name in crud.list_all_tag_names(db) if _is_meaningful_tag(name)]
     return (
-        crud.list_all_tag_names(db),
+        tag_names,
         crud.list_content_titles(db),
         build_info_terms(crud.list_work_info_terms(db)),
     )

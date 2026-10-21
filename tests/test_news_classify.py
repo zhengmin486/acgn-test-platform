@@ -56,6 +56,30 @@ def test_music_news_falls_into_related_subject_and_gets_priority():
     assert score > general
 
 
+def test_merch_promo_gets_lower_priority():
+    """商品宣传降权：同主体下，周边/联名稿的优先级必须低于作品动态稿。"""
+    work_news = _score(category="动画", text="「ベルセルク」新作アニメの制作が決定")
+    merch = _score(
+        category="动画",
+        text="「ベルセルク」ガッツ＆グリフィスがセットでフィギュア化！",
+    )
+    assert merch == work_news + nc.MERCH_PROMO_PENALTY
+    assert merch < work_news
+
+
+def test_merch_penalty_does_not_apply_to_plain_news():
+    """不命中周边词的作品动态不受降权影响。"""
+    plain = _score(category="动画", text="「ベルセルク」新エピソードの配信が開始")
+    assert plain == _score(category="动画")
+
+
+def test_merch_penalty_still_keeps_content_above_general_bucket():
+    """降权只是压一档：动画周边仍高于「综合动态」兜底桶，不会沉到看不见。"""
+    merch = _score(category="动画", text="「ワンピース」新作一番くじ全ラインナップ公開")
+    general = _score(category="综合动态", event_type=nc.EVENT_OTHER)
+    assert merch > general
+
+
 def test_creator_health_news_is_not_buried():
     """麻枝准健康状况这类重大人物消息，不因「不是新作发布」而沉底。"""
     event = nc.classify_event_type("麻枝准、体調不良により入院", "")
@@ -86,6 +110,14 @@ def test_galge_is_top_priority_within_games():
     gacha = _score(category="游戏", subcategory=nc.GAME_SUB_GACHA)
     other = _score(category="游戏", subcategory=nc.GAME_SUB_OTHER)
     assert galge > gacha > other
+
+
+def test_general_subject_same_weight_as_game():
+    """综合动态与游戏同权（2026-10-21 用户定稿）：基础分相同，抓取配额同级竞争。"""
+    general = _score(category="综合动态")
+    game = _score(category="游戏", subcategory=nc.GAME_SUB_OTHER)
+    assert general == game
+    assert nc._SUBJECT_BASE[nc.SUBJECT_GENERAL] == nc._SUBJECT_BASE[nc.SUBJECT_GAME]
 
 
 def test_galge_ranks_with_japanese_core_media():

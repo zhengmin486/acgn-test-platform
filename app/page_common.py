@@ -4,18 +4,56 @@
 共用这里定义的对象，避免重复实例化模板环境或复制渲染逻辑。
 """
 
+import logging
 from pathlib import Path
 from typing import Annotated
+from urllib.parse import urlsplit
 
 from fastapi import Depends, Request
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
 from app import media
+from app.config import settings
 from app.database import get_db
+
+logger = logging.getLogger(__name__)
 
 # 复用的依赖注解：模块级定义一次，各页面签名直接引用（FastAPI 推荐写法）。
 DbSession = Annotated[Session, Depends(get_db)]
+
+
+def maybe_enforce_storage_caps() -> None:
+    """上传成功后的存储容量巡检（节流触发，见 media.storage_cap_check_due）。
+
+    封面 / 头像目录超限时按「可再生优先」清理（app/media.enforce_storage_caps）；
+    巡检要遍历目录，故不能每次上传都跑——到节流间隔才执行一次。任何失败只记
+    日志，绝不影响上传请求本身。
+    """
+    if not media.storage_cap_check_due():
+        return
+    from app import crud  # 局部导入：数据层只在巡检时才需要
+    from app.database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        stats = media.enforce_storage_caps(
+            referenced_covers=crud.list_cover_reference_names(db),
+            referenced_avatars=crud.list_avatar_reference_names(db),
+        )
+        covers = stats["covers"]
+        avatars = stats["avatars"]
+        if covers["removed_variants"] or covers["removed_unreferenced"] or avatars["removed_unreferenced"]:
+            logger.warning(
+                "上传目录超限已清理：封面派生图 %d 个、未引用封面 %d 个、未引用头像 %d 个",
+                covers["removed_variants"],
+                covers["removed_unreferenced"],
+                avatars["removed_unreferenced"],
+            )
+    except Exception:  # 容量巡检失败不影响上传，堆栈只进日志
+        logger.exception("上传目录容量巡检失败")
+    finally:
+        db.close()
 
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -48,6 +86,33 @@ except OSError:
 # 远端完整地址原样透传；模板里直接 {{ thumb_src(item.image_url) }}。
 templates.env.globals["thumb_src"] = media.thumb_src
 templates.env.globals["full_src"] = media.full_src
+
+# 图片对外基址的 origin（base.html head 的 preconnect 用）：配置了
+# MEDIA_BASE_URL（CDN / 图床）时提前完成 DNS + TLS 握手；默认同源不输出。
+_mb = urlsplit(settings.media_base_url.strip())
+templates.env.globals["media_origin"] = (
+    f"{_mb.scheme}://{_mb.netloc}" if _mb.scheme and _mb.netloc else ""
+)
+
+
+def news_time(value, with_time: bool = True) -> str:
+    """资讯时间的展示格式：源只给到日期时**不显示 00:00**，避免编造时刻。
+
+    ANIPLEX 详情页只有日期（`Oct 20, 2026`），入库后 published_at 是当天 00:00；
+    直接 strftime('%H:%M') 会渲染成 `00:00`，看着像「凌晨刚发」，时效观感全错。
+    这里把「整点为 0」的时间当作日期粒度，只输出日期。
+    """
+    if value is None:
+        return ""
+    date_part = value.strftime("%Y-%m-%d")
+    if not with_time:
+        return date_part
+    if value.hour == 0 and value.minute == 0:
+        return date_part
+    return value.strftime("%Y-%m-%d %H:%M")
+
+
+templates.env.globals["news_time"] = news_time
 
 # 作品类型标签（模板全局 + 各路由复用的规范来源）：
 # 导航搜索的类型下拉在所有内容页都要渲染，不能依赖单页路由传参，

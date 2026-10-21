@@ -4,6 +4,7 @@
 各自独立成模块，测试平台页面见 app.testing_pages。
 """
 
+import logging
 import threading
 from datetime import datetime
 
@@ -19,6 +20,8 @@ from app.search_query import parse_query
 from app.tagging import TYPE_SPECIFIC_TAGS, form_tag_names
 
 router = APIRouter(tags=["pages"])
+
+logger = logging.getLogger(__name__)
 
 
 # ---------- 详情页的后台补全（不在请求内等外部接口） ----------
@@ -100,6 +103,8 @@ def _refresh_content_assets(content_id: int) -> None:
                 if fresh is not None:
                     bangumi_meta.mark_meta_failed(db, fresh)
     except Exception:  # noqa: BLE001 - 后台任务的异常一律不外抛
+        # 堆栈只进服务端日志（每次失败一条，不在循环里刷屏），前端无感知。
+        logger.exception("详情页后台补全失败（content_id=%s）", content_id)
         db.rollback()
     finally:
         db.close()
@@ -1011,31 +1016,99 @@ def creator_detail(request: Request, name: str, db: DbSession):
         )
 
     return render_missing(request, "作者/公司", name)
+# ACGN 分类的固定展示顺序（资讯列表页筛选条用）；未列出的分类按条数排在后面。
+ACGN_CATEGORY_ORDER = ("动画", "漫画", "游戏", "轻小说", "综合动态")
+
+
+def _ordered_category_counts(counts: list[tuple[str, int]]) -> list[tuple[str, int]]:
+    """筛选条顺序：先按 ACGN 类型固定序，再按条数降序（同类多条时稳定）。"""
+    rank = {name: index for index, name in enumerate(ACGN_CATEGORY_ORDER)}
+    return sorted(counts, key=lambda item: (rank.get(item[0], len(rank)), -item[1]))
+
+
 @router.get("/articles", response_class=HTMLResponse)
 def articles_page(
     request: Request,
     db: DbSession,
     q: str = Query(default="", max_length=80),
+    category: str = Query(default="", max_length=40),
+    page: int = Query(default=1, ge=1),
 ):
-    """资讯列表页：支持标题/摘要/正文关键词搜索。"""
-    # 未搜索时按资讯 feed 口径（优先级排序 + 类别覆盖 + 折叠官方 PR）取 30 条软配额；
-    # 搜索时按关键词召回全部命中（排序同样按优先级），保证搜索不漏。
-    articles = (
-        crud.list_articles(db, q=q or None, exclude_pr=True)
-        if q
-        else crud.list_home_feed(db, limit=HOME_NEWS_LIMIT, exclude_pr=True)
+    """资讯列表页：**全部资讯**按发布时间从新到旧分页，支持 ACGN 分类筛选与关键词搜索。
+
+    与首页精选的分工：首页 / 走 crud.list_home_feed（折叠官方 PR、按优先级、
+    单类别软配额），那是「精选位」；本页是「全部资讯」的入口，不折叠、不配额，
+    只做分页——否则官方 PR 与同类里靠后的资讯在全站就没有入口了。
+
+    筛选条按 **ACGN 类型**（动画 / 漫画 / 游戏 / 轻小说）组织，分不出 ACGN 类型的
+    资讯留在「综合动态」兜底桶（2026-10-21 用户定稿：来源不做筛选入口）。
+    """
+    page_size = crud.ARTICLES_PAGE_SIZE
+    total, articles = crud.list_articles_page(
+        db,
+        q=q or None,
+        category=category or None,
+        page=page,
+        page_size=page_size,
     )
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    if total and page > total_pages:
+        # 筛选后页码越界（如从第 5 页切到只有 1 页的分类）：夹回最后一页。
+        page = total_pages
+        total, articles = crud.list_articles_page(
+            db,
+            q=q or None,
+            category=category or None,
+            page=page,
+            page_size=page_size,
+        )
+
+    params = []
+    if q:
+        params.append(f"q={quote(q)}")
+    if category:
+        params.append(f"category={quote(category)}")
+    pager_base = "/articles?" + ("&".join(params) + "&" if params else "")
+
+    category_counts = crud.article_category_counts(db)
+    total_all = sum(count for _, count in category_counts)
+
     return templates.TemplateResponse(
         request=request,
         name="articles.html",
         context={
             "articles": articles,
             "q": q,
+            "category": category,
+            "categories": _ordered_category_counts(category_counts),
+            "total": total,
+            "total_all": total_all,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": total_pages,
+            "pager_base": pager_base,
             "hide_adult": settings.news_hide_adult_content,
             # 每篇资讯的识别标签（列表页 chips；一次查询，避免 N+1）
             "article_tags_map": crud.article_tags_map(db, [a.id for a in articles]),
         },
     )
+
+
+def article_detail_lead(article) -> str:
+    """详情页顶部摘要：正文已经覆盖摘要内容时返回空串（避免同一段出现两次）。
+
+    导入时 summary 取的是正文前 200 字，中文源尤甚——详情页会把这段先当导语渲染、
+    又在正文里再渲染一次。判定：整段包含，或前 30 字出现在正文开头 200 字内。
+    """
+    lead = (article.summary or "").strip()
+    body_text = (article.body or "").strip()
+    if not lead or not body_text:
+        return lead
+    if body_text.startswith(lead):
+        return ""
+    if len(lead) > 30 and lead[:30] in body_text[:200]:
+        return ""
+    return lead
 
 
 @router.get("/articles/{article_id}", response_class=HTMLResponse)
@@ -1057,11 +1130,16 @@ def article_detail_page(
     if article is None:
         return render_missing(request, "资讯", article_id)
 
+    # 摘要与正文开头往往是同一段（导入时 summary 就取 body 前 200 字）：
+    # 详情页先渲染摘要再渲染正文会出现「同一段说两遍」。正文已覆盖摘要时不再单独展示。
+    lead = article_detail_lead(article)
+
     return templates.TemplateResponse(
         request=request,
         name="article_detail.html",
         context={
             "article": article,
+            "lead": lead,
             # 正文行级结构：文本段 / [图] / [媒体]，模板按块渲染（body 仍是纯文本）
             "body_blocks": article_body.parse_blocks(article.body),
             "article_tags": crud.list_article_tags(db, article_id),
@@ -1120,22 +1198,31 @@ def _group_by_weekday(works: list) -> list[dict]:
 def schedule_page(
     request: Request,
     db: DbSession,
-    season: str | None = Query(default=None, max_length=6),
+    season: str | None = Query(default=None, max_length=20),
+    category: str | None = Query(default=None, max_length=20),
     q: str = Query(default=""),
     weekday: str | None = Query(default=None, max_length=4),
     page: int = Query(default=1, ge=1),
 ):
-    """新番档期页：季度导航、按星期分组浏览与关键词/星期筛选。
+    """新番档期页：季度导航 / 特殊分类 tab、按星期分组浏览与关键词/星期筛选。
 
-    默认（无 q/weekday）展示当前档期全部作品并按播出星期分组，便于逐日浏览；
-    带 q 或 weekday 时进入筛选模式，沿用分页结果列表。
-    未指定档期时默认展示最新已同步档期；数据库无任何档期数据时显示引导提示。
+    两种浏览维度互斥：给定 category（unreleased / ova_sp / cn_movie）时按特殊分类
+    展示；否则按季度档期（season=YYYYMM）展示。两者内部都支持关键词/星期筛选。
+    未指定任何维度时默认展示最新已同步季度档期；数据库无档期数据时显示引导提示。
     weekday 收字符串再归一：筛选表单的「全部」选项与分页链接在未选星期时
     都会发出 ``weekday=``（空值），严格 int 声明会 422——空串/非数字一律
     宽容忽略，与 contents 页对非法类型的处理同一原则。
     """
+    categories = crud.list_schedule_categories(db)
+    category = (category or "").strip() or None
+    valid_categories = {c["code"] for c in categories}
+    if category and category not in valid_categories:
+        category = None
+
     seasons = crud.list_schedule_seasons(db)
-    current_season = season or (seasons[0]["season_code"] if seasons else None)
+    # categories 恒为三项（含 count=0），是否有数据以“季度档期或任一特殊分类有作品”为准，
+    # 否则空库会渲染出一堆 0 计数的 tab 而非「整理中」引导态。
+    has_schedule_data = bool(seasons) or any(c["count"] for c in categories)
     if weekday is not None:
         weekday = weekday.strip()
         weekday = int(weekday) if weekday.isdigit() else None
@@ -1144,12 +1231,37 @@ def schedule_page(
     keyword = q.strip() or None
     filter_mode = bool(keyword) or weekday is not None
 
+    current_season = None
+    current_category = None
+    current_label = None
     total = 0
     works: list = []
     total_pages = 1
     weekday_groups: list[dict] = []
     season_url = None
-    if current_season:
+
+    if category:
+        current_category = category
+        current_label = next(
+            (c["label"] for c in categories if c["code"] == category), category
+        )
+        if filter_mode:
+            total, works = crud.list_schedules(
+                db,
+                category=category,
+                keyword=keyword,
+                weekday=weekday,
+                page=page,
+                page_size=SCHEDULE_PAGE_SIZE,
+            )
+            total_pages = max(1, (total + SCHEDULE_PAGE_SIZE - 1) // SCHEDULE_PAGE_SIZE)
+        else:
+            works = crud.list_all_schedules(db, category=category)
+            total = len(works)
+            weekday_groups = _group_by_weekday(works)
+        season_url = works[0].source_url if works else None
+    elif seasons:
+        current_season = season or seasons[0]["season_code"]
         if filter_mode:
             total, works = crud.list_schedules(
                 db,
@@ -1171,7 +1283,11 @@ def schedule_page(
         name="schedule.html",
         context={
             "seasons": seasons,
+            "categories": categories,
+            "has_schedule_data": has_schedule_data,
             "current_season": current_season,
+            "current_category": current_category,
+            "current_label": current_label,
             "season_url": season_url,
             "weekday_names": WEEKDAY_NAMES,
             "weekday": weekday,

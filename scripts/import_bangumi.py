@@ -246,6 +246,23 @@ def _tag_names(payload: dict) -> list[str]:
     return out
 
 
+# galge 信号词（对 tags 大小写不敏感）：Bangumi 游戏区的 galgame 系标签。
+# 视觉小说 / visual novel 也算（2026-10-21 用户补充口径：文字冒险类一并收）。
+GALGAME_TAG_RE = re.compile(
+    r"gal\s*game|ギャルゲ|美少女游戏|美少女ゲーム|visual\s*novel|视觉小说",
+    re.IGNORECASE,
+)
+
+
+def is_galge_payload(payload: dict) -> bool:
+    """游戏条目是否 galge：tags 命中 galgame 系信号词即认（只读 tags，不出网）。
+
+    只对游戏条目有意义；判定结果决定 map_subject 的收录口径（见该函数
+    2026-10-21 的游戏收录规则）。
+    """
+    return any(GALGAME_TAG_RE.search(name) for name in _tag_names(payload))
+
+
 def resolve_book(payload: dict) -> tuple[str | None, str | None]:
     """从条目 payload 解析 ``(content_type, book_kind)``。
 
@@ -1267,6 +1284,9 @@ def map_subject(payload: dict) -> MappedSubject:
     - type=2 -> anime，type=4 -> game；type=1 书籍按 platform 拆分（1001/"漫画" ->
       comic，1002/"小说" -> novel 且经 ``classify_book`` 给出 book_kind 标注；
       非日本语种的小说直接跳过）；音乐（3）与三次元/真人（5、6）跳过；
+    - 收录口径（2026-10-21）：小说只收轻小说（文学不收）；游戏只收 galge
+      （tags 判定）或带 ``_site_related_ip`` 标记（选品端确认有动画/漫画
+      相关）的条目；其余游戏跳过；
     - tags 只留题材（``extract_tags``，经 app.tagging 归一）；公司进 studios、
       年份进 year，各自有结构化位置；书籍条目另从 infobox 派生文库标签
       （``extract_book_tags``）。
@@ -1282,6 +1302,26 @@ def map_subject(payload: dict) -> MappedSubject:
         raise SubjectMappingError(
             f"暂不支持导入「{type_name}」类条目（本站只收录动画/游戏/小说/漫画；"
             "书籍区画集与非日本语种的小说也不收录）"
+        )
+
+    # ---------- 收录口径（2026-10-21 用户定稿） ----------
+    # 小说只收轻小说：文学（日本普通小说）与判不出文库信号的边界件不收。
+    # 此前口径是「文学留站内待人工复核」（classify_book 的注释里那套取舍）；
+    # 现改为入库闸口直接拦下，classify_book 本身语义不变——存量打标
+    # （scripts/mark_book_kinds.py）与其它调用方不受影响。
+    if content_type == "novel" and book_kind != BOOK_KIND_LIGHT_NOVEL:
+        raise SubjectMappingError(
+            "文学类小说不收录（本站小说区只收轻小说）"
+        )
+    # 游戏只收 galge（tags 可判），或选品端查过镜像关联条目、确认「有动画 /
+    # 漫画相关」并打上 payload["_site_related_ip"]=True 标记的条目
+    # （scripts/select_from_archive.apply_ingest_policy 负责）。标记缺失的
+    # 非 galge 游戏（随机导入、手动 run_sync 等）一律拦下。
+    if content_type == "game" and not (
+        is_galge_payload(payload) or payload.get("_site_related_ip") is True
+    ):
+        raise SubjectMappingError(
+            "普通游戏不收录（本站游戏区只收 galge 或有动画/漫画相关的游戏）"
         )
 
     title = (payload.get("name_cn") or "").strip() or (payload.get("name") or "").strip()

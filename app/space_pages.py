@@ -22,7 +22,7 @@ from app import crud, media
 from app.auth import LoginRequired, require_login_page, safe_next_url
 from app.config import settings
 from app.business_pages import CONTENT_TYPE_LABELS
-from app.page_common import DbSession, render_missing, templates
+from app.page_common import DbSession, maybe_enforce_storage_caps, render_missing, templates
 
 # 路由级守卫：整个个人空间只要求登录（不限制角色）。
 # 未登录 -> LoginRequired -> 303 跳 /login?next=...；普通用户与管理员一视同仁。
@@ -179,8 +179,12 @@ async def upload_avatar(
     if file is None or not file.filename:
         return RedirectResponse("/me?avatar_err=empty", status_code=303)
 
-    # 多读 1KB 用于判断「是否超限」，避免把超大文件整个读进内存
-    data = await file.read(settings.avatar_upload_max_bytes + 1024)
+    # 多读 1KB 用于判断「是否超限」，避免把超大文件整个读进内存；
+    # 读完即关，释放 multipart 落盘的临时文件。
+    try:
+        data = await file.read(settings.avatar_upload_max_bytes + 1024)
+    finally:
+        await file.close()
     try:
         new_url = media.save_avatar(data, account.id)
     except media.UploadError as exc:
@@ -190,6 +194,7 @@ async def upload_avatar(
     account.avatar_url = new_url
     db.commit()
     media.remove_avatar_file(old_url)
+    maybe_enforce_storage_caps()
     return RedirectResponse("/me?avatar=ok", status_code=303)
 
 

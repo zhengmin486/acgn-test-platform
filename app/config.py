@@ -159,6 +159,9 @@ class Settings(BaseSettings):
     # 当天已入库多少就从配额里扣多少，跑满即停。
     # 取数口径：日语源优先于中文源；题材优先级 动画 > 漫画 > 轻小说 > 游戏 > 其他。
     news_daily_quota: int = 30
+    # 停用的资讯源（逗号分隔 key，如 "gamersky,natalie_comic"）：
+    # run_import_daily 直接跳过这些源——不改代码即可下线一个源。留空 = 全部启用。
+    news_disabled_sources: str = ""
     # 日文源自动翻译（OpenAI 兼容接口）：NEWS_LLM_* 留空则回退 PERSONA_LLM_*，
     # 两边都没配就跳过日文源、只用中文源（不产出看不懂的日文条目）。
     news_llm_provider: str = ""
@@ -198,6 +201,58 @@ class Settings(BaseSettings):
     smtp_use_tls: bool = True
     smtp_from_address: str = ""
     smtp_from_name: str = "Otaku"
+
+    # ---------- 数据库连接池 ----------
+    # 仅对非 SQLite（MySQL 等生产驱动）生效；SQLite 沿用默认池，行为不变。
+    # pool_recycle：连接最大复用秒数，防 MySQL wait_timeout 掐掉长闲连接。
+    db_pool_size: int = 5
+    db_max_overflow: int = 10
+    db_pool_timeout_seconds: int = 30
+    db_pool_recycle_seconds: int = 1800
+    db_pool_pre_ping: bool = True
+
+    # ---------- 对外 API 分页上限 ----------
+    # 与 api.py 各端点的 Query(le=…) 同源；改这里即改全部端点的上限。
+    api_contents_max_page_size: int = 500
+    api_articles_max_page_size: int = 100
+    # /api/contents/search 与 /api/schedule 的每页上限（同值同语义：详情级列表）
+    api_search_max_page_size: int = 100
+    api_schedule_max_page_size: int = 100
+    api_tags_max_limit: int = 2000
+    api_sync_runs_max_limit: int = 200
+
+    # ---------- 安全响应头 ----------
+    # nosniff / Referrer-Policy 常开；X-Frame-Options 可改 SAMEORIGIN 或置空关闭。
+    security_headers_enabled: bool = True
+    x_frame_options: str = "DENY"
+
+    # ---------- 静态资源与图片缓存（秒） ----------
+    # style.css 带 ?v=mtime 版本号，改样式浏览器自动拉新；vendor 与封面图
+    # 同名不变（上传换图生成新文件名），长缓存是安全的。0 表示不输出该头。
+    static_cache_max_age: int = 86400
+    media_cache_max_age: int = 604800
+
+    # ---------- 上传 / 图片目录容量护栏 ----------
+    # 封面目录（原图 + thumbs/full 派生图）总量上限：超限先删可再生派生图
+    #（按需重建），仍超才删未被 contents 引用的原图（按 mtime 从旧到新）。
+    # 头像目录同理（只删未被 users 引用的文件）。启动巡检一次，之后由上传
+    # 路径按 check_interval 节流触发。
+    media_storage_max_bytes: int = 8 * 1024 * 1024 * 1024
+    avatar_storage_max_bytes: int = 256 * 1024 * 1024
+    media_storage_check_interval_seconds: int = 3600
+    # 原子写残留的 .tmp-* 临时文件：超过该秒数视为崩溃遗留，巡检时清理。
+    media_temp_max_age_seconds: int = 3600
+
+    # ---------- HTTP 压缩（默认关） ----------
+    # 站点流量大头是已压缩的 WebP 图片，压缩它们只费 CPU 不省字节；
+    # 页面以 HTML 为主且流量上来后再开。开启后仅对超过 minimum_size 的响应生效。
+    gzip_enabled: bool = False
+    gzip_compress_level: int = 5
+    gzip_minimum_size: int = 1024
+
+    # ---------- 日志 ----------
+    # 应用日志级别（DEBUG/INFO/WARNING/ERROR）；uvicorn 访问日志由启动参数管。
+    log_level: str = "INFO"
 
     # ---------- 短信验证码（手机绑定 / 解绑） ----------
     # 与「邮件可插拔」同一思路：sms_api_url + sms_api_key 都留空 = 不真发短信，

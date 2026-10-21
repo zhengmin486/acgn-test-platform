@@ -23,7 +23,9 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.select_from_archive import (  # noqa: E402
+    apply_ingest_policy,
     build_payload,
+    has_anime_manga_relation,
     iter_subjects,
     natural_quota,
     parse_wiki_infobox,
@@ -208,3 +210,113 @@ class TestNaturalQuota:
         assert natural_quota(100) == {
             "anime": 50, "game": 20, "novel": 18, "comic": 12,
         }
+
+
+# ---------- 收录口径过滤（2026-10-21：轻小说 / galge 或相关 IP 游戏） ----------
+
+
+def _policy_payload(bangumi_id: int, content_type: str, **extra) -> dict:
+    """构造 apply_ingest_policy 的输入 payload（含选品内部键 _content_type）。"""
+    payload = {
+        "id": bangumi_id,
+        "type": {"anime": 2, "game": 4, "novel": 1, "comic": 1}.get(content_type, 2),
+        "name": f"entry-{bangumi_id}",
+        "name_cn": f"条目{bangumi_id}",
+        "summary": "简介。",
+        "rating": {"score": 7.0, "rank": 0, "total": 10},
+        "tags": [],
+        "infobox": [],
+        "date": "2026-10-01",
+        "nsfw": False,
+        "platform": 1002 if content_type == "novel" else "",
+        "_content_type": content_type,
+        "_tier_rank": 1,
+    }
+    payload.update(extra)
+    return payload
+
+
+class TestHasAnimeMangaRelation:
+    def test_anime_type_hits(self):
+        assert has_anime_manga_relation([{"id": 9, "type": 2, "relation": "游戏"}])
+
+    def test_wording_fallback(self):
+        assert has_anime_manga_relation([{"id": 9, "relation": "漫画化"}])
+        assert has_anime_manga_relation([{"id": 9, "relation": "动画化"}])
+
+    def test_unrelated_shapes(self):
+        assert not has_anime_manga_relation(None)
+        assert not has_anime_manga_relation("bad")
+        assert not has_anime_manga_relation([{"id": 9, "type": 4, "relation": "游戏"}])
+        assert not has_anime_manga_relation([])
+
+
+class TestApplyIngestPolicy:
+    @staticmethod
+    def _run(payloads, related=None, error=False):
+        calls = []
+
+        def fake_fetch(subject_id, **kwargs):
+            calls.append(subject_id)
+            if error:
+                raise RuntimeError("mirror down")
+            return related
+
+        kept, stats = apply_ingest_policy(payloads, related_fetcher=fake_fetch)
+        return kept, stats, calls
+
+    def test_literature_novel_dropped_light_novel_kept(self):
+        literature = _policy_payload(
+            1, "novel", infobox=[{"key": "レーベル", "value": "新潮文庫"}]
+        )
+        light = _policy_payload(
+            2, "novel", tags=[{"name": "轻小说", "count": 99}],
+            infobox=[{"key": "文库", "value": "電撃文庫"}],
+        )
+        kept, stats, _calls = self._run([literature, light])
+        assert [p["id"] for p in kept] == [2]
+        assert stats["novel_dropped"] == 1
+
+    def test_galge_game_kept_without_network(self):
+        galge = _policy_payload(3, "game", tags=[{"name": "GALGAME", "count": 66}])
+        kept, stats, calls = self._run([galge])
+        assert [p["id"] for p in kept] == [3]
+        assert stats["game_galge"] == 1 and calls == []
+
+    def test_related_game_marked_and_kept(self):
+        plain = _policy_payload(4, "game")
+        kept, stats, calls = self._run([plain], related=[{"id": 99, "type": 2, "relation": "游戏"}])
+        assert [p["id"] for p in kept] == [4]
+        assert kept[0]["_site_related_ip"] is True
+        assert stats["game_related"] == 1 and calls == [4]
+
+    def test_unrelated_game_dropped(self):
+        plain = _policy_payload(5, "game")
+        kept, stats, _calls = self._run([plain], related=[{"id": 100, "type": 4, "relation": "游戏"}])
+        assert kept == []
+        assert stats["game_dropped"] == 1
+
+    def test_fetch_failure_counts_and_drops(self):
+        plain = _policy_payload(6, "game")
+        kept, stats, _calls = self._run([plain], error=True)
+        assert kept == []
+        assert stats["game_fetch_failed"] == 1 and stats["game_dropped"] == 1
+
+    def test_anime_and_comic_pass_through(self):
+        anime = _policy_payload(7, "anime")
+        comic = _policy_payload(8, "comic", platform=1001)
+        kept, stats, _calls = self._run([anime, comic])
+        assert [p["id"] for p in kept] == [7, 8]
+        assert stats == {
+            "novel_dropped": 0, "game_galge": 0, "game_related": 0,
+            "game_dropped": 0, "game_fetch_failed": 0,
+        }
+
+    def test_order_preserved(self):
+        payloads = [
+            _policy_payload(10, "anime"),
+            _policy_payload(11, "novel", tags=[{"name": "轻小说", "count": 1}]),
+            _policy_payload(12, "game", tags=[{"name": "GALGAME", "count": 1}]),
+        ]
+        kept, _stats, _calls = self._run(payloads, related=[])
+        assert [p["id"] for p in kept] == [10, 11, 12]

@@ -7,13 +7,17 @@
 
 <div class="card detail-hero">
     <div class="card-body p-4">
-        <h1 class="h3 mb-2">{{ article.title }}</h1>
-        <div class="d-flex flex-wrap align-items-center gap-2 text-muted small">
+        {# 层级：分类徽标（眉题）→ 标题 → 来源/时间元信息行 → 导语 #}
+        <div class="article-kicker mb-2">
             <span class="badge detail-type-badge-sm">{{ article.category }}</span>
-            <span>发布时间：{{ article.published_at.strftime('%Y-%m-%d %H:%M') }}</span>
         </div>
-        {% if article.summary %}
-        <p class="article-lead mt-3 mb-0">{{ article.summary }}</p>
+        <h1 class="article-title mb-2">{{ article.title }}</h1>
+        <div class="article-meta d-flex flex-wrap align-items-center gap-3 small">
+            <span>来源：{{ article.source }}</span>
+            <span>发布时间：{{ news_time(article.published_at) }}</span>
+        </div>
+        {% if lead %}
+        <p class="article-lead mt-3 mb-0">{{ lead }}</p>
         {% endif %}
         {# 识别标签（自动识别写入）：点击跳全部作品页按该标签筛选 #}
         {% if article_tags %}
@@ -40,7 +44,7 @@
     <div class="card-body p-4">
         {% if article.image_url %}
         <figure class="article-hero">
-            <img src="{{ article.image_url }}" alt="{{ article.title }}" loading="lazy">
+            <img src="{{ article.image_url }}" alt="{{ article.title }}" width="640" height="360" loading="lazy" decoding="async">
         </figure>
         {% endif %}
         {# 正文按块渲染：文本段 / [图]（本地化后的站内路径或源站外链）/ [媒体] 链接 #}
@@ -48,7 +52,7 @@
             {% for block in body_blocks %}
             {% if block.kind == 'image' %}
             <figure class="article-figure">
-                <img src="{{ block.url }}" alt="" loading="lazy">
+                <img src="{{ block.url }}" alt="" loading="lazy" decoding="async">
             </figure>
             {% elif block.kind == 'media' %}
             <p class="article-media-line">[媒体] <a href="{{ block.url }}" target="_blank" rel="noopener noreferrer">{{ block.url }}</a></p>
@@ -58,11 +62,14 @@
             {% endfor %}
         </div>
 
-        {# 原文链接：只留中性入口，不展示来源名称（original_url 多为发行商官网） #}
+        {# 原文链接：只留中性入口，不展示来源名称（original_url 多为发行商官网）；
+           底部收尾位放大成清晰出口（正文阅读完的自然下一步） #}
         {% if article.original_url %}
-        <p class="small mb-0 mt-3">
-            <a href="{{ article.original_url }}" target="_blank" rel="noopener noreferrer">原文链接 &nearr;</a>
-        </p>
+        <div class="article-source-link mt-4">
+            <a href="{{ article.original_url }}" target="_blank" rel="noopener noreferrer">
+                阅读原文 &nearr;<span class="article-source-note">在来源网站查看完整报道</span>
+            </a>
+        </div>
         {% endif %}
     </div>
 </div>

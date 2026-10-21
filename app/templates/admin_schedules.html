@@ -10,9 +10,9 @@
             共 {{ total }} 条档期作品。删除只清理本地记录；重新同步按档期从源站拉取并写回。
         </p>
     </div>
-    {% if current_season %}
+    {% if current_season or current_category %}
     <button class="btn btn-sm btn-outline-primary" type="submit" form="resync-current">
-        重新同步档期 {{ current_season }}
+        重新同步{{ '档期 ' ~ current_season if current_season else '分类 ' ~ current_category_label }}
     </button>
     {% endif %}
 </div>
@@ -20,8 +20,9 @@
 
 {# 当前筛选档期的重新同步表单（按钮通过 form 属性引用，避免表单嵌套） #}
 <form id="resync-current" method="post" action="/manage/schedules/resync">
-    <input type="hidden" name="season_code" value="{{ current_season or '' }}">
+    <input type="hidden" name="season_code" value="{{ current_season or current_category or '' }}">
     <input type="hidden" name="season" value="{{ current_season or '' }}">
+    <input type="hidden" name="category" value="{{ current_category or '' }}">
     <input type="hidden" name="q" value="{{ q }}">
     <input type="hidden" name="page" value="{{ page }}">
 </form>
@@ -48,8 +49,19 @@
         <select class="form-select form-select-sm" id="season" name="season">
             <option value="">全部档期</option>
             {% for s in seasons %}
-            <option value="{{ s.season_code }}"{% if current_season == s.season_code %} selected{% endif %}>
+            <option value="{{ s.season_code }}"{% if current_season == s.season_code and not current_category %} selected{% endif %}>
                 {{ s.season_code }}（{{ s.count }}）
+            </option>
+            {% endfor %}
+        </select>
+    </div>
+    <div class="col-sm-4 col-md-3">
+        <label class="form-label" for="category">分类</label>
+        <select class="form-select form-select-sm" id="category" name="category">
+            <option value="">全部分类</option>
+            {% for c in categories %}
+            <option value="{{ c.code }}"{% if current_category == c.code %} selected{% endif %}>
+                {{ c.label }}（{{ c.count }}）
             </option>
             {% endfor %}
         </select>
@@ -86,7 +98,12 @@
         {% for w in works %}
         <tr>
             <td>{{ w.id }}</td>
-            <td><span class="badge bg-info text-dark">{{ w.season_code }}</span></td>
+            <td>
+                <span class="badge bg-info text-dark">{{ w.season_code }}</span>
+                {% if w.category %}
+                <span class="badge bg-secondary">{{ category_labels.get(w.category, w.category) }}</span>
+                {% endif %}
+            </td>
             <td>
                 <div>{{ w.title_main }}</div>
                 {% if w.title_jp and w.title_jp != w.title_main %}
@@ -110,16 +127,22 @@
             </td>
             <td class="text-muted small">{{ w.last_synced_at.strftime('%Y-%m-%d %H:%M') }}</td>
             <td class="text-nowrap">
+                {% if w.category %}
+                <a class="btn btn-sm btn-outline-secondary" href="/schedule?category={{ w.category }}">查看</a>
+                {% else %}
                 <a class="btn btn-sm btn-outline-secondary" href="/schedule?season={{ w.season_code }}">查看</a>
+                {% endif %}
                 <form method="post" action="/manage/schedules/resync" class="d-inline">
                     <input type="hidden" name="season_code" value="{{ w.season_code }}">
                     <input type="hidden" name="season" value="{{ current_season or '' }}">
+                    <input type="hidden" name="category" value="{{ current_category or '' }}">
                     <input type="hidden" name="q" value="{{ q }}">
                     <input type="hidden" name="page" value="{{ page }}">
                     <button class="btn btn-sm btn-outline-primary" type="submit">重新同步</button>
                 </form>
                 <form method="post" action="/manage/schedules/{{ w.id }}/delete" class="d-inline">
                     <input type="hidden" name="season" value="{{ current_season or '' }}">
+                    <input type="hidden" name="category" value="{{ current_category or '' }}">
                     <input type="hidden" name="q" value="{{ q }}">
                     <input type="hidden" name="page" value="{{ page }}">
                     <button class="btn btn-sm btn-outline-danger" type="submit">删除</button>
@@ -132,7 +155,7 @@
 </div>
 
 <div class="d-flex flex-wrap justify-content-end align-items-center gap-2 mt-3">
-    {{ pager('/manage/schedules?season=' ~ (current_season or '')|urlencode ~ '&q=' ~ (q|urlencode) ~ '&', page, total_pages) }}
+    {{ pager('/manage/schedules?season=' ~ (current_season or '')|urlencode ~ '&category=' ~ (current_category or '')|urlencode ~ '&q=' ~ (q|urlencode) ~ '&', page, total_pages) }}
 </div>
 {% endif %}
 {% endblock %}

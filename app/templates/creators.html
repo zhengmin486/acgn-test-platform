@@ -18,7 +18,7 @@
         <span class="work-cover-box">
             <span class="work-cover" aria-hidden="true">{{ item.title[:1] }}</span>
             {% if item.image_url %}
-            <img class="work-cover" src="{{ thumb_src(item.image_url) }}" alt="{{ item.title }}封面" loading="lazy" onerror="this.style.display='none'">
+            <img class="work-cover" src="{{ thumb_src(item.image_url) }}" alt="{{ item.title }}封面" loading="lazy" width="400" height="600" decoding="async" onerror="this.style.display='none'">
             {% endif %}
         </span>
         <span class="work-card-body">

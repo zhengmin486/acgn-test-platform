@@ -25,7 +25,7 @@ from sqlalchemy import (
     update,
 )
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session, aliased, sessionmaker
+from sqlalchemy.orm import Session, aliased, defer, sessionmaker
 
 from app.config import settings
 from app.database import Base
@@ -2020,6 +2020,28 @@ def has_content_entity_recognition(db: Session, content_id: int) -> bool:
     return bool(content and content.series_id is not None)
 
 
+def _article_keyword_condition(q: str):
+    """资讯关键词召回条件：整串 + 题材词（parse_query 识别）分别对标题/摘要/正文做 LIKE。
+
+    搜「治愈日常」也能召回正文里带「治愈」「日常」的资讯，不必整串匹配。
+    """
+    conditions = [
+        func.lower(Article.title).like(f"%{q.lower()}%"),
+        func.lower(Article.summary).like(f"%{q.lower()}%"),
+        func.lower(Article.body).like(f"%{q.lower()}%"),
+    ]
+    for genre in parse_query(q).genres:
+        genre_pattern = f"%{genre.lower()}%"
+        conditions.extend(
+            (
+                func.lower(Article.title).like(genre_pattern),
+                func.lower(Article.summary).like(genre_pattern),
+                func.lower(Article.body).like(genre_pattern),
+            )
+        )
+    return or_(*conditions)
+
+
 def list_articles(
     db: Session,
     category: str | None = None,
@@ -2049,22 +2071,7 @@ def list_articles(
         stmt = stmt.where(Article.source_type != "官方PR")
 
     if q:
-        parsed = parse_query(q)
-        conditions = [
-            func.lower(Article.title).like(f"%{q.lower()}%"),
-            func.lower(Article.summary).like(f"%{q.lower()}%"),
-            func.lower(Article.body).like(f"%{q.lower()}%"),
-        ]
-        for genre in parsed.genres:
-            genre_pattern = f"%{genre.lower()}%"
-            conditions.extend(
-                (
-                    func.lower(Article.title).like(genre_pattern),
-                    func.lower(Article.summary).like(genre_pattern),
-                    func.lower(Article.body).like(genre_pattern),
-                )
-            )
-        stmt = stmt.where(or_(*conditions))
+        stmt = stmt.where(_article_keyword_condition(q))
 
     stmt = stmt.order_by(
         Article.priority_score.desc(),
@@ -2076,6 +2083,92 @@ def list_articles(
         stmt = stmt.limit(limit)
 
     return list(db.scalars(stmt))
+
+
+# 资讯列表页每页条数（模板头条 + 网格的版式按 20 条排布最稳：1 头条 + 19 网格）。
+ARTICLES_PAGE_SIZE = 20
+
+
+def list_articles_page(
+    db: Session,
+    *,
+    q: str | None = None,
+    source: str | None = None,
+    category: str | None = None,
+    page: int = 1,
+    page_size: int = ARTICLES_PAGE_SIZE,
+    published_only: bool = True,
+) -> tuple[int, list[Article]]:
+    """资讯列表页的全量分页查询：按发布时间从新到旧，可按来源/分类筛选 + 关键词搜索。
+
+    与 list_home_feed 的分工（两者不要混用）：
+    - 本函数服务 /articles 列表页，契约是**全部资讯**——不折叠官方 PR、
+      不做类别配额，只做分页；模板文案「共 N 篇资讯 · 按发布时间从新到旧排列」
+      就是照这个口径写的。
+    - 首页 / 的精选位仍走 list_home_feed（折叠官方 PR + 优先级排序 + 单类别配额）。
+
+    返回 (total, items)：total 是筛选后的全量条数，供「第 x / y 页」与计数展示。
+    """
+    stmt = select(Article)
+
+    if published_only:
+        stmt = stmt.where(Article.is_published.is_(True))
+    if source:
+        stmt = stmt.where(Article.source == source)
+    if category:
+        stmt = stmt.where(Article.category == category)
+    if q:
+        stmt = stmt.where(_article_keyword_condition(q))
+
+    total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    items = list(
+        db.scalars(
+            stmt.order_by(Article.published_at.desc(), Article.id.desc())
+            .offset(max(0, page - 1) * page_size)
+            .limit(page_size)
+            # 列表页不渲染正文（body 是最大的列，资讯正文动辄几十 KB）：
+            # 延迟加载，行对象在需要时才会补查这一列，列表 SQL 不再拖全量正文。
+            .options(defer(Article.body))
+        )
+    )
+    return total, items
+
+
+def article_source_counts(
+    db: Session, *, published_only: bool = True
+) -> list[tuple[str, int]]:
+    """资讯来源及其条数（列表页筛选条用），按条数降序。
+
+    列表页要让人看清「哪个源有多少条」——官方 PR 被首页 feed 折叠后，
+    这里是它唯一能被发现的地方，所以筛选条必须是全量口径。
+    """
+    stmt = select(Article.source, func.count(Article.id))
+    if published_only:
+        stmt = stmt.where(Article.is_published.is_(True))
+    rows = db.execute(
+        stmt.group_by(Article.source).order_by(func.count(Article.id).desc())
+    ).all()
+    return [(str(name or "未知来源"), int(count)) for name, count in rows]
+
+
+def article_category_counts(
+    db: Session, *, published_only: bool = True
+) -> list[tuple[str, int]]:
+    """资讯的 ACGN 分类及条数（列表页筛选条用），按条数降序。
+
+    与来源筛选的分工（2026-10-21 用户定稿）：筛选条按 **ACGN 类型**组织
+    （动画 / 漫画 / 游戏 / 轻小说），分不出 ACGN 类型的留在「综合动态」兜底桶——
+    资讯本身仍保留 source 字段，只是不做筛选入口。
+    零条目的分类不出现在筛选条里（由调用方按 counts 渲染）。
+    """
+    stmt = select(Article.category, func.count(Article.id))
+    if published_only:
+        stmt = stmt.where(Article.is_published.is_(True))
+    rows = db.execute(
+        stmt.group_by(Article.category).order_by(func.count(Article.id).desc())
+    ).all()
+    return [(str(name or "未分类"), int(count)) for name, count in rows]
+
 
 
 def list_home_feed(
@@ -2103,7 +2196,9 @@ def list_home_feed(
         Article.published_at.desc(),
         Article.id.desc(),
     ).limit(limit * 2)  # 多取一些，给类别覆盖裁剪留余量
-    candidates = list(db.scalars(stmt))
+    # 首页 feed 只渲染摘要 / 头图：正文列延迟加载，列表 SQL 不拖全量正文
+    #（每页 60 行 × 几十 KB 的 body 是首页查询里最大的隐形开销）。
+    candidates = list(db.scalars(stmt.options(defer(Article.body))))
 
     selected: list[Article] = []
     per_subject: dict[str, int] = {}
@@ -2725,6 +2820,26 @@ def ensure_content_meta_failed_column(engine: Engine) -> list[str]:
     return ["meta_failed_at"]
 
 
+def ensure_content_summary_original_column(engine: Engine) -> list[str]:
+    """为已存在的 contents 表补齐原文简介列（简介语言切换的「原文」一侧），幂等。
+
+    与 title_original 同一性质：create_all 只建新表、不给老库加列，
+    所以历史库必须在这里 ALTER。可空 Text——为空表示这部只有一种语言，
+    详情页据此不渲染语言切换入口。
+    """
+    inspector = inspect(engine)
+    if "contents" not in inspector.get_table_names():
+        return []
+
+    existing = {column["name"] for column in inspector.get_columns("contents")}
+    if "summary_original" in existing:
+        return []
+
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE contents ADD COLUMN summary_original TEXT"))
+    return ["summary_original"]
+
+
 def ensure_content_title_alias_columns(engine: Engine) -> list[str]:
     """为已存在的 contents 表补齐日文原名与别名列（搜索增强），幂等，返回新增列名。
 
@@ -2993,6 +3108,10 @@ def ensure_schedule_work_info_columns(engine: Engine) -> list[str]:
         with engine.begin() as connection:
             connection.execute(text("ALTER TABLE anime_schedules ADD COLUMN work_tags VARCHAR(200)"))
         added.append("work_tags")
+    if "category" not in existing:
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE anime_schedules ADD COLUMN category VARCHAR(20)"))
+        added.append("category")
     return added
 
 
@@ -3015,6 +3134,7 @@ def init_db(engine: Engine) -> int:
     ensure_content_series_column(engine)
     ensure_content_book_kind_column(engine)
     ensure_content_title_alias_columns(engine)
+    ensure_content_summary_original_column(engine)
     ensure_favorite_status_columns(engine)
     ensure_content_favorite_content_index(engine)
     ensure_content_meta_columns(engine)
@@ -5626,6 +5746,26 @@ def get_previous_valid_batch(db: Session, batch_id: int) -> ExecutionBatch | Non
 
 # ---------- 新番档期（数据由 scripts/sync_yuc_schedule.py 写入） ----------
 
+# 档期分类标识 -> 站点展示名。季度档期 category 为 NULL/空；
+# 特殊分类使用固定码，源站 Atom 条目名在此统一改写为本站点名。
+# 与 scripts/sync_yuc_schedule.SPECIAL_CATEGORIES 保持同源（码/名一致）。
+SCHEDULE_CATEGORY_LABELS = {
+    "unreleased": "未上线新番",
+    "ova_sp": "剧场版ova与特别篇",
+    "cn_movie": "大陆引进剧场版",
+}
+
+
+def schedule_display_label(season_code: str | None) -> str:
+    """档期码 -> 展示名：特殊分类给中文点名，季度档期原样返回。
+
+    特殊分类的 season_code 就是分类码（unreleased 等），直接展示会是一串
+    英文代号；这里统一换成 SCHEDULE_CATEGORY_LABELS 里的点名。
+    """
+    if not season_code:
+        return ""
+    return SCHEDULE_CATEGORY_LABELS.get(season_code, season_code)
+
 # 同步时参与“有变化才更新”比对的源站字段；source_key/season_code 是身份键不参与。
 SCHEDULE_COMPARE_FIELDS = (
     "title_main",
@@ -5680,14 +5820,18 @@ def _schedule_filter_stmt(
     season: str | None,
     keyword: str | None,
     weekday: int | None,
+    category: str | None = None,
 ):
-    """档期查询的共享过滤构造：档期、星期、关键词（标题/播出说明）。
+    """档期查询的共享过滤构造：档期、分类、星期、关键词（标题/播出说明）。
 
-    分页查询（list_schedules）与整季查询（list_all_schedules）共用，
-    避免两套过滤实现漂移。
+    分页查询（list_schedules）与整季/整分类查询（list_all_schedules）共用，
+    避免两套过滤实现漂移。category 与 season 互斥：给定 category 时忽略 season
+    （特殊分类的 season_code 即分类码，但语义上以 category 列为准）。
     """
     stmt = select(AnimeSchedule)
-    if season:
+    if category:
+        stmt = stmt.where(AnimeSchedule.category == category)
+    elif season:
         stmt = stmt.where(AnimeSchedule.season_code == season)
     if weekday is not None:
         stmt = stmt.where(AnimeSchedule.weekday == weekday)
@@ -5710,12 +5854,13 @@ def list_all_schedules(
     season: str | None = None,
     keyword: str | None = None,
     weekday: int | None = None,
+    category: str | None = None,
 ) -> list[AnimeSchedule]:
-    """整季档期作品（不分页）：页面默认视图按星期分组展示使用。
+    """整季/整分类档期作品（不分页）：页面默认视图按星期分组展示使用。
 
     排序与 list_schedules 一致：星期升序、无星期最后、同星期按主标题。
     """
-    stmt = _schedule_filter_stmt(season, keyword, weekday)
+    stmt = _schedule_filter_stmt(season, keyword, weekday, category=category)
     return list(
         db.scalars(
             stmt.order_by(
@@ -5733,15 +5878,16 @@ def list_schedules(
     season: str | None = None,
     keyword: str | None = None,
     weekday: int | None = None,
+    category: str | None = None,
     page: int = 1,
     page_size: int = 20,
 ) -> tuple[int, list[AnimeSchedule]]:
-    """分页查询档期作品：可按档期、星期、关键词（标题/播出说明）筛选。
+    """分页查询档期作品：可按档期、分类、星期、关键词（标题/播出说明）筛选。
 
     排序：星期几升序（便于按周一到周日浏览），未解析出星期的排在最后，
     同星期内按主标题排序。
     """
-    stmt = _schedule_filter_stmt(season, keyword, weekday)
+    stmt = _schedule_filter_stmt(season, keyword, weekday, category=category)
 
     total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     items = list(
@@ -5764,13 +5910,18 @@ def get_schedule(db: Session, schedule_id: int) -> AnimeSchedule | None:
 
 
 def list_schedule_seasons(db: Session) -> list[dict]:
-    """已同步的档期列表：档期码、作品数、最近同步时间，按档期新到旧排序。"""
+    """已同步的档期列表：档期码、作品数、最近同步时间，按档期新到旧排序。
+
+    只返回季度档期（category 为空）；特殊分类（未上线新番/剧场版ova与特别篇/
+    大陆引进剧场版）由 list_schedule_categories 单独给出，避免混进季度导航。
+    """
     rows = db.execute(
         select(
             AnimeSchedule.season_code,
             func.count().label("count"),
             func.max(AnimeSchedule.last_synced_at).label("last_synced_at"),
         )
+        .where(AnimeSchedule.category.is_(None))
         .group_by(AnimeSchedule.season_code)
         .order_by(AnimeSchedule.season_code.desc())
     ).all()
@@ -5781,15 +5932,38 @@ def list_schedule_seasons(db: Session) -> list[dict]:
             "last_synced_at": row.last_synced_at.isoformat(sep=" ", timespec="seconds")
             if row.last_synced_at
             else None,
+            "category": None,
         }
         for row in rows
     ]
 
 
+def list_schedule_categories(db: Session) -> list[dict]:
+    """特殊档期分类列表（固定三项），带各自已同步作品数；无数据的分类 count 为 0。
+
+    展示顺序与 SCHEDULE_CATEGORY_LABELS 保持一致；季度档期不在此列。
+    """
+    rows = db.execute(
+        select(AnimeSchedule.category, func.count().label("count"))
+        .where(AnimeSchedule.category.isnot(None))
+        .group_by(AnimeSchedule.category)
+    ).all()
+    counts = {row.category: row.count for row in rows}
+    return [
+        {"code": code, "label": label, "count": counts.get(code, 0)}
+        for code, label in SCHEDULE_CATEGORY_LABELS.items()
+    ]
+
+
 def latest_schedule_season(db: Session) -> str | None:
-    """最新已同步档期码（档期码本身按年月递增，字符串倒序即新到旧）。"""
+    """最新已同步档期码（档期码本身按年月递增，字符串倒序即新到旧）。
+
+    只取季度档期（category 为空）：特殊分类的码（unreleased 等）按字典序会
+    排在 YYYYMM 之前/之后造成误判，必须排除。
+    """
     return db.scalar(
         select(AnimeSchedule.season_code)
+        .where(AnimeSchedule.category.is_(None))
         .order_by(AnimeSchedule.season_code.desc())
         .limit(1)
     )
@@ -5974,9 +6148,24 @@ def count_schedules(db: Session) -> int:
 
 
 def count_schedule_seasons(db: Session) -> int:
-    """已同步的档期数量（不同 season_code 的个数）。"""
+    """已同步的季度档期数量（不同 season_code 的个数）。
+
+    只数季度档期（category 为空）：特殊分类的 season_code 是分类码
+    （unreleased 等），不是“档期”，混进来会让「覆盖 N 个档期」虚高。
+    """
     return db.scalar(
-        select(func.count(func.distinct(AnimeSchedule.season_code)))
+        select(func.count(func.distinct(AnimeSchedule.season_code))).where(
+            AnimeSchedule.category.is_(None)
+        )
+    ) or 0
+
+
+def count_schedule_categories(db: Session) -> int:
+    """已同步的特殊档期分类数量（有数据的分类个数，最多 3）。"""
+    return db.scalar(
+        select(func.count(func.distinct(AnimeSchedule.category))).where(
+            AnimeSchedule.category.isnot(None)
+        )
     ) or 0
 
 
@@ -6070,3 +6259,38 @@ def search_articles_page(
         db.scalars(stmt.offset((page - 1) * page_size).limit(page_size))
     )
     return total, items
+
+
+# ---------- 上传目录容量护栏的反查（app/media.enforce_storage_caps 用） ----------
+
+
+def list_cover_reference_names(db: Session) -> set[str]:
+    """contents 引用的本站封面文件名集合（/covers/<名> 的「名」）。
+
+    容量清理的「免死名单」：集合内的原图绝不被清理；派生图（thumbs/full）
+    本就可再生，不进名单。
+    """
+    rows = db.execute(
+        select(Content.image_url).where(Content.image_url.is_not(None))
+    ).all()
+    names: set[str] = set()
+    for (url,) in rows:
+        if url and url.startswith("/covers/"):
+            name = url.rpartition("/")[2]
+            if name:
+                names.add(name)
+    return names
+
+
+def list_avatar_reference_names(db: Session) -> set[str]:
+    """users 引用的本站头像文件名集合（/avatars/<名> 的「名」）。"""
+    rows = db.execute(
+        select(User.avatar_url).where(User.avatar_url.is_not(None))
+    ).all()
+    names: set[str] = set()
+    for (url,) in rows:
+        if url and url.startswith("/avatars/"):
+            name = url.rpartition("/")[2]
+            if name:
+                names.add(name)
+    return names

@@ -61,7 +61,7 @@
                 <label class="space-avatar-trigger" title="更换头像（JPEG / PNG / WebP / GIF，2 MB 以内）">
                     {% if account.avatar_url %}
                     <img class="space-avatar space-avatar-img" src="{{ account.avatar_url }}"
-                         alt="{{ account.username }} 的头像" width="64" height="64">
+                         alt="{{ account.username }} 的头像" width="64" height="64" decoding="async">
                     {% else %}
                     <span class="space-avatar" aria-hidden="true">{{ account.username[:1] | upper }}</span>
                     {% endif %}
@@ -200,7 +200,7 @@
             <span class="work-cover-box">
                 <span class="work-cover" aria-hidden="true">{{ item.title[:1] }}</span>
                 {% if item.image_url %}
-                <img class="work-cover" src="{{ thumb_src(item.image_url) }}" alt="{{ item.title }}封面" loading="lazy" onerror="this.style.display='none'">
+                <img class="work-cover" src="{{ thumb_src(item.image_url) }}" alt="{{ item.title }}封面" loading="lazy" width="400" height="600" decoding="async" onerror="this.style.display='none'">
                 {% endif %}
             </span>
             <span class="work-card-body">

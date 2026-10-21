@@ -1,0 +1,17 @@
+{% extends "base_content.html" %}
+{% block title %}服务器开小差了{% endblock %}
+
+{# 兜底 500 页：未处理异常统一落到这里（app.main._server_error_handler）。
+   只给访客通用文案与返回入口——异常细节与堆栈只进服务端日志，绝不外显。 #}
+{% block content %}
+<div class="detail-empty detail-empty--illustration my-5">
+    <div>
+        <h1 class="h4 mb-3">服务器开小差了</h1>
+        <p class="text-muted">页面渲染时出现意外错误，我们已经记录了这个问题，请稍后重试。</p>
+        <p class="mt-3">
+            <a class="btn btn-outline-primary btn-sm" href="/">返回首页</a>
+            <a class="btn btn-outline-secondary btn-sm" href="/contents">浏览全部作品</a>
+        </p>
+    </div>
+</div>
+{% endblock %}

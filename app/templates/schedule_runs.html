@@ -39,7 +39,12 @@
             <td>{{ run.id }}</td>
             <td>{{ run.started_at.strftime('%Y-%m-%d %H:%M:%S') }}</td>
             <td>{{ run.finished_at.strftime('%Y-%m-%d %H:%M:%S') if run.finished_at else '-' }}</td>
-            <td>{{ run.season_code or '-' }}</td>
+            <td>
+                {{ run.season_code or '-' }}
+                {% if run.season_code in category_labels %}
+                <span class="badge bg-secondary">{{ category_labels[run.season_code] }}</span>
+                {% endif %}
+            </td>
             <td>
                 {% if run.mode == 'apply' %}
                 <span class="badge bg-success">apply</span>

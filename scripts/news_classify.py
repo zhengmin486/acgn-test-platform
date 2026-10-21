@@ -81,6 +81,92 @@ def normalize_subject(category: str) -> str:
     return _SUBJECT_ALIASES.get(text, _FALLBACK_SUBJECT)
 
 
+# ---------- 主体分类（按内容判定，不再只认源栏目） ----------
+# 2026-10-21 定稿：分类必须依据资讯实际主题，不能只取 SourceSpec.category
+# （否则 animeanime 的全是动画、机核的全是综合动态，漫画 / 轻小说永远空转）。
+# 加权计分：强信号（只有该主体会用的词）2 分，弱信号（通称）1 分；
+# 分数最高者胜，平分看源栏目，再平分回落综合动态。
+# **不依赖作品库关联**：关联不到作品不是分类失败的理由。
+_SUBJECT_STRONG_SIGNALS: dict[str, tuple[str, ...]] = {
+    # 「単行本 / 巻」漫画和轻小说都有，不算区分信号，不放进来
+    SUBJECT_MANGA: (
+        "連載", "週刊", "ジャンプ", "マガジン", "サンデー", "チャンピオン",
+        "漫画家", "作画", "コミカライズ", "コミックス", "連載再開", "休載",
+    ),
+    SUBJECT_LN: (
+        "ライトノベル", "ラノベ", "文庫", "ISBN", "ノベルス", "小説家",
+        "軽小説", "轻小说", "書籍化",
+    ),
+    SUBJECT_GAME: (
+        "ガチャ", "シナリオ", "実装", "アップデート", "バージョン", "ver.", "dlc",
+        "プラットフォーム", "steam", "プレイステーション", "nintendo", "switch",
+        "サービス終了", "停服", "事前登録", "リリース決定", "マップ",
+        "プレイアブル", "コラボイベント", "★", "買い切り",
+    ),
+    # 动画强信号只收**动画专属**词。「アニメ / 映画 / 配信開始 / PV」动画和游戏都在用
+    # （动画 IP 改编游戏的公告里全是这些），收进来会把游戏稿抢成动画，所以降为弱信号。
+    SUBJECT_ANIME: (
+        "放送", "劇場", "主題歌", "オープニング", "エンディング",
+        "声優", "キャスト", "スタッフ", "監督", "制作", "作画",
+        "オーディション", "キャラクターボイス", "連続放送",
+    ),
+}
+
+_SUBJECT_WEAK_SIGNALS: dict[str, tuple[str, ...]] = {
+    SUBJECT_ANIME: ("アニメ", "动画", "动漫", "番组", "番組", "新番", "映画", "配信開始", "pv"),
+    SUBJECT_MANGA: ("漫画", "コミック"),
+    SUBJECT_LN: ("小说", "小説"),
+    SUBJECT_GAME: ("游戏", "手游", "手机游戏", "ゲーム"),
+}
+
+# 音乐 / 文化 / 行业动态：不另立主体，落到「综合」。
+# 音乐人（Ado / ヨルシカ 等）即便关联不到具体作品，也按其文化属性归综合，不丢。
+_MUSIC_CULTURE_SIGNALS: tuple[str, ...] = (
+    "新曲", "アルバム", "ライブ", "ツアー", "音楽", "音乐", "歌手", "バンド", "ボカロ",
+    "作曲家", "乐曲", "演唱", "コンサート", "フェス", "主題歌", "コラボソング",
+)
+
+
+def classify_subject_from_text(
+    title: str, summary: str, fallback: str = _FALLBACK_SUBJECT
+) -> str:
+    """按标题 / 摘要的实际内容判主体（动画 / 漫画 / 轻小说 / 游戏 / 综合动态）。
+
+    - 强信号 2 分、弱信号 1 分，最高分者胜；平分用 fallback（一般是源栏目）；
+    - 完全没有四类信号时回落 fallback；fallback 也不可用时回落综合动态；
+    - 音乐 / 文化 / 行业信号只在四类都没命中时把人送进「综合」（不是兜底垃圾桶，
+      进综合的前提是已通过收录判定，见 scripts/news_filters）。
+    """
+    text = f"{title}\n{summary}".lower()
+    scores: dict[str, int] = {}
+    for subject, words in _SUBJECT_STRONG_SIGNALS.items():
+        score = sum(2 for word in words if word.lower() in text)
+        if score:
+            scores[subject] = score
+    for subject, words in _SUBJECT_WEAK_SIGNALS.items():
+        score = sum(1 for word in words if word.lower() in text)
+        if score:
+            scores[subject] = scores.get(subject, 0) + score
+
+    if scores:
+        best = max(scores.values())
+        winners = [subject for subject, score in scores.items() if score == best]
+        if len(winners) == 1:
+            return winners[0]
+        normalized = normalize_subject(fallback)
+        if normalized in winners:
+            return normalized
+        # 平分且源栏目不在其中：动画 / 游戏是站内主力，优先给这两个
+        for preferred in (SUBJECT_ANIME, SUBJECT_GAME):
+            if preferred in winners:
+                return preferred
+        return winners[0]
+
+    if any(word.lower() in text for word in _MUSIC_CULTURE_SIGNALS):
+        return SUBJECT_GENERAL
+    return normalize_subject(fallback)
+
+
 # ---------- 游戏子类检测（仅 category == 游戏 时调用） ----------
 
 _GALGE_KEYWORDS = (
@@ -208,13 +294,14 @@ def flag_adult(title: str, summary: str) -> bool:
 
 # ---------- 优先级计算（落库，供排序） ----------
 
-# 主体基础分：动画 / 漫画 / 轻小说 顶档；游戏基础分略低（子类再补）；综合动态兜底。
+# 主体基础分：动画 / 漫画 / 轻小说 顶档；游戏与**综合动态同权**（2026-10-21 用户定稿：
+# 综合动态不再是「压低一档的兜底」，抓取配额与游戏同级）。
 _SUBJECT_BASE = {
     SUBJECT_ANIME: 100,
     SUBJECT_MANGA: 100,
     SUBJECT_LN: 100,
     SUBJECT_GAME: 80,
-    SUBJECT_GENERAL: 50,
+    SUBJECT_GENERAL: 80,
 }
 
 # 游戏子类加分：galge 最高；二游次之；其它游戏不加分。
@@ -254,6 +341,20 @@ _SOURCE_TYPE_BONUS = {
     SOURCE_TYPE_PR: -25,
 }
 
+# 商品宣传降权（2026-10-21 用户：商品宣传的权重降低）。
+# 周边 / 联名 / 抽奖贩售这类稿子信息量低、占版面，但**不该删**（ACGN IP 的周边仍是内容），
+# 所以只降优先级：让首页精选把它们排到作品动态之后，列表页仍按时间能看到。
+# 判据只看标题 / 摘要（正文里提一句不算）；与 news_filters 的商品词表分开维护，
+# 本模块不依赖其它脚本（避免循环导入）。
+MERCH_PROMO_WORDS: tuple[str, ...] = (
+    "グッズ", "コラボ", "一番くじ", "フィギュア", "ぬいぐるみ", "バッグ", "ポーチ",
+    "チャーム", "ネックレス", "ピアス", "指輪", "ブレスレット", "雑貨", "Tシャツ",
+    "靴下", "マグカップ", "クッション", "タオル", "ポストカード", "プライズ",
+    "食玩", "缶セット", "キーホルダー", "アクセサリー", "受注販売", "先行販売",
+    "予約受付", "発売記念", "限定ショップ", "アベイル", "しまむら", "サンキューマート",
+)
+MERCH_PROMO_PENALTY = -30
+
 # 日本厂商 / 平台信号：欧美源里出现任天堂等日本厂商时，实际是日本内容，不该被算作欧美。
 _JP_VENDOR_SIGNALS = (
     "任天堂", "nintendo", "switch", "playstation", "sega", "capcom", "カプコン",
@@ -288,7 +389,8 @@ def compute_priority_score(
     - 事件重要性加分（健康状况必不沉底）；
     - 欧美普通内容被地区扣分；只有命中「公认重大」信号（重大行业事件，或标题 /
       摘要里有公认重大标志）才破格补回；
-    - 来源类型：官方 PR 明显压低。
+    - 来源类型：官方 PR 明显压低；
+    - 商品宣传（周边 / 联名 / 抽奖贩售）再压一档，让作品动态排在它前面。
     """
     subject = normalize_subject(category)
     score = _SUBJECT_BASE.get(subject, _SUBJECT_BASE[_FALLBACK_SUBJECT])
@@ -317,4 +419,9 @@ def compute_priority_score(
                 score += 30  # 把被地区扣掉的 -10 补回并多给一档
 
     score += _SOURCE_TYPE_BONUS.get(source_type, 0)
+
+    # 商品宣传降权：标题 / 摘要命中周边联名词 → 明显压低，但仍保留入库与列表展示。
+    haystack = (text or "").lower()
+    if any(word.lower() in haystack for word in MERCH_PROMO_WORDS):
+        score += MERCH_PROMO_PENALTY
     return score

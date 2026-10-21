@@ -47,9 +47,12 @@
             </dl>
         </div>
         <div class="home-hero-collage" aria-hidden="true">
-            <img class="home-poster home-poster-a" src="/static/img/home/poster-sakura.jpg" alt="" loading="eager">
-            <img class="home-poster home-poster-b" src="/static/img/home/poster-haruhi.jpg" alt="" loading="eager">
-            <img class="home-poster home-poster-c" src="/static/img/home/poster-bocchi.jpg" alt="" loading="eager">
+            {# 首屏大图：eager + fetchpriority=high 抢加载优先级；width/height 锁定占位防
+               布局抖动（CLS）。属性比例必须严格 2:3，与 style.css 的 aspect-ratio 同口径，
+               否则自然比例与 CSS 比例冲突、海报被拉变形。真实裁切由 object-fit:cover 负责。 #}
+            <img class="home-poster home-poster-a" src="/static/img/home/poster-sakura.jpg" alt="" width="200" height="300" loading="eager" fetchpriority="high" decoding="async">
+            <img class="home-poster home-poster-b" src="/static/img/home/poster-haruhi.jpg" alt="" width="200" height="300" loading="eager" fetchpriority="high" decoding="async">
+            <img class="home-poster home-poster-c" src="/static/img/home/poster-bocchi.jpg" alt="" width="200" height="300" loading="eager" fetchpriority="high" decoding="async">
         </div>
     </div>
 </section>
@@ -103,7 +106,7 @@
                         <span class="spotlight-cover">
                             <span class="spotlight-letter" aria-hidden="true">{{ item.title_main[:1] }}</span>
                             {% if item.image_url %}
-                            <img class="spotlight-img" src="{{ item.image_url }}" referrerpolicy="no-referrer" loading="lazy" alt="{{ item.title_main }}封面" onerror="this.style.display='none'">
+                            <img class="spotlight-img" src="{{ item.image_url }}" referrerpolicy="no-referrer" loading="lazy" width="320" height="180" decoding="async" alt="{{ item.title_main }}封面" onerror="this.style.display='none'">
                             {% endif %}
                             {% if item.broadcast_time %}
                             <span class="spotlight-badge badge schedule-time-badge">{{ item.broadcast_time }} 更新</span>
@@ -141,7 +144,7 @@
                         <span class="work-cover-rank {{ 'work-rank-top' if loop.index <= 3 else '' }}" aria-hidden="true">{{ loop.index }}</span>
                         <span class="work-cover" aria-hidden="true">{{ item.title[:1] }}</span>
                         {% if item.image_url %}
-                        <img class="work-cover" src="{{ thumb_src(item.image_url) }}" alt="{{ item.title }}封面" loading="lazy" onerror="this.style.display='none'">
+                        <img class="work-cover" src="{{ thumb_src(item.image_url) }}" alt="{{ item.title }}封面" loading="lazy" width="400" height="600" decoding="async" onerror="this.style.display='none'">
                         {% endif %}
                     </span>
                     <span class="work-card-body">
@@ -213,7 +216,7 @@
                             <span class="home-news-ph" aria-hidden="true">{{ art.title[:1] }}</span>
                             {% else %}
                             {% if art.image_url %}
-                            <img class="home-news-img" src="{{ art.image_url }}" alt="{{ art.title }}封面" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.display='none'">
+                            <img class="home-news-img" src="{{ art.image_url }}" alt="{{ art.title }}封面" loading="lazy" width="64" height="96" decoding="async" referrerpolicy="no-referrer" onerror="this.style.display='none'">
                             {% endif %}
                             <span class="home-news-ph" aria-hidden="true">{{ art.title[:1] }}</span>
                             {% endif %}

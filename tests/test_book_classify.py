@@ -4,11 +4,14 @@
 它们一律映射成 novel，站内又把 novel 标成「轻小说」，导致线上轻小说区混进
 《卡拉马佐夫兄弟》《三国演义》《红楼梦》等普通书籍。
 
-站的口径是：**「文学」是标注，不是第五种类型**——日本普通小说同样落在 novel，
-只是多一枚 `book_kind=literature` 的角标；非日本语种的小说才不从本站收录。
-所以 classify_book 返回的是 `(content_type, book_kind)` 二元组：
+classify_book 返回 `(content_type, book_kind)` 二元组：
 
     轻小说 -> (novel, light_novel)｜日本文学 -> (novel, literature)｜其余 -> (None, None)
+
+收录口径（2026-10-21 定稿）：**文学不再进站**——classify_book 的语义不变
+（存量打标 scripts/mark_book_kinds.py 仍靠它），但 map_subject 在入库闸口
+只放行 light_novel，文学 / 判不出文库信号的边界件一律拒绝（见
+TestMapSubjectBookKind）。
 
 测试全部离线：payload 是手写 fixture，不访问网络、不写数据库。
 """
@@ -16,6 +19,8 @@
 import importlib.util
 import sys
 from pathlib import Path
+
+import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT_PATH = PROJECT_ROOT / "scripts" / "import_bangumi.py"
@@ -124,9 +129,10 @@ class TestResolveBook:
 
 
 class TestMapSubjectBookKind:
-    """map_subject 把标注带上，落到 MappedSubject.book_kind。"""
+    """map_subject 对标注的处理（2026-10-21 口径：文学不收，轻小说放行）。"""
 
-    def test_literature_kind_is_carried(self):
+    def test_literature_novel_is_rejected(self):
+        """文学类日本小说在入库闸口被拦（收录口径 2026-10-21）。"""
         payload = {
             "id": 1,
             "type": 1,
@@ -136,9 +142,9 @@ class TestMapSubjectBookKind:
             "rating": {"score": 8.1},
             "infobox": [{"key": "作者", "value": "太宰治"}, {"key": "出版社", "value": "新潮社"}],
         }
-        subject = import_bangumi.map_subject(payload)
-        assert subject.type == "novel"
-        assert subject.book_kind == "literature"
+        with pytest.raises(import_bangumi.SubjectMappingError) as excinfo:
+            import_bangumi.map_subject(payload)
+        assert "文学" in str(excinfo.value)
 
     def test_light_novel_kind_is_carried(self):
         payload = {

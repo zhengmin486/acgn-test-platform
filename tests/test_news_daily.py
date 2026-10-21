@@ -6,7 +6,7 @@
 
 import importlib.util
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone, timedelta
 from pathlib import Path
 
 import pytest
@@ -21,11 +21,14 @@ from scripts.news_daily import run_import_daily
 from scripts.news_sources import (
     SOURCES,
     SourceSpec,
+    extract_body,
     fetch_candidates,
+    hydrate_head_image,
     parse_feed,
     parse_feed_date,
     parse_gamersky_detail,
     parse_gamersky_list,
+    parse_og_image,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -149,7 +152,10 @@ class TestFeedParsing:
         items = parse_feed(RSS_JA, spec)
         assert len(items) == 1
         assert items[0].title == "新作発表"
-        assert items[0].published_at == datetime(2026, 10, 19, 12, 0)
+        # dc:date 是 JST(+09:00)：要换算成本机时区，不是照抄 12:00
+        assert items[0].published_at == datetime(
+            2026, 10, 19, 12, 0, tzinfo=timezone(timedelta(hours=9))
+        ).astimezone().replace(tzinfo=None)
 
     def test_atom_items(self):
         """Atom 源（轻小说 ln-news）按 <entry> 解析，链接取 rel=alternate，封面取 enclosure 图片。"""
@@ -160,14 +166,22 @@ class TestFeedParsing:
         assert items[0].url == "https://ln-news.com/articles/126906"
         assert items[0].image_url == "https://assets.ln-news.com/m.jpg"
         # 带时区（+09:00）的 updated 必须正确解析为 naive 本地时间
-        assert items[0].published_at == datetime(2026, 10, 20, 16, 0)
+        assert items[0].published_at == datetime(
+            2026, 10, 20, 16, 0, tzinfo=timezone(timedelta(hours=9))
+        ).astimezone().replace(tzinfo=None)
         # 第二条没有 enclosure 封面，回落为空（不报错）
         assert items[1].url == "https://ln-news.com/articles/126986"
         assert items[1].image_url is None
 
     def test_feed_date_formats(self):
+        # +0800 与本站时区一致，换算后不变
         assert parse_feed_date("Mon, 19 Oct 2026 23:00:00 +0800") == datetime(2026, 10, 19, 23, 0)
-        assert parse_feed_date("2026-10-19T12:00:00+09:00") == datetime(2026, 10, 19, 12, 0)
+        # +09:00（JST）必须换算成本机时区：直接抹掉 tzinfo 会让日文资讯快 1 小时
+        jst = datetime(2026, 10, 19, 12, 0, tzinfo=timezone(timedelta(hours=9)))
+        assert parse_feed_date("2026-10-19T12:00:00+09:00") == jst.astimezone().replace(tzinfo=None)
+        # UTC（GMT 的 RSS）同理，不能当成本地时间
+        utc = datetime(2026, 10, 19, 12, 0, tzinfo=timezone.utc)
+        assert parse_feed_date("Mon, 19 Oct 2026 12:00:00 GMT") == utc.astimezone().replace(tzinfo=None)
         assert parse_feed_date("") is None
         assert parse_feed_date("garbage") is None
 
@@ -197,6 +211,51 @@ class TestGamerskyParsing:
         assert "分页导航" not in item.body  # 截断点之后不进正文
         assert item.needs_detail is False
 
+    def test_detail_prefers_header_time_over_sidebar_date(self):
+        """文章头部带秒的真实时间优先；侧栏「发布时间：日期」只有日期，必须忽略。
+
+        真实页面里侧栏推荐列表里有 `发布时间：2026-10-20`（无时刻），旧解析器认了它，
+        把 2024 年的旧文写成了抓取当天——时效全错。这里用真实结构的最小复刻守护。
+        """
+        html = """<html><body>
+        <div class="side"><div class="txt">发布时间：2026-10-20</div></div>
+        <div class="Mid2L_tit">
+            <h1>武侠动画《杯雪》发布首支PV 经典江湖客 乱世见英雄</h1>
+            <div class="detail">
+                2024-04-24 16:21:26 来源：官方 作者：未知 编辑：宁静海
+            </div>
+        </div>
+        <div class="Mid2L_con"><p>正文。</p></div>
+        </body></html>"""
+        spec = SourceSpec("g", "游民星空 ACG", "https://acg.gamersky.com/", "html", "动画", "zh")
+        item = parse_gamersky_detail(html, parse_gamersky_list(GAMERSKY_LIST, spec)[0])
+        assert item.published_at == datetime(2024, 4, 24, 16, 21, 26)
+
+    def test_parse_og_image(self):
+        """详情页头图：og:image / twitter:image 两种属性顺序都要认。"""
+        a = '<meta property="og:image" content="https://img.example/a.jpg">'
+        b = '<meta content="https://img.example/b.jpg" name="twitter:image">'
+        assert parse_og_image(a) == "https://img.example/a.jpg"
+        assert parse_og_image(b) == "https://img.example/b.jpg"
+        assert parse_og_image("<html></html>") is None
+
+    def test_hydrate_head_image_fills_missing(self):
+        """RSS 不带图时，补图函数抓详情页填 image_url；抓取失败静默保留空。"""
+        spec = SourceSpec("t", "测试", "https://zh.example/rss", "rss", "动画", "zh")
+        item = parse_feed(RSS_ZH, spec)[0]
+        assert item.image_url == "https://zh.example/img1.jpg"  # feed 自带图，不该再抓
+        bare = parse_feed(RSS_JA, spec)[0]
+        assert bare.image_url is None
+        page = '<meta property="og:image" content="https://img.example/x.jpg">'
+        filled = hydrate_head_image(bare, fetch=fake_fetch({bare.url: page}))
+        assert filled.image_url == "https://img.example/x.jpg"
+
+        def boom(url):
+            raise OSError("network down")
+
+        still_bare = hydrate_head_image(parse_feed(RSS_JA, spec)[0], fetch=boom)
+        assert still_bare.image_url is None  # 补图失败不抛、不阻断
+
     def test_hydrate_fetches_detail(self):
         spec = SourceSpec("g", "游民星空 ACG", "https://acg.gamersky.com/", "html", "动画", "zh")
         item = parse_gamersky_list(GAMERSKY_LIST, spec)[0]
@@ -212,7 +271,11 @@ class TestGamerskyParsing:
 
 
 class TestDailyImport:
-    def test_zh_sources_imported_and_ja_skipped_without_llm(self, factory):
+    def test_ja_source_imported_as_original_without_llm(self, factory):
+        """没有翻译 Key 时日文源**不再整源跳过**，按原文入库且不标注「译文」。
+
+        2026-10-21 口径：宁可上日文原文也不空着；LLM 接口保留，配 Key 后自动改回翻译。
+        """
         fetch = fake_fetch({
             ZH_SOURCE.url: RSS_ZH,
             JA_SOURCE.url: RSS_JA,
@@ -220,16 +283,20 @@ class TestDailyImport:
         summary = run_import_daily(
             factory, apply=True, quota=20, sources=(ZH_SOURCE, JA_SOURCE), fetch=fetch
         )
-        assert summary.added == 2
-        assert summary.skipped_sources == 1  # 没有翻译 Key：日文源整源跳过
-        assert summary.per_source == {"zh-test": 2}
+        assert summary.added == 3  # 中文 2 条 + 日文 1 条
+        assert summary.skipped_sources == 0  # 不再整源跳过
+        assert summary.untranslated_sources == 1  # 一个日文源按原文入库
+        assert summary.per_source == {"zh-test": 2, "ja-test": 1}
 
         db = factory()
         try:
             rows = {row.title: row for row in db.scalars(select(Article))}
-            assert set(rows) == {"新动画宣布制作", "旧闻一条"}
+            assert set(rows) == {"新动画宣布制作", "旧闻一条", "新作発表"}  # 日文标题原样
             body = rows["新动画宣布制作"].body
-            assert "原文链接：https://zh.example/a1" in body
+            # 正文不再塞裸链接：详情页模板有独立的「原文链接」入口，正文里塞长 URL 会撑破排版
+            assert "原文链接" not in body
+            assert "zh.example/a1" not in body
+            assert "译文由自动翻译生成" not in rows["新作発表"].body  # 没翻译就不能标译文
         finally:
             db.close()
 
@@ -461,8 +528,12 @@ def _cand(spec: SourceSpec, title: str, url: str = "", summary: str = ""):
 
 
 class TestSoftQuotaAndClassification:
-    def test_subject_cap_prevents_one_category_taking_all(self):
-        """综合动态有封顶，不会挤占全部配额（兼顾类别覆盖）。"""
+    def test_general_subject_competes_with_others(self):
+        """综合动态与其它主体同权（2026-10-21 用户定稿）：不再单独封顶，配额够就全收。
+
+        旧口径给综合动态每天封顶 6 条，用户明确「综合可以和游戏同权」后取消；
+        类别覆盖改由「主体基础分同权」自然调节（动画/漫画/轻小说仍高一档）。
+        """
         from scripts.news_daily import _PER_SUBJECT_CAP, select_quota
 
         general = SourceSpec(
@@ -470,7 +541,8 @@ class TestSoftQuotaAndClassification:
         )
         pool = [_cand(general, f"综合资讯第 {i} 条") for i in range(20)]
         selected, _ = select_quota(pool, 10)
-        assert len(selected) == _PER_SUBJECT_CAP["综合动态"]
+        assert len(selected) == 10  # 没有综合动态专属封顶
+        assert _PER_SUBJECT_CAP == {}
 
     def test_same_event_reports_are_merged(self):
         """同一事件的不同报道只占一个位置。"""
@@ -569,5 +641,165 @@ class TestSoftQuotaAndClassification:
             assert row.source_type == "媒体编译"
             assert row.priority_score > 0
             assert row.subcategory == ""  # 非游戏不打子类
+        finally:
+            db.close()
+
+
+# ---------- 2026-10-21：游民星空标题污染修复 + 新源注册 + 停用开关 ----------
+
+
+class TestGamerskyTitleCleanup:
+    def test_list_prefers_tit_div(self):
+        """真标题在 <div class="tit"> 里；vote/评论数（tem div）不得混进标题。"""
+        html = (
+            '<a href="https://www.gamersky.com/news/202404/1723000.shtml">'
+            '<img src="https://imgs.gamersky.com/x.jpg" alt="武侠动画《杯雪》发布首支PV">'
+            '<div class="tit">武侠动画《杯雪》发布首支PV 乱世见英雄</div>'
+            '<div class="tem"><div class="vote gshit">4354</div><div>0</div></div></a>'
+        )
+        spec = SourceSpec("g", "游民星空 ACG", "https://acg.gamersky.com/", "html", "动画", "zh")
+        items = parse_gamersky_list(html, spec)
+        assert items[0].title == "武侠动画《杯雪》发布首支PV 乱世见英雄"
+
+    def test_list_fallback_strips_count_tail(self):
+        """无 tit div 时退回整体折叠，只剥「数字 数字」计数尾巴，正常数字标题不动。"""
+        html = (
+            '<a href="https://www.gamersky.com/news/202404/1723001.shtml">新番导视十月篇 4354 0</a>'
+            '<a href="https://www.gamersky.com/news/202404/1723002.shtml">《足球小将》第4话</a>'
+        )
+        spec = SourceSpec("g", "游民星空 ACG", "https://acg.gamersky.com/", "html", "动画", "zh")
+        items = parse_gamersky_list(html, spec)
+        assert items[0].title == "《足球小将》第4话"  # id 更大，倒序在前；正常数字标题不受影响
+        assert items[1].title == "新番导视十月篇"
+
+
+class TestSourceRegistry20261021:
+    def test_acgch_and_chuapp_registered(self):
+        keys = {spec.key for spec in SOURCES}
+        assert {"acgch", "chuapp"} <= keys
+        acgch = next(spec for spec in SOURCES if spec.key == "acgch")
+        assert acgch.url == "https://acgch.com/zh-hans/rss.xml"
+        assert acgch.lang == "zh" and acgch.kind == "rss"
+        chuapp = next(spec for spec in SOURCES if spec.key == "chuapp")
+        assert chuapp.url == "http://www.chuapp.com/feed"
+
+    def test_disabled_sources_skipped_without_fetch(self, factory, monkeypatch):
+        """NEWS_DISABLED_SOURCES：列出的源整源跳过，连网络请求都不发。"""
+        monkeypatch.setattr(settings, "news_disabled_sources", "disabled-src")
+        disabled = SourceSpec(
+            "disabled-src", "停用源", "https://off.example/rss", "rss", "动画", "zh"
+        )
+        # off.example 未打桩：若停用源仍被抓取会直接 failed，测试立刻暴露
+        fetch = fake_fetch({ZH_SOURCE.url: RSS_ZH})
+        summary = run_import_daily(
+            factory, apply=True, quota=20, sources=(disabled, ZH_SOURCE), fetch=fetch
+        )
+        assert summary.added == 2
+        assert summary.per_source == {"zh-test": 2}
+        assert summary.failed == 0
+
+
+# ---------- 2026-10-21：RSS 源正文提取（详情页正文，不再拿摘要冒充正文） ----------
+
+
+class TestExtractBody:
+    def test_acgch_container_with_noise_lines(self):
+        html = (
+            "<article><div>游戏2026年10月21日 GMT+9 18:44约 1 分钟读完</div>"
+            "<p>《药屋少女的呢喃》首款家用游戏2027年3月18日发售，日向夏原案担任原案的完全新作。</p>"
+            "<p>本作讲述猫猫刚开始当侍女不久的后宫故事，被称为五个谜团的推理谭。</p>"
+            "<div>有瓜？来投个稿→</div></article>"
+        )
+        body = extract_body(html)
+        assert "首款家用游戏" in body
+        assert "五个谜团" in body
+        assert "分钟读完" not in body
+        assert "投个稿" not in body
+
+    def test_no_known_container_returns_empty(self):
+        assert extract_body("<html><body><p>正文段落。</p></body></html>") == ""
+
+    def test_too_short_body_returns_empty(self):
+        """快讯本来就短：提取结果低于阈值返回空串，由调用方保留摘要形态。"""
+        assert extract_body("<article><p>短讯一条。</p></article>") == ""
+
+    def test_rss_candidate_gets_real_body(self, factory):
+        """RSS 候选：详情页抓得到正文 → body=真正文，summary 回填正文前 200 字。"""
+        rss = (
+            '<?xml version="1.0"?><rss version="2.0"><channel>'
+            "<item><title>ACGCH快讯标题</title><link>https://acgch.example/news/a</link>"
+            "</item></channel></rss>"
+        )
+        article_page = (
+            "<article>"
+            "<p>这是详情页真正的第一段正文，内容足够长，能够通过最短长度校验，不会被当作提取失败。</p>"
+            "<p>第二段：游戏将于2027年3月18日发售，登陆 Nintendo Switch 与 Steam 平台。</p>"
+            "</article>"
+        )
+        fetch = fake_fetch(
+            {ZH_SOURCE.url: rss, "https://acgch.example/news/a": article_page}
+        )
+        summary = run_import_daily(
+            factory, apply=True, quota=10, sources=(ZH_SOURCE,), fetch=fetch
+        )
+        assert summary.added == 1
+        db = factory()
+        try:
+            article = db.scalars(select(Article)).one()
+            assert "真正的第一段正文" in article.body
+            assert article.summary.startswith("这是详情页真正的第一段正文")
+        finally:
+            db.close()
+
+
+# ---------- 2026-10-21：RSS 源正文提取（详情页正文，不再拿摘要冒充正文） ----------
+
+
+class TestExtractBody:
+    def test_acgch_container_with_noise_lines(self):
+        html = (
+            "<article><div>游戏2026年10月21日 GMT+9 18:44约 1 分钟读完</div>"
+            "<p>《药屋少女的呢喃》首款家用游戏2027年3月18日发售，日向夏原案担任原案的完全新作。</p>"
+            "<p>本作讲述猫猫刚开始当侍女不久的后宫故事，被称为五个谜团的推理谭。</p>"
+            "<div>有瓜？来投个稿→</div></article>"
+        )
+        body = extract_body(html)
+        assert "首款家用游戏" in body
+        assert "五个谜团" in body
+        assert "分钟读完" not in body
+        assert "投个稿" not in body
+
+    def test_no_known_container_returns_empty(self):
+        assert extract_body("<html><body><p>正文段落。</p></body></html>") == ""
+
+    def test_too_short_body_returns_empty(self):
+        """快讯本来就短：提取结果低于阈值返回空串，由调用方保留摘要形态。"""
+        assert extract_body("<article><p>短讯一条。</p></article>") == ""
+
+    def test_rss_candidate_gets_real_body(self, factory):
+        """RSS 候选：详情页抓得到正文 → body=真正文，summary 回填正文前 200 字。"""
+        rss = (
+            '<?xml version="1.0"?><rss version="2.0"><channel>'
+            "<item><title>ACGCH快讯标题</title><link>https://acgch.example/news/a</link>"
+            "</item></channel></rss>"
+        )
+        article_page = (
+            "<article>"
+            "<p>这是详情页真正的第一段正文，内容足够长，能够通过最短长度校验，不会被当作提取失败。</p>"
+            "<p>第二段：游戏将于2027年3月18日发售，登陆 Nintendo Switch 与 Steam 平台。</p>"
+            "</article>"
+        )
+        fetch = fake_fetch(
+            {ZH_SOURCE.url: rss, "https://acgch.example/news/a": article_page}
+        )
+        summary = run_import_daily(
+            factory, apply=True, quota=10, sources=(ZH_SOURCE,), fetch=fetch
+        )
+        assert summary.added == 1
+        db = factory()
+        try:
+            article = db.scalars(select(Article)).one()
+            assert "真正的第一段正文" in article.body
+            assert article.summary.startswith("这是详情页真正的第一段正文")
         finally:
             db.close()
