@@ -409,10 +409,17 @@ _MAJOR_DECISION_WORDS: tuple[str, ...] = (
     "決定へ", "グリーンライト",
 )
 
-# 中文「官宣」类：中文媒体写"官宣"基本等于官方宣布，单信号即可。
-# 「宣布制作」也单列——用户明确要求"新动画宣布制作"这类算官宣。
-_MAJOR_OFFICIAL_WORDS: tuple[str, ...] = (
-    "官宣", "立项", "宣布制作", "宣布动画化", "宣布改编", "确认制作", "制作确定",
+# 中文「官宣」类：**单用不算**——「《博人传》官宣火影全新劲敌」也是"官宣"，但那是剧情 /
+# 设定情报，不是新作 / 制作 / 定档官宣（2026-10-22 用户明确剔除这类）。
+# 所以要么配一个"作品形态结果词"（官宣定档 / 官宣改编 / 官宣剧场版），
+# 要么本身就是结果短语（宣布制作 / 立项）。
+_MAJOR_OFFICIAL_VERBS: tuple[str, ...] = ("官宣", "宣布")
+_MAJOR_OFFICIAL_TARGETS: tuple[str, ...] = (
+    "定档", "改编", "动画化", "制作", "续作", "续篇", "剧场版", "电影化", "真人化",
+    "第二季", "第三季", "第四季", "新作", "新动画", "新企划", "新番",
+)
+_MAJOR_OFFICIAL_ALONE: tuple[str, ...] = (
+    "立项", "宣布制作", "宣布动画化", "宣布改编", "确认制作", "制作确定",
 )
 
 
@@ -422,7 +429,7 @@ def detect_major_announcement(title: str, summary: str = "") -> tuple[int, str]:
     只看**标题**：RSS 摘要里顺带提一句「アニメ化」不该让整条稿子豁免。
     命中词回传给调用方写运行明细，便于事后校验词表误伤。
 
-    判定顺序：排除词 → 「化」类 → 续作/剧场版/重制 + 决定词 → 中文官宣词。
+    判定顺序：排除词 → 「化」类 → 续作/剧场版/重制 + 决定词 → 中文官宣（动词 + 形态结果词）。
     """
     headline = (title or "").lower()
     if not headline:
@@ -438,9 +445,14 @@ def detect_major_announcement(title: str, summary: str = "") -> tuple[int, str]:
         for word in _MAJOR_DECISION_WORDS:
             if word.lower() in headline:
                 return (MAJOR_SEQUEL, f"{forms[0]}+{word}")
-    for word in _MAJOR_OFFICIAL_WORDS:
+    for word in _MAJOR_OFFICIAL_ALONE:
         if word.lower() in headline:
             return (MAJOR_OFFICIAL, word)
+    verbs = [word for word in _MAJOR_OFFICIAL_VERBS if word in headline]
+    if verbs:
+        for target in _MAJOR_OFFICIAL_TARGETS:
+            if target in headline:
+                return (MAJOR_OFFICIAL, f"{verbs[0]}+{target}")
     del summary  # 只认标题（摘要不参与判定），显式丢弃避免误以为漏判
     return (MAJOR_NONE, "")
 

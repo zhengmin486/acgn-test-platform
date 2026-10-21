@@ -720,6 +720,26 @@ class TestMajorAnnouncementExemption:
         ):
             assert detect_major_announcement(title)[0] == MAJOR_NONE, title
 
+    def test_plot_teasers_are_not_announcements(self):
+        """「官宣 + 剧情情报」不算官宣（2026-10-22 用户明确剔除博人传这类）。
+
+        「官宣」在中文媒体里也用来发设定 / 剧情爆料，单靠这个词会把
+        「《博人传》官宣火影全新劲敌」这种当成新作官宣——必须配形态结果词。
+        """
+        from scripts.news_classify import is_major_announcement
+
+        for title in (
+            "《博人传》官宣火影全新劲敌 威胁程度远超壳组织",
+            "时隔13年 《博人传》官宣：木叶诞生全新顶级族群",
+        ):
+            assert not is_major_announcement(title), title
+        for title in (
+            "《罗小黑战记 学前篇》官宣定档10月30日 B站独播",
+            "《海贼王》官宣双剧场版：神之谷2027年 BAAD2029年",
+            "恋爱漫画《8月31日的长夏》官宣双重改编 SHAFT制作",
+        ):
+            assert is_major_announcement(title), title
+
     def test_real_announcements_still_hit(self):
         """同一批线上数据里真正的官宣不能被收紧掉（过拟合检查）。"""
         from scripts.news_classify import detect_major_announcement, is_major_announcement
