@@ -1406,6 +1406,7 @@ class TestScheduleModels:
                 "id", "season_code", "source_key", "category", "title_main", "title_cn",
                 "title_jp", "weekday", "broadcast_time", "broadcast_note", "work_type",
                 "work_tags", "image_url", "platforms", "source_url", "last_synced_at",
+                "content_id",
             }
         finally:
             db.close()

@@ -5,10 +5,13 @@
    区别只在「时间优先」：播出时间浮在封面右上角，不占正文行宽。
    旧版是 Bootstrap card + object-fit:contain + 300px 图位：竖版海报塞进全宽图位后
    两侧露出紫调留白（#f6f4fd），看着像图片没加载完。 #}
+{# 作品链接：已建立档期↔作品库关联（content_id 有值）时直跳作品详情页；
+   没有关联才退回按标题搜索（译名不一致时搜索会空手而归）。 #}
 {% macro work_card(item, weekday_names, show_weekday) %}
+{% set work_href = ('/contents/' ~ item.content_id) if item.content_id else ('/contents?q=' ~ item.title_main|urlencode) %}
 <article class="work-card schedule-card">
-    {# 封面点击落到站内作品搜索（按标题），不出站 #}
-    <a class="work-cover-box" href="/contents?q={{ item.title_main|urlencode }}" tabindex="-1" aria-hidden="true">
+    {# 封面点击落到站内作品（有关联直跳详情页，无关联按标题搜索），不出站 #}
+    <a class="work-cover-box" href="{{ work_href }}" tabindex="-1" aria-hidden="true">
         <span class="work-cover">{{ item.title_main[:1] }}</span>
         {% if item.image_url %}
         <img class="work-cover" src="{{ item.image_url }}" referrerpolicy="no-referrer" loading="lazy" width="400" height="600" decoding="async" alt="{{ item.title_main }}" onerror="this.style.display='none'">
@@ -23,7 +26,7 @@
             <span class="badge schedule-weekday-badge">{{ weekday_names[item.weekday] }}</span>
         </span>
         {% endif %}
-        <a class="work-card-title schedule-title" href="/contents?q={{ item.title_main|urlencode }}">{{ item.title_main }}</a>
+        <a class="work-card-title schedule-title" href="{{ work_href }}">{{ item.title_main }}</a>
         {% if item.title_cn and item.title_cn != item.title_main %}
         <span class="schedule-cn">{{ item.title_cn }}</span>
         {% endif %}

@@ -1519,6 +1519,11 @@ def _map_and_store(
         # 作者/公司关系与作品一起落库：infobox 白名单识别，替换式写入
         entity_note = _link_entities(db, content.id, payload)
 
+        # 档期 ↔ 作品库自动连通：新作品入库后，档期表里已解析出同一
+        # Bangumi 条目 id 的那些条目自动补上 content_id，档期卡片随即
+        # 直跳本作品详情页（不再依赖译名能否搜到）。
+        schedule_note = _link_schedule_entries(db, content)
+
         # 封面本地化：失败不阻塞入库，仅在结果里注明
         cover_note = _localize_cover(db, content, subject, cover_downloader)
         return SubjectOutcome(
@@ -1528,6 +1533,7 @@ def _map_and_store(
             reason=f"已写入 contents.id={content.id}"
             + (f"，标签 {len(subject.tags)} 个" if subject.tags else "")
             + entity_note
+            + schedule_note
             + cover_note,
         )
     except IntegrityError:
@@ -1550,7 +1556,6 @@ def _map_and_store(
 
 def _link_entities(db, content_id: int, payload: dict) -> str:
     """识别并写入作者/公司关系，返回追加到导入结果里的说明。
-
     信息卡里没有可用键（绝大多数书籍/游戏条目）时返回空串；识别算法本身
     防御性解析（app/entity_links.recognize 不抛），数据库错误向上传播，
     由 _map_and_store 的统一 handler 归入 failed——与标签写入同一语义。
@@ -1560,6 +1565,26 @@ def _link_entities(db, content_id: int, payload: dict) -> str:
         return ""
     entity_links.apply_recognition(db, recognition)
     return f"，{recognition.describe()}"
+
+
+def _link_schedule_entries(db, content: Content) -> str:
+    """把档期条目关联到刚入库的作品，返回追加到导入结果里的说明。
+
+    「将来收录自动连通」：档期表里的条目若已解析出同一个 Bangumi 条目 id
+    （bangumi_subject_id），这里自动补上 content_id——档期卡片从此直跳
+    作品详情页，且档期译名会并入作品 aliases，全站搜索用任一译名都能命中。
+
+    没有对应档期条目时返回空串（绝大多数条目属于这种情况）。
+    关联失败不影响入库结果本身——它是增强，不是关键路径。
+    """
+    try:
+        linked = crud.link_schedules_by_subject_id(db, content.bangumi_id, content)
+    except SQLAlchemyError as exc:  # 老库可能还没补列；不牵连入库结果
+        db.rollback()
+        return f"，档期关联未执行（{exc}）"
+    if not linked:
+        return ""
+    return f"，关联档期 {len(linked)} 条"
 
 
 def _localize_cover(db, content: Content, subject: MappedSubject, cover_downloader) -> str:
@@ -1759,6 +1784,9 @@ def main(argv=None) -> int:
         print(f"封面本地化：{cover_state}（目录 {settings.cover_storage_dir}）")
 
     engine = build_engine(database_url)
+    # 档期↔作品库关联列（无 Alembic，幂等补列）：老库缺列时导入仍要能跑，
+    # 只是档期自动关联这一段会跳过。
+    crud.ensure_schedule_link_columns(engine)
     session_factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
     try:
         fetch = _make_fetcher(

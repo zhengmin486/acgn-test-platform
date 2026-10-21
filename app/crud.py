@@ -3115,6 +3115,51 @@ def ensure_schedule_work_info_columns(engine: Engine) -> list[str]:
     return added
 
 
+def ensure_schedule_link_columns(engine: Engine) -> list[str]:
+    """为已存在的 anime_schedules 表补齐档期↔作品库关联列，幂等，返回新增列名。
+
+    - bangumi_subject_id：Bangumi 条目 id（唯一键），跨译名的确定性关联基准；
+    - content_id：站内作品主键（contents.id），档期卡片据此直跳作品详情页。
+
+    两列都只建弱关联、不建外键：作品被删除时档期行保留，只是失去跳转目标。
+    历史行留 NULL，由 scripts/fill_schedule_works.py 的关联模式回填。
+
+    模型里两列都声明了 index=True，但 ALTER TABLE ADD COLUMN 不会带出索引
+    （create_all 只建新表、不给已有表加列），所以历史库要显式补索引——
+    「按 subject_id 反查档期」是将来收录自动连通的热路径。
+    """
+    inspector = inspect(engine)
+    if "anime_schedules" not in inspector.get_table_names():
+        return []
+
+    existing = {column["name"] for column in inspector.get_columns("anime_schedules")}
+    added: list[str] = []
+    for name in ("bangumi_subject_id", "content_id"):
+        if name in existing:
+            continue
+        with engine.begin() as connection:
+            connection.execute(
+                text(f"ALTER TABLE anime_schedules ADD COLUMN {name} INTEGER")
+            )
+        added.append(name)
+
+    # 索引：与模型声明的 index=True 对齐（名字沿用 SQLAlchemy 的默认命名）。
+    indexed = {index["name"] for index in inspector.get_indexes("anime_schedules")}
+    for name in ("bangumi_subject_id", "content_id"):
+        index_name = f"ix_anime_schedules_{name}"
+        if index_name in indexed:
+            continue
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    f"CREATE INDEX IF NOT EXISTS {index_name} "
+                    f"ON anime_schedules ({name})"
+                )
+            )
+        added.append(index_name)
+    return added
+
+
 def init_db(engine: Engine) -> int:
     """建表（如无）并播种，返回播种行数。
 
@@ -3146,6 +3191,7 @@ def init_db(engine: Engine) -> int:
     ensure_article_classification_columns(engine)
     ensure_content_submission_extra_columns(engine)
     ensure_schedule_work_info_columns(engine)
+    ensure_schedule_link_columns(engine)
     db = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
     try:
         seeded = seed_if_empty(db)
@@ -5814,6 +5860,235 @@ def upsert_schedule(db: Session, data: dict) -> tuple[AnimeSchedule, str]:
         setattr(record, field, data.get(field))
     db.commit()
     return record, ("updated" if changed else "unchanged")
+
+
+# ---------- 档期 ↔ 作品库 关联 ----------
+
+# 档期译名并入作品别名时的别名总量上限：作品别名服务搜索召回，
+# 与 import_bangumi 的 MAX_ALIASES_PER_SUBJECT 同量级即可，
+# 档期每条最多贡献 3 个译名（中/日/主标题），留足余量。
+MAX_CONTENT_ALIASES = 20
+
+
+def normalize_title_key(text: str | None) -> str:
+    """标题归一化（去空白与标点、转小写），用于标题比对。
+
+    与 scripts/fill_schedule_works.py 的 normalize_title 同口径：
+    两边的标题来自不同站点（Yuc 档期页 / Bangumi），只有去掉空白、
+    标点、大小写差异后才有可比性。
+    """
+    if not text:
+        return ""
+    cleaned = re.sub(r"[\s　]+", "", str(text))
+    cleaned = re.sub(
+        r"[!！?？。.,，、·・:：;；~〜\-—_'\"“”‘’()（）\[\]【】]", "", cleaned
+    )
+    return cleaned.lower()
+
+
+def find_content_by_bangumi_id(db: Session, bangumi_id: int | None) -> Content | None:
+    """按 Bangumi 条目 id 查作品（唯一索引 uq_contents_bangumi_id）。
+
+    这是档期与作品库之间唯一可靠的关联键：同一部作品在两边是同一个
+    条目 id，译名怎么翻译都不影响。
+    """
+    if not bangumi_id:
+        return None
+    return db.scalar(select(Content).where(Content.bangumi_id == bangumi_id))
+
+
+def merge_content_aliases(db: Session, content: Content, names: list[str]) -> list[str]:
+    """把给定译名并入作品的 aliases（JSON 数组），去重且限长。
+
+    - 与作品自身 title / title_original 重复的译名跳过（搜索已覆盖）；
+    - 与已有别名重复的跳过（按归一化标题比对，中英标点差异不算重复项）；
+    - 超过 MAX_CONTENT_ALIASES 时截断尾部（保留先到的）；
+    - 有变化才写库并提交，返回最终别名列表。
+    """
+    existing = list(content.aliases or [])
+    seen = {normalize_title_key(item) for item in existing}
+    reserved = {
+        normalize_title_key(content.title),
+        normalize_title_key(content.title_original),
+    }
+    merged = list(existing)
+    changed = False
+    for name in names:
+        text = (name or "").strip()
+        if not text:
+            continue
+        key = normalize_title_key(text)
+        if not key or key in reserved or key in seen:
+            continue
+        seen.add(key)
+        merged.append(text)
+        changed = True
+    if len(merged) > MAX_CONTENT_ALIASES:
+        merged = merged[:MAX_CONTENT_ALIASES]
+        changed = True
+    if changed:
+        content.aliases = merged
+        db.commit()
+    return merged
+
+
+def link_schedule_to_content(
+    db: Session,
+    schedule: AnimeSchedule,
+    content: Content,
+    *,
+    subject_id: int | None = None,
+    alias_names: list[str] | None = None,
+) -> bool:
+    """把档期条目关联到站内作品，并把档期译名并入作品别名。
+
+    - 写回 anime_schedules.content_id（跳转目标）与 bangumi_subject_id
+      （关联基准；未给定时取作品的 bangumi_id）；
+    - alias_names 里的译名（通常是档期的中/日标题）并入作品 aliases，
+      这样全站搜索用任意译名都能搜到这部作品；
+    - 返回是否真的产生了变更（无变更不写库）。
+    """
+    changed = False
+    if schedule.content_id != content.id:
+        schedule.content_id = content.id
+        changed = True
+    resolved_subject = subject_id if subject_id is not None else content.bangumi_id
+    if resolved_subject and schedule.bangumi_subject_id != resolved_subject:
+        schedule.bangumi_subject_id = resolved_subject
+        changed = True
+    if changed:
+        db.commit()
+    if alias_names:
+        merge_content_aliases(db, content, alias_names)
+    return changed
+
+
+def link_schedules_by_subject_id(
+    db: Session, subject_id: int | None, content: Content
+) -> list[AnimeSchedule]:
+    """反查：把 subject_id 命中的档期条目全部关联到该作品。
+
+    用于「将来收录自动连通」——新作品入库后，档期表里已解析出同一
+    Bangumi 条目 id 的那些条目自动补上 content_id，无需再跑回填。
+    返回被关联的档期条目。
+    """
+    if not subject_id:
+        return []
+    rows = list(
+        db.scalars(
+            select(AnimeSchedule).where(AnimeSchedule.bangumi_subject_id == subject_id)
+        )
+    )
+    linked: list[AnimeSchedule] = []
+    for row in rows:
+        if row.content_id == content.id:
+            continue
+        link_schedule_to_content(
+            db,
+            row,
+            content,
+            subject_id=subject_id,
+            alias_names=[row.title_main, row.title_cn, row.title_jp],
+        )
+        linked.append(row)
+    return linked
+
+
+def build_schedule_title_index(db: Session) -> dict[str, dict[str, int]]:
+    """构建「归一化标题 → content_id」索引，供档期条目按译名找作品。
+
+    分三类收录（各自独立，冲突只在类内判定）：
+
+    - ``original``：Content.title_original（日文原名）——最强信号，
+      与档期的 title_jp 同语种，翻译差异不影响命中；
+    - ``title``：Content.title（主标题，中文名优先）——与档期的
+      title_main / title_cn 比对；
+    - ``alias``：Content.aliases（其它译名）——兜底。
+
+    只收录 ``type == "anime"`` 的作品：档期页全是新番动画，库里同名的
+    轻小说 / 游戏 / 漫画是另一部作品，挂上去会把用户带到错误页面。
+
+    同一类里同一归一化标题对应多部作品时整键丢弃（有歧义就不连，
+    宁缺勿错）。返回 ``{"original": {...}, "title": {...}, "alias": {...}}``。
+    """
+    rows = db.execute(
+        select(Content.id, Content.title, Content.title_original, Content.aliases).where(
+            Content.type == "anime"
+        )
+    ).all()
+
+    def build(pairs: Iterable[tuple[str | None, int]]) -> dict[str, int]:
+        index: dict[str, int] = {}
+        ambiguous: set[str] = set()
+        for raw, content_id in pairs:
+            key = normalize_title_key(raw)
+            if not key or key in ambiguous:
+                continue
+            current = index.get(key)
+            if current is None:
+                index[key] = content_id
+            elif current != content_id:
+                index.pop(key, None)
+                ambiguous.add(key)
+        return index
+
+    return {
+        "original": build(
+            (row.title_original, row.id) for row in rows if row.title_original
+        ),
+        "title": build((row.title, row.id) for row in rows if row.title),
+        "alias": build(
+            (alias, row.id)
+            for row in rows
+            for alias in (row.aliases or [])
+            if alias
+        ),
+    }
+
+
+def match_content_for_schedule(
+    db: Session, entry: AnimeSchedule, index: dict[str, dict[str, int]]
+) -> Content | None:
+    """按档期条目的各语种标题在作品库里找对应作品（不联网）。
+
+    命中顺序（先命中先返回，同一优先级内出现多部作品则视为有歧义、
+    继续往下一档试）：
+
+    1. title_jp ↔ 作品日文原名；
+    2. title_jp ↔ 作品主标题（作品没有中文名时主标题即日文原名）；
+    3. title_main / title_cn ↔ 作品主标题；
+    4. 三个标题 ↔ 作品别名。
+
+    找不到返回 None（调用方再走 Bangumi 解析那条路）。
+    """
+    jp = normalize_title_key(entry.title_jp)
+    cn_keys = [
+        normalize_title_key(entry.title_main),
+        normalize_title_key(entry.title_cn),
+    ]
+    cn_keys = [key for key in cn_keys if key]
+
+    # (索引类别, 档期标题键) 按置信度从高到低排列。
+    attempts: list[tuple[str, str]] = []
+    if jp:
+        attempts.append(("original", jp))
+        attempts.append(("title", jp))
+    for key in cn_keys:
+        attempts.append(("title", key))
+    if jp:
+        attempts.append(("alias", jp))
+    for key in cn_keys:
+        attempts.append(("alias", key))
+
+    for kind, key in attempts:
+        bucket = index.get(kind) or {}
+        content_id = bucket.get(key)
+        if content_id is None:
+            continue
+        content = db.get(Content, content_id)
+        if content is not None:
+            return content
+    return None
 
 
 def _schedule_filter_stmt(

@@ -378,6 +378,7 @@ class AnimeSchedule(Base):
       特殊分类使用固定码：unreleased=未上线新番、ova_sp=剧场版ova与特别篇、
       cn_movie=大陆引进剧场版；源站 Atom 条目名（新番卫星观测站 / Movie-OVA-SP /
       内地上映动画电影）在入库时统一改写为本站点名；
+    - bangumi_subject_id / content_id：档期与作品库的关联（见下方列注释）；
     - 同步只新增/更新本表记录，不触碰 Content、Article 等其他模块数据。
     """
 
@@ -402,6 +403,15 @@ class AnimeSchedule(Base):
     work_tags: Mapped[str | None] = mapped_column(String(200), nullable=True)
     image_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     platforms: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    # 档期 ↔ 作品库关联（2026-10 起）：
+    # - bangumi_subject_id：把档期标题解析到的 Bangumi 条目 id（唯一键）。
+    #   翻译差异完全不影响它——同一部作品在任何站点都是同一个 subject id；
+    # - content_id：站内作品主键（contents.id）。档期卡片有它就直跳作品详情页，
+    #   没有才退化成按标题搜索（译名不一致时搜索会空手而归）。
+    # 两列都是弱关联（不建外键）：作品被删时档期行保留，只是失去跳转目标。
+    # 经 crud.ensure_schedule_link_columns 幂等补列。
+    bangumi_subject_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    content_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     source_url: Mapped[str] = mapped_column(String(500), nullable=False)
     last_synced_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=datetime.now
@@ -426,6 +436,9 @@ class AnimeSchedule(Base):
             "platforms": list(self.platforms or []),
             "source_url": self.source_url,
             "last_synced_at": self.last_synced_at.isoformat(sep=" ", timespec="seconds"),
+            # 关联到站内作品的 id；有值时档期卡片直跳作品详情页，
+            # 没有则退化成按标题搜索。bangumi_subject_id 是内部匹配键，不对外暴露。
+            "content_id": self.content_id,
         }
 
 

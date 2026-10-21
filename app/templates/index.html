@@ -101,8 +101,9 @@
                 </button>
                 <div class="spotlight-track" data-spotlight-track>
                     {% for item in spotlight %}
-                    {# 卡片点击落到站内作品搜索（按标题），不出站 #}
-                    <a class="spotlight-card" href="/contents?q={{ item.title_main|urlencode }}">
+                    {# 卡片点击落到站内作品（有关联直跳详情页，无关联按标题搜索），不出站 #}
+                    {% set work_href = ('/contents/' ~ item.content_id) if item.content_id else ('/contents?q=' ~ item.title_main|urlencode) %}
+                    <a class="spotlight-card" href="{{ work_href }}">
                         <span class="spotlight-cover">
                             <span class="spotlight-letter" aria-hidden="true">{{ item.title_main[:1] }}</span>
                             {% if item.image_url %}

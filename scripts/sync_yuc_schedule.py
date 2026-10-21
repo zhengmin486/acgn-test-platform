@@ -1469,13 +1469,14 @@ def resolve_insecure(explicit: bool | None, env=None) -> bool:
 def build_session_factory(database_url: str, busy_timeout: float = 30.0):
     """按数据库 URL 建会话工厂（SQLite 放宽写锁等待，容忍与线上服务并发写）。
 
-    老库可能还没有 work_type / work_tags 列（无 Alembic，靠 crud 里的
-    ensure_* 幂等补列），先补列再同步，避免写入即报“no such column”。
+    老库可能还没有 work_type / work_tags 列或档期↔作品库的关联列（无 Alembic，
+    靠 crud 里的 ensure_* 幂等补列），先补列再同步，避免写入即报“no such column”。
 
     返回 (session_factory, engine)：调用方负责 engine.dispose()。
     """
     engine = build_engine(database_url, busy_timeout=busy_timeout)
     crud.ensure_schedule_work_info_columns(engine)
+    crud.ensure_schedule_link_columns(engine)
     return sessionmaker(bind=engine, autoflush=False, expire_on_commit=False), engine
 
 
