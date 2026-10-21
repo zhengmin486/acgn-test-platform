@@ -142,6 +142,26 @@ def season_window(season_code: str) -> tuple[date, date] | None:
     return start, end
 
 
+def compose_fallback_summary(entry) -> str:
+    """档期条目有、对应 Bangumi 条目却无简介时，用档期自带信息拼一句兜底简介。
+
+    仅用于补库路径（_map_and_store 的 summary_fallback），不进入主批量入库；
+    Content.summary 是必填列，占位也不能为空，故这里始终产出非空文本。
+    """
+    work_type = (getattr(entry, "work_type", None) or "").strip()
+    work_tags = (getattr(entry, "work_tags", None) or "").strip()
+    title = (
+        getattr(entry, "title_cn", None)
+        or getattr(entry, "title_main", None)
+        or getattr(entry, "title_jp", None)
+        or "本作"
+    )
+    header = "".join([f"【{work_type}】" if work_type else "", work_tags])
+    if header:
+        return f"{header} {title}（Bangumi 暂无官方简介，信息来自新番档期）"
+    return f"{title}（Bangumi 暂无官方简介，信息来自新番档期）"
+
+
 def normalize_title(text: str | None) -> str:
     """标题归一化：去空白/标点/大小写，用于标题比对。"""
     if not text:
@@ -398,7 +418,13 @@ def fill_works_for_season(
                     base_url=url,
                     sleep=sleep,
                 )
-                outcome = _map_and_store(db, payload, apply=True, cover_downloader=False)
+                outcome = _map_and_store(
+                    db,
+                    payload,
+                    apply=True,
+                    cover_downloader=False,
+                    summary_fallback=compose_fallback_summary(entry),
+                )
             except Exception as exc:  # noqa: BLE001 - 单条失败不中断整轮
                 summary.failed += 1
                 summary.add_detail(title, "failed", str(exc)[:120])

@@ -1274,7 +1274,7 @@ def extract_alias_names(payload: dict, title: str, title_original: str | None) -
     return out
 
 
-def map_subject(payload: dict) -> MappedSubject:
+def map_subject(payload: dict, *, summary_fallback: str | None = None) -> MappedSubject:
     """把 Bangumi API 的条目 JSON 映射为可入库字段。
 
     规则：
@@ -1335,7 +1335,12 @@ def map_subject(payload: dict) -> MappedSubject:
 
     summary = (payload.get("summary") or "").strip()
     if not summary:
-        raise SubjectMappingError("缺少简介（summary 为空，本站 summary 为必填）")
+        # 仅档期补库等可信路径可传 summary_fallback 用档期自带信息兜底；
+        # 主批量入库不传，保持「summary 必填、不伪造」的强约束。
+        if summary_fallback and summary_fallback.strip():
+            summary = summary_fallback.strip()
+        else:
+            raise SubjectMappingError("缺少简介（summary 为空，本站 summary 为必填）")
 
     score = (payload.get("rating") or {}).get("score")
     if not isinstance(score, (int, float)) or isinstance(score, bool) or score <= 0:
@@ -1437,7 +1442,14 @@ def _make_fetcher(
     return fetch
 
 
-def _map_and_store(db, payload: dict, *, apply: bool, cover_downloader=False) -> SubjectOutcome:
+def _map_and_store(
+    db,
+    payload: dict,
+    *,
+    apply: bool,
+    cover_downloader=False,
+    summary_fallback: str | None = None,
+) -> SubjectOutcome:
     """对已成功获取的条目做映射、查重、入库，返回处理结果。
 
     - bangumi_id 已存在 -> duplicate，直接跳过不覆盖（含标签）；
@@ -1455,7 +1467,7 @@ def _map_and_store(db, payload: dict, *, apply: bool, cover_downloader=False) ->
       不影响入库结果本身。
     """
     try:
-        subject = map_subject(payload)
+        subject = map_subject(payload, summary_fallback=summary_fallback)
     except SubjectMappingError as exc:
         title = str(payload.get("name_cn") or payload.get("name") or "").strip()
         return SubjectOutcome(

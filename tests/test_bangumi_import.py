@@ -253,6 +253,23 @@ class TestMapSubject:
         with pytest.raises(import_bangumi.SubjectMappingError, match="简介"):
             import_bangumi.map_subject(payload)
 
+    def test_missing_summary_uses_fallback(self):
+        """仅可信补库路径传 summary_fallback 时，空简介用档期信息兜底、不报错。"""
+        payload = make_payload(302, 2)
+        payload["summary"] = "   "
+        fallback = "【原创动画】热血（Bangumi 暂无官方简介，信息来自新番档期）"
+
+        subject = import_bangumi.map_subject(payload, summary_fallback=fallback)
+        assert subject.summary == fallback
+
+    def test_empty_fallback_still_rejected(self):
+        """fallback 本身是空白时，仍走严格必填、不伪造。"""
+        payload = make_payload(302, 2)
+        payload["summary"] = "   "
+
+        with pytest.raises(import_bangumi.SubjectMappingError, match="简介"):
+            import_bangumi.map_subject(payload, summary_fallback="   ")
+
     def test_missing_title_is_rejected(self):
         """name_cn 与 name 均为空时跳过。"""
         payload = make_payload(303, 2)
