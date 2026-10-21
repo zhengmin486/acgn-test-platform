@@ -375,7 +375,11 @@ def parse_gamersky_detail(html: str, candidate: NewsCandidate) -> NewsCandidate:
                 body_html = body_html[:index]
         if not candidate.image_url:
             candidate.image_url = _first_image(body_html) or None
-        candidate.body = html_to_text(body_html)[:BODY_MAX_CHARS]
+        # 正文按行清洗：游民详情的正文区开头混过统计像素链接（[媒体] https://...）
+        # 与 HTML 注释残留（-->），直接 html_to_text 会一并塞进正文。
+        candidate.body = (
+            _clean_body_text(body_html) or html_to_text(body_html)
+        )[:BODY_MAX_CHARS]
     candidate.needs_detail = False
     return candidate
 
@@ -427,23 +431,43 @@ def hydrate_head_image(candidate: NewsCandidate, *, fetch) -> NewsCandidate:
     return candidate
 
 
-# ---------- RSS 源正文提取（2026-10-21：详情页正文，不再拿摘要冒充正文） ----------
+# ---------- RSS 源正文提取（2026-10-21 引入，2026-10-22 重写） ----------
 #
 # 根因：RSS 候选 needs_detail=False，body 恒空，入库正文退化为 RSS 摘要
 # （animeanime / LN News 的 feed 甚至没有 description，正文=标题）。
-# 按实测样本页的各站正文容器提取真正文：
-# - LN News：TinyMCE 编辑器容器 div.mce-content-body（其后是 article-meta）；
-# - animeanime / ACGCH：正文在 <article> 内，段落干净；
-# - 4Gamer：正文由 JS 渲染，静态 HTML 无正文——提取不到就保留官方摘要
-#   （meta description，诚实的短讯形态，绝不编造扩写）。
-
-_BODY_CONTAINER_RES: tuple[re.Pattern, ...] = (
-    re.compile(
-        r'<div class="mce-content-body"[^>]*>(.*?)(?=<div class="article-meta|</main)',
-        re.S,
-    ),
-    re.compile(r"<article[^>]*>(.*?)</article>", re.S),
+#
+# 2026-10-22 线上实测各站正文容器（旧版只认 mce-content-body / article，两条都不中）：
+# - LN News：div.mce-content-body（TinyMCE 编辑器容器）；
+# - ACGCH：**div.article-body**——注意页面里先出现的是「相关文章」卡片
+#   （article.tl-card），旧版按出现顺序取第一个 <article> 就拿到卡片，长度不够 → 返回空
+#   → 正文退化成摘要（线上 28 条 ACGCH 全是这个症状）；
+# - 4Gamer：**div.entry-content**（旧注释说「JS 渲染无正文」是误判，静态 HTML 里有）；
+# - animeanime：没有专属 class，退到整篇 <article>。
+#
+# 两个实现要点：
+# 1. **按标签深度切片**：非贪婪正则会在第一个嵌套 </div> 处截断（4Gamer 正文 818 字只能
+#    取到 351 字），所以用 `_slice_element` 数同名标签的开合；
+# 2. **取文本最长的候选**，而不是「第一个命中的容器」——同页混杂推荐卡片/侧栏时，
+#    按顺序取必然拿到最短的那块。
+_BODY_CONTAINER_KEYS: tuple[str, ...] = (
+    "mce-content-body", "article-body", "entry-content", "maintxt",
+    "post-content", "entry-body", "article-content",
 )
+_BODY_MARKER_RE = re.compile(
+    r'<(div|article|section)\b[^>]*(?:class|id)="[^"]*(?:'
+    + "|".join(_BODY_CONTAINER_KEYS)
+    + r')[^"]*"[^>]*>',
+    re.IGNORECASE,
+)
+_HTML_NOISE_RES: tuple[re.Pattern, ...] = (
+    re.compile(r"(?is)<!--.*?-->"),          # 注释残留（游民星空正文里混过 -->）
+    re.compile(r"(?is)<script\b.*?</script>"),
+    re.compile(r"(?is)<style\b.*?</style>"),
+    re.compile(r"(?is)<noscript\b.*?</noscript>"),
+    re.compile(r"(?is)<iframe\b.*?</iframe>"),
+)
+_TAG_STEP_RE = re.compile(r"<(/?)([a-zA-Z][\w-]*)\b[^>]*?(/?)>")
+_URL_ONLY_RE = re.compile(r"^https?://\S+$")
 # 噪音行：短且没有句末标点的行多为导航 / 标签 / 关键词栏（4Gamer 页骨架曾混入
 # 「週間記事ランキング」「キーワード」这类行）。
 _BODY_LINE_NOISE_MAX = 12
@@ -452,34 +476,75 @@ _BODY_NOISE_WORDS: tuple[str, ...] = ("分钟读完", "来投个稿")
 _BODY_MIN_CHARS = 60
 
 
+def strip_html_noise(html: str) -> str:
+    """去掉 script / style / 注释 / iframe——它们会混进正文（游民星空的统计像素链接）。"""
+    text = html or ""
+    for pattern in _HTML_NOISE_RES:
+        text = pattern.sub(" ", text)
+    return text
+
+
+def _slice_element(html: str, start: int, tag: str) -> str:
+    """从 start 起切出同名标签的完整内容（按嵌套深度配对）。
+
+    非贪婪正则 `(.*?)</div>` 在第一个嵌套 div 结束处就停了，长正文会被腰斩。
+    """
+    depth = 1
+    for match in _TAG_STEP_RE.finditer(html, start):
+        if match.group(2).lower() != tag:
+            continue
+        if match.group(1):  # 结束标签
+            depth -= 1
+            if depth == 0:
+                return html[start : match.start()]
+        elif not match.group(3):  # 自闭合标签不增加深度
+            depth += 1
+    return html[start:]  # 没找到闭合：退化为到文末，再由长度校验兜底
+
+
+def _clean_body_text(html_fragment: str) -> str:
+    """正文片段 → 纯文本行（去导航噪音 / 纯 URL / 图片占位残留）。"""
+    lines: list[str] = []
+    for line in html_to_text(html_fragment).splitlines():
+        line = line.strip()
+        if not line or line == "&nbsp;" or line == "-->":
+            continue
+        if any(word in line for word in _BODY_NOISE_WORDS):
+            continue
+        if _URL_ONLY_RE.match(line) or line.startswith("[媒体]"):
+            continue  # 统计像素 / 广告占位（游民星空正文开头混过一条）
+        if line.count("#") >= 2:
+            continue  # 尾部标签行（ACGCH："# TOHO animation# PV# 光荣特库摩# 日向夏"）
+        if len(line) < _BODY_LINE_NOISE_MAX and not re.search(r"[。！？…」』〕]", line):
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
 def extract_body(html: str) -> str:
     """详情页 HTML → 正文纯文本（复用 html_to_text：图片转 [图] 行、段落换行）。
 
-    找不到已知容器 / 提取结果过短时返回空串——由调用方保留 RSS 摘要，
+    先清理 script/style/注释，再按 class/id 关键词找已知正文容器；每个候选按标签深度
+    切出完整内容、转文本，**取文本最长的一个**（同页往往先出现「相关文章」卡片）。
+    最后兜底整篇 <article>（animeanime 这类没有专属 class 的站）。
+
+    找不到容器 / 提取结果过短时返回空串——由调用方保留 RSS 摘要，
     绝不把短摘要扩写成「正文」。
     """
     if not html:
         return ""
-    container = None
-    for pattern in _BODY_CONTAINER_RES:
-        match = pattern.search(html)
-        if match:
-            container = match.group(1)
-            break
-    if not container:
-        return ""
-    lines = []
-    for line in html_to_text(container).splitlines():
-        line = line.strip()
-        if not line or line == "&nbsp;":
-            continue
-        if any(word in line for word in _BODY_NOISE_WORDS):
-            continue
-        if len(line) < _BODY_LINE_NOISE_MAX and not re.search(r"[。！？…」』〕]", line):
-            continue
-        lines.append(line)
-    text = "\n".join(lines).strip()
-    return text[:BODY_MAX_CHARS] if len(text) >= _BODY_MIN_CHARS else ""
+    cleaned = strip_html_noise(html)
+    best = ""
+    for match in _BODY_MARKER_RE.finditer(cleaned):
+        content = _slice_element(cleaned, match.end(), match.group(1).lower())
+        text = _clean_body_text(content)
+        if len(text) > len(best):
+            best = text
+    for match in re.finditer(r"<article\b[^>]*>", cleaned, re.IGNORECASE):
+        text = _clean_body_text(_slice_element(cleaned, match.end(), "article"))
+        if len(text) > len(best):
+            best = text
+    return best[:BODY_MAX_CHARS] if len(best) >= _BODY_MIN_CHARS else ""
 
 
 def fetch_candidates(

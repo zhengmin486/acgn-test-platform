@@ -935,58 +935,53 @@ class TestExtractBody:
         """快讯本来就短：提取结果低于阈值返回空串，由调用方保留摘要形态。"""
         assert extract_body("<article><p>短讯一条。</p></article>") == ""
 
-    def test_rss_candidate_gets_real_body(self, factory):
-        """RSS 候选：详情页抓得到正文 → body=真正文，summary 回填正文前 200 字。"""
-        rss = (
-            '<?xml version="1.0"?><rss version="2.0"><channel>'
-            "<item><title>ACGCH快讯标题</title><link>https://acgch.example/news/a</link>"
-            "</item></channel></rss>"
-        )
-        article_page = (
-            "<article>"
-            "<p>这是详情页真正的第一段正文，内容足够长，能够通过最短长度校验，不会被当作提取失败。</p>"
-            "<p>第二段：游戏将于2027年3月18日发售，登陆 Nintendo Switch 与 Steam 平台。</p>"
-            "</article>"
-        )
-        fetch = fake_fetch(
-            {ZH_SOURCE.url: rss, "https://acgch.example/news/a": article_page}
-        )
-        summary = run_import_daily(
-            factory, apply=True, quota=10, sources=(ZH_SOURCE,), fetch=fetch
-        )
-        assert summary.added == 1
-        db = factory()
-        try:
-            article = db.scalars(select(Article)).one()
-            assert "真正的第一段正文" in article.body
-            assert article.summary.startswith("这是详情页真正的第一段正文")
-        finally:
-            db.close()
+    def test_related_card_before_body_is_ignored(self):
+        """同页先出现「相关文章」卡片时，取文本最长的容器（2026-10-22 ACGCH 实测病症）。
 
-
-# ---------- 2026-10-21：RSS 源正文提取（详情页正文，不再拿摘要冒充正文） ----------
-
-
-class TestExtractBody:
-    def test_acgch_container_with_noise_lines(self):
+        旧版按出现顺序取第一个 <article>，拿到的是推荐卡片，长度不够 → 返回空
+        → 正文退化成摘要。现在按容器取最长，并且认 div.article-body。
+        """
         html = (
-            "<article><div>游戏2026年10月21日 GMT+9 18:44约 1 分钟读完</div>"
-            "<p>《药屋少女的呢喃》首款家用游戏2027年3月18日发售，日向夏原案担任原案的完全新作。</p>"
-            "<p>本作讲述猫猫刚开始当侍女不久的后宫故事，被称为五个谜团的推理谭。</p>"
-            "<div>有瓜？来投个稿→</div></article>"
+            "<html><body>"
+            '<article class="tl-card"><h3>推荐阅读</h3><p>另一篇文章的标题在这。</p></article>'
+            '<div class="article-body">'
+            "<p>这是文章真正的第一段正文，讲的是首款家用游戏的发售时间与平台信息。</p>"
+            "<p>第二段继续交代原案作者、故事背景与玩法类型，长度足够通过最短校验。</p>"
+            "</div>"
+            "</body></html>"
         )
         body = extract_body(html)
-        assert "首款家用游戏" in body
-        assert "五个谜团" in body
-        assert "分钟读完" not in body
-        assert "投个稿" not in body
+        assert "首款家用游戏的发售时间" in body
+        assert "推荐阅读" not in body
 
-    def test_no_known_container_returns_empty(self):
-        assert extract_body("<html><body><p>正文段落。</p></body></html>") == ""
+    def test_nested_divs_are_not_truncated(self):
+        """正文容器里嵌套 div 时不能腰斩（旧正则非贪婪在第一个 </div> 就停）。"""
+        html = (
+            '<div class="entry-content">'
+            "<div><p>第一段：这是嵌套在外层 div 里的正文内容，足够长以通过最短长度校验。</p></div>"
+            "<p>第二段：这部分在外层 div 之后，非贪婪正则取不到它。</p>"
+            "</div>"
+        )
+        body = extract_body(html)
+        assert "第一段" in body
+        assert "第二段" in body
 
-    def test_too_short_body_returns_empty(self):
-        """快讯本来就短：提取结果低于阈值返回空串，由调用方保留摘要形态。"""
-        assert extract_body("<article><p>短讯一条。</p></article>") == ""
+    def test_stylesheet_and_media_pixel_lines_are_dropped(self):
+        """script/style/注释与统计像素行不得混进正文（游民星空正文开头实测）。"""
+        html = (
+            '<div class="article-body">'
+            "<style>.x{color:red}</style>"
+            "<p>这是正文第一段，内容需要足够长才能通过最短长度校验，所以这里多写一点：讲的是动画改编情况。</p>"
+            "<p>[媒体] https://www.gamersky.com/img/baidu_300news.htm</p>"
+            "<p>--> 注释残留</p>"
+            "<p>这是正文第二段，补充了制作公司与播出档期，同样写长一点以凑够最短长度要求。</p>"
+            "</div>"
+        )
+        body = extract_body(html)
+        assert "这是正文第一段" in body
+        assert "baidu_300news" not in body
+        assert "color:red" not in body
+        assert "-->" not in body
 
     def test_rss_candidate_gets_real_body(self, factory):
         """RSS 候选：详情页抓得到正文 → body=真正文，summary 回填正文前 200 字。"""
@@ -1015,3 +1010,5 @@ class TestExtractBody:
             assert article.summary.startswith("这是详情页真正的第一段正文")
         finally:
             db.close()
+
+
