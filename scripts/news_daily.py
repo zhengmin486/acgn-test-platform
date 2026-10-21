@@ -4,6 +4,10 @@
 - **一天 30 条软配额**：全站自然日新增上限，不分源；cron 每 4 小时跑一次也按当天累计。
   软配额：**核心内容优先、不强行填满、不为凑数量展示低价值资讯**，且限制单一主体类型
   挤占全部位置（综合动态有封顶）。
+- **官宣豁免**（2026-10-22 用户定稿）：动画化 / 制作決定 / 续作決定 这类重大官宣走
+  ``NEWS_EXEMPT_MAX_PER_DAY`` 独立额度，**不占**上面那条配额——否则当天配额被普通稿
+  灌满后，最该有的官宣会因为 RSS feed 过期而永久丢失。判定见
+  ``news_classify.detect_major_announcement``，落 ``Article.is_major`` 供按天统计额度。
 - **分类 / 事件 / 优先级 三维度分离**（详见 scripts/news_classify）：
   主体类型（动画 / 漫画 / 轻小说 / 游戏 / 综合动态）回答「属于哪个 ACGN 主体」；
   事件类型回答「发生了什么」；priority_score 回答「该排多前」。
@@ -93,6 +97,9 @@ def _classify(candidate: NewsCandidate) -> dict:
         text=f"{candidate.title}\n{candidate.summary}",
     )
     is_adult = news_classify.flag_adult(candidate.title, candidate.summary)
+    major, major_hit = news_classify.detect_major_announcement(
+        candidate.title, candidate.summary
+    )
     result = {
         "category": subject,
         "subcategory": subcategory,
@@ -101,6 +108,10 @@ def _classify(candidate: NewsCandidate) -> dict:
         "source_type": source_type,
         "priority_score": priority_score,
         "is_adult": is_adult,
+        # 重大官宣（配额豁免）：强度 0=普通，>0 走独立豁免额度，不占每日配额。
+        # major_hit 是命中的词，写进运行明细便于事后校验词表误伤。
+        "major": major,
+        "major_hit": major_hit,
     }
     candidate.classification = result
     return result
@@ -111,6 +122,16 @@ def _candidate_sort_key(candidate: NewsCandidate) -> tuple:
     published = candidate.published_at or datetime.min
     score = _classify(candidate)["priority_score"]
     return (score, published)
+
+
+def _exempt_sort_key(candidate: NewsCandidate) -> tuple:
+    """豁免池排序键：官宣强度降序，其次 priority_score、发布时间。
+
+    豁免额度有限（默认 10 条/天），额度不够时先给最硬的官宣（アニメ化 > 续作 > 双信号）。
+    """
+    published = candidate.published_at or datetime.min
+    info = _classify(candidate)
+    return (info["major"], info["priority_score"], published)
 
 
 def _ordered_sources(sources: tuple[SourceSpec, ...]) -> list[SourceSpec]:
@@ -150,22 +171,49 @@ def _is_same_event(a: set[str], b: set[str]) -> bool:
 
 
 def select_quota(
-    pool: list[NewsCandidate], remaining: int
+    pool: list[NewsCandidate], remaining: int, exempt_remaining: int = 0
 ) -> tuple[list[NewsCandidate], int]:
-    """软配额挑选：core-first，兼顾类别覆盖与同事件去重。
+    """软配额挑选：重大官宣先走豁免额度，其余按 priority_score 填普通配额。
 
-    返回 (选中的候选, 因同事件重复被合并掉的条数)。不足 remaining 时不强行填满。
+    返回 (选中的候选, 因同事件重复被合并掉的条数)。不足额度时不强行填满。
+
+    - 豁免条目（major > 0）**不消耗** ``remaining``，只消耗 ``exempt_remaining``，
+      且不受 ``_PER_SUBJECT_CAP`` 类别封顶限制——官宣是"必须要有"，不是"多给一格"；
+    - 豁免额度用完（或配置为 0）时官宣**回落到普通配额**继续竞争，不是直接丢弃：
+      关掉豁免只该让它"跟普通稿一样排队"，而它有 +60 加成，实际仍排最前；
+    - 同事件去重跨两个池生效，且豁免条目先入场（三家报道同一条「制作決定」时，
+      留下的是官宣强度 / 优先级更高的那条）。
     """
     ordered = sorted(pool, key=_candidate_sort_key, reverse=True)
+    exempt_pool = sorted(
+        (c for c in ordered if _classify(c)["major"]), key=_exempt_sort_key, reverse=True
+    )
+    normal_pool = [c for c in ordered if not _classify(c)["major"]]
     selected: list[NewsCandidate] = []
     per_subject: dict[str, int] = {}
     fingerprints: list[set[str]] = []
     duplicates = 0
-    for candidate in ordered:
-        if len(selected) >= remaining:
+    exempt_used = 0
+    normal_used = 0
+
+    for candidate in exempt_pool:
+        if exempt_used >= exempt_remaining and normal_used >= remaining:
+            break  # 两条预算都满了
+        fingerprint = _event_fingerprint(candidate.title)
+        if any(_is_same_event(fingerprint, seen) for seen in fingerprints):
+            duplicates += 1
+            continue
+        fingerprints.append(fingerprint)
+        if exempt_used < exempt_remaining:
+            exempt_used += 1
+        else:
+            normal_used += 1  # 豁免额度用完 → 回落占普通配额
+        selected.append(candidate)
+
+    for candidate in normal_pool:
+        if normal_used >= remaining:
             break
-        info = _classify(candidate)
-        subject = info["category"]
+        subject = _classify(candidate)["category"]
         cap = _PER_SUBJECT_CAP.get(subject)
         if cap is not None and per_subject.get(subject, 0) >= cap:
             continue
@@ -175,6 +223,7 @@ def select_quota(
             continue
         fingerprints.append(fingerprint)
         per_subject[subject] = per_subject.get(subject, 0) + 1
+        normal_used += 1
         selected.append(candidate)
     return selected, duplicates
 
@@ -188,7 +237,10 @@ class DailyNewsSummary:
 
     mode: str  # apply / preview
     quota: int
+    exempt_quota: int = 0  # 重大官宣豁免额度（条/天），不占 quota
     added_before: int = 0  # 当天此前已入库
+    exempted_before: int = 0  # 当天此前已用掉的豁免额度
+    exempted: int = 0  # 本轮走豁免额度入库的官宣条数
     requested: int = 0  # 本轮抓到的候选数
     existing: int = 0  # 库中已有（URL 或标题命中）
     added: int = 0
@@ -215,6 +267,8 @@ class DailyNewsSummary:
         lines = [
             f"模式：{mode_label}",
             f"今日配额：{self.quota} 条（已入库 {self.added_before} 条，软配额不强行填满）",
+            f"官宣豁免额度：{self.exempt_quota} 条（此前已用 {self.exempted_before} 条，"
+            f"本轮豁免 {self.exempted} 条，不占上面配额）",
             f"本轮候选：{self.requested} 条",
             f"已存在跳过：{self.existing} 条",
             f"硬广过滤：{self.filtered} 条",
@@ -249,6 +303,28 @@ def count_added_today(db, now: datetime) -> int:
             select(func.count())
             .select_from(Article)
             .where(Article.created_at >= _today_start(now))
+        )
+        or 0
+    )
+
+
+def count_exempted_today(db, now: datetime) -> int:
+    """当天已用掉的官宣豁免额度（自然日，按 created_at + is_major）。
+
+    豁免额度按**天**计，而 cron 每轮是独立进程，所以必须查库——靠内存计数的话
+    每轮都会重新计满，一天 3 轮就等于上限翻三倍。
+
+    注：豁免额度用完后「回落占普通配额」的官宣同样带 is_major，也会被这里数进去——
+    它们照样是官宣，额度封顶对它们照样有效（否则第 11 条之后还能继续豁免，等于没有防刷）。
+    """
+    return int(
+        db.scalar(
+            select(func.count())
+            .select_from(Article)
+            .where(
+                Article.created_at >= _today_start(now),
+                Article.is_major.is_(True),
+            )
         )
         or 0
     )
@@ -309,6 +385,7 @@ def run_import_daily(
     *,
     apply: bool = False,
     quota: int | None = None,
+    exempt_quota: int | None = None,
     sources: tuple[SourceSpec, ...] | None = None,
     fetch=None,
     translate=None,
@@ -318,12 +395,26 @@ def run_import_daily(
 
     fetch：``fetch(url) -> text``，测试注入假网络；translate：``translate(list[str])``，
     传 None 时按 LLM 配置决定（没有 Key 就跳过日文源）。
+
+    两条预算并行：
+    - ``quota``：普通资讯的每日上限（``NEWS_DAILY_QUOTA``）；
+    - ``exempt_quota``：重大官宣（动画化 / 制作決定 / 续作決定）的豁免额度
+      （``NEWS_EXEMPT_MAX_PER_DAY``），**不占**普通配额。
+      普通配额跑满后本轮不再早退，而是继续做一次「豁免扫描」：只抓各源列表，
+      命中官宣词才抓详情页入库，因此成本约为每源一次列表请求。
     """
     from scripts import import_articles as legacy  # 复用同一套抓取实现与 UA
 
     clock = now or datetime.now()
     limit_total = quota if quota is not None else settings.news_daily_quota
-    summary = DailyNewsSummary(mode="apply" if apply else "preview", quota=limit_total)
+    limit_exempt = (
+        exempt_quota if exempt_quota is not None else settings.news_exempt_max_per_day
+    )
+    summary = DailyNewsSummary(
+        mode="apply" if apply else "preview",
+        quota=limit_total,
+        exempt_quota=limit_exempt,
+    )
     fetch = fetch or legacy.fetch_page
 
     can_translate = translate is not None or news_llm.translate_available()
@@ -335,7 +426,9 @@ def run_import_daily(
     try:
         summary.added_before = count_added_today(db, clock)
         remaining = max(0, limit_total - summary.added_before)
-        if remaining <= 0:
+        summary.exempted_before = count_exempted_today(db, clock)
+        exempt_remaining = max(0, limit_exempt - summary.exempted_before)
+        if remaining <= 0 and exempt_remaining <= 0:
             summary.message = (
                 f"今日已入库 {summary.added_before} 条，达到每日上限 {limit_total} 条，本轮不再抓取"
             )
@@ -352,7 +445,7 @@ def run_import_daily(
             ordered_sources = [spec for spec in ordered_sources if spec.key not in disabled]
         pool: list[NewsCandidate] = []
         for source in ordered_sources:
-            if remaining <= 0:
+            if remaining <= 0 and exempt_remaining <= 0:
                 break
             # 没有翻译能力时不再整源跳过（用户 2026-10-21 决定：宁可上日文原文，
             # 也不要空着）。LLM 翻译接口保留——配好 NEWS_LLM_API_KEY 后自动改回
@@ -362,7 +455,7 @@ def run_import_daily(
                 summary.untranslated_sources += 1
             try:
                 candidates = fetch_candidates(
-                    source, fetch=fetch, limit=max(remaining * 2, 10)
+                    source, fetch=fetch, limit=max((remaining + exempt_remaining) * 2, 10)
                 )
             except (NewsSourceError, RuntimeError, OSError, TimeoutError) as exc:
                 # RuntimeError 覆盖旧导入器的 ArticleFetchError（也是 RuntimeError 子类）
@@ -379,6 +472,12 @@ def run_import_daily(
             source_filtered = 0
             hydrated: list[NewsCandidate] = []
             for candidate in fresh:
+                # 普通配额已满：非官宣直接丢，连详情页都不抓——豁免扫描的成本
+                # 因此只有「每源一次列表请求」，跟配额未满时的全量抓取不是一个量级。
+                if remaining <= 0 and not news_classify.is_major_announcement(
+                    candidate.title, candidate.summary
+                ):
+                    continue
                 try:
                     hydrate(candidate, fetch=fetch)
                 except (NewsSourceError, RuntimeError, OSError, TimeoutError) as exc:
@@ -451,22 +550,34 @@ def run_import_daily(
                 f"过滤 {source_filtered}｜入池 {len(hydrated)}"
                 + ("｜日文原文" if untranslated_ja else "")
             )
-            if len(pool) >= remaining:
-                break  # 高优先级源已凑够，低优先级源不必再抓
+            # 凑够就停：配额未满时沿用老优化（高优先级源凑够后低优先级源不再抓）；
+            # 配额已满时进入「只捞官宣」模式，必须扫完所有源——官宣在哪个源里事先不知道，
+            # 漏掉就补不回来（feed 会过期）。这是豁免唯一新增的请求成本：每源一次列表请求。
+            needed = remaining if remaining > 0 else exempt_remaining
+            if len(pool) >= needed:
+                break  # 已凑够，低优先级源不必再抓
 
         if not pool:
-            summary.message = (
-                f"今日已入库 {summary.added_before} 条，剩余配额 {remaining} 条，"
-                f"但本轮各源无新增候选"
-            )
+            if remaining <= 0:
+                # 配额已满但豁免额度还有：本轮已进入「只捞官宣」模式却一无所获。
+                summary.message = (
+                    f"今日已入库 {summary.added_before} 条，达到每日上限 {limit_total} 条，"
+                    f"豁免额度尚余 {exempt_remaining} 条，但本轮各源无新的重大官宣"
+                )
+            else:
+                summary.message = (
+                    f"今日已入库 {summary.added_before} 条，剩余配额 {remaining} 条，"
+                    f"但本轮各源无新增候选"
+                )
             if summary.per_source_stats:
                 summary.message += "（" + "；".join(
                     f"{k} {v}" for k, v in summary.per_source_stats.items()
                 ) + "）"
             return summary
 
-        # 软配额：按 priority_score 排序 + 类别覆盖封顶 + 同事件去重，不足不强行填满。
-        selected, deduped = select_quota(pool, remaining)
+        # 软配额：官宣走豁免额度并置顶，其余按 priority_score 排序 + 类别封顶 + 同事件去重，
+        # 不足不强行填满。
+        selected, deduped = select_quota(pool, remaining, exempt_remaining)
         summary.deduped = deduped
         seen_urls: set[str] = set()
         seen_titles: set[str] = set()
@@ -482,12 +593,19 @@ def run_import_daily(
                 f"{'／' + info['subcategory'] if info['subcategory'] else ''}"
                 f"｜{info['region']}｜{info['event_type']}｜score={info['priority_score']}"
             )
+            if info["major"]:
+                reason = f"豁免·{info['major_hit']}｜{reason}"
             if not apply:
                 summary.added += 1  # 预览：记「可写入」
                 summary.per_source[candidate.source.key] = (
                     summary.per_source.get(candidate.source.key, 0) + 1
                 )
-                remaining -= 1
+                # 官宣扣豁免额度（用完则回落扣普通配额），普通稿扣每日配额。
+                if info["major"] and exempt_remaining > 0:
+                    exempt_remaining -= 1
+                    summary.exempted += 1
+                else:
+                    remaining -= 1
                 summary.details.append(
                     {"status": "pending", "title": candidate.title, "reason": reason}
                 )
@@ -504,7 +622,11 @@ def run_import_daily(
             summary.per_source[candidate.source.key] = (
                 summary.per_source.get(candidate.source.key, 0) + 1
             )
-            remaining -= 1
+            if info["major"] and exempt_remaining > 0:
+                exempt_remaining -= 1
+                summary.exempted += 1
+            else:
+                remaining -= 1
             pending.append(article)
             summary.details.append(
                 {"status": "added", "title": candidate.title, "reason": reason}
@@ -519,6 +641,8 @@ def run_import_daily(
             f"今日入库 {summary.added_before + summary.added} 条 / 上限 {limit_total} 条，"
             f"本轮新增 {summary.added} 条"
         )
+        if summary.exempted:
+            summary.message += f"（官宣豁免 {summary.exempted} 条，不占配额）"
         if summary.per_source_stats:
             summary.message += "（" + "；".join(
                 f"{k} {v}" for k, v in summary.per_source_stats.items()
@@ -586,6 +710,8 @@ def _persist(db, candidate: NewsCandidate, *, now: datetime) -> Article | None:
                 source_type=info["source_type"],
                 priority_score=info["priority_score"],
                 is_adult=info["is_adult"],
+                # 重大官宣标记：豁免额度按天统计靠它（cron 每轮独立进程，内存计数无效）。
+                is_major=bool(info["major"]),
             )
             db.add(article)
             db.flush()
@@ -606,6 +732,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--quota", type=int, default=None, metavar="N",
         help=f"当日新增上限（默认取配置 NEWS_DAILY_QUOTA={settings.news_daily_quota}）",
+    )
+    parser.add_argument(
+        "--exempt-quota", type=int, default=None, metavar="N",
+        help="重大官宣豁免额度（默认取配置 "
+             f"NEWS_EXEMPT_MAX_PER_DAY={settings.news_exempt_max_per_day}，不占每日配额）",
     )
     parser.add_argument(
         "--source", default=None, metavar="KEY",
@@ -630,7 +761,11 @@ def main(argv=None) -> int:
     factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
     try:
         summary = run_import_daily(
-            factory, apply=args.apply, quota=args.quota, sources=sources
+            factory,
+            apply=args.apply,
+            quota=args.quota,
+            exempt_quota=args.exempt_quota,
+            sources=sources,
         )
         for item in summary.details[:DETAILS_MAX]:
             print(f"[{item['status']}] {item['title']} - {item.get('reason', '')}")

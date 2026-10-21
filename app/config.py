@@ -159,6 +159,10 @@ class Settings(BaseSettings):
     # 当天已入库多少就从配额里扣多少，跑满即停。
     # 取数口径：日语源优先于中文源；题材优先级 动画 > 漫画 > 轻小说 > 游戏 > 其他。
     news_daily_quota: int = 30
+    # 「重大官宣」豁免额度（条/天）：动画化 / 制作決定 / 续作決定 这类官宣不受上面的
+    # 配额限制，走这个独立额度入库（不消耗 news_daily_quota）。0 = 关闭豁免。
+    # 豁免条目落 Article.is_major，额度按自然日累计（cron 每轮独立进程，靠库统计）。
+    news_exempt_max_per_day: int = 10
     # 停用的资讯源（逗号分隔 key，如 "gamersky,natalie_comic"）：
     # run_import_daily 直接跳过这些源——不改代码即可下线一个源。留空 = 全部启用。
     news_disabled_sources: str = ""

@@ -8,7 +8,9 @@ scripts/news_classify 的同一套规则把历史行重算一遍，让旧资讯�
 - category：旧栏目名（动漫资讯 / 活动资讯 / 榜单资讯 / 综合资讯 …）归一化到主体类型；
 - region：来源为 ANIPLEX NEWS BOX 的按日本起步，其余用标题信号判定；
 - source_type：ANIPLEX NEWS BOX 是官方 PR，其余按「原文标题含日文」粗判，回落媒体编译；
-- priority_score / subcategory / event_type / is_adult：全部按 news_classify 重算。
+- priority_score / subcategory / event_type / is_adult：全部按 news_classify 重算；
+- is_major：2026-10-22 新增的「重大官宣」标记，同样按 news_classify 重算，
+  让历史行与新建资讯口径一致（豁免额度只统计当天入库的行，回填旧行不影响额度）。
 
 用法（默认预览，--apply 才写库）：
     python scripts/backfill_article_classification.py
@@ -71,13 +73,16 @@ def classify_row(article: Article) -> dict:
             text=f"{article.title}\n{article.summary or ''}",
         ),
         "is_adult": news_classify.flag_adult(article.title, article.summary or ""),
+        "is_major": news_classify.is_major_announcement(
+            article.title, article.summary or ""
+        ),
     }
 
 
 def run(database_url: str, *, apply: bool) -> dict:
     engine = build_engine(database_url, busy_timeout=60.0)
     factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
-    stats = {"total": 0, "changed": 0, "adult": 0}
+    stats = {"total": 0, "changed": 0, "adult": 0, "major": 0}
     db = factory()
     try:
         rows = list(db.scalars(select(Article)))
@@ -86,6 +91,8 @@ def run(database_url: str, *, apply: bool) -> dict:
             info = classify_row(article)
             if info["is_adult"]:
                 stats["adult"] += 1
+            if info["is_major"]:
+                stats["major"] += 1
             diff = {
                 key: value
                 for key, value in info.items()
@@ -114,7 +121,7 @@ def main(argv=None) -> int:
     mode = "已写入" if args.apply else "预览（未写入）"
     print(
         f"{mode}：共 {stats['total']} 条资讯，需更新 {stats['changed']} 条，"
-        f"其中成人向 {stats['adult']} 条"
+        f"其中成人向 {stats['adult']} 条、重大官宣 {stats['major']} 条"
     )
     return 0
 

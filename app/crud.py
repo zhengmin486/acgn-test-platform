@@ -3088,6 +3088,27 @@ def ensure_article_classification_columns(engine: Engine) -> list[str]:
     return added
 
 
+def ensure_article_major_column(engine: Engine) -> list[str]:
+    """为已存在的 articles 表补齐「重大官宣」标记列，幂等，返回新增列名。
+
+    2026-10-22 配额豁免：动画化 / 制作決定 / 续作決定 这类官宣走独立额度入库
+    （不占 NEWS_DAILY_QUOTA）。豁免额度按**自然日**计，而 cron 每轮是独立进程，
+    所以必须落库才能跨轮数出「今天已经豁免了几条」——靠内存计数会每轮重置。
+    历史行一律置 0（它们本来就是按普通配额进来的）。
+    """
+    inspector = inspect(engine)
+    if "articles" not in inspector.get_table_names():
+        return []
+
+    existing = {column["name"] for column in inspector.get_columns("articles")}
+    if "is_major" in existing:
+        return []
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE articles ADD COLUMN is_major BOOLEAN"))
+        connection.execute(text("UPDATE articles SET is_major = 0 WHERE is_major IS NULL"))
+    return ["is_major"]
+
+
 def ensure_schedule_work_info_columns(engine: Engine) -> list[str]:
     """为已存在的 anime_schedules 表补齐 work_type / work_tags 列，幂等，返回新增列名。
 
@@ -3189,6 +3210,7 @@ def init_db(engine: Engine) -> int:
     ensure_article_image_column(engine)
     ensure_article_ip_name_column(engine)
     ensure_article_classification_columns(engine)
+    ensure_article_major_column(engine)
     ensure_content_submission_extra_columns(engine)
     ensure_schedule_work_info_columns(engine)
     ensure_schedule_link_columns(engine)

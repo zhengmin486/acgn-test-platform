@@ -359,6 +359,10 @@ class Article(Base):
     priority_score: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # 成人向标记：展示层按全局「隐藏成人内容」开关遮蔽图片与露骨摘要，不删除、不过滤。
     is_adult: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # 重大官宣标记（2026-10-22）：动画化 / 制作決定 / 续作決定 这类官宣走「配额豁免」
+    # 独立额度入库（不占 NEWS_DAILY_QUOTA），落此标记供按天统计豁免用量与回溯校验词表。
+    # 判定在 scripts/news_classify.detect_major_announcement，与 priority_score 同源。
+    is_major: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
 
 class AnimeSchedule(Base):

@@ -355,6 +355,86 @@ MERCH_PROMO_WORDS: tuple[str, ...] = (
 )
 MERCH_PROMO_PENALTY = -30
 
+# ---------- 重大官宣（每日配额豁免） ----------
+# 2026-10-22 用户定稿：动画化 / 制作決定 / 续作決定 这类官宣是站内最值钱的一类，
+# 不能因为当天普通配额被灌满就收不进来（RSS feed 存活期一过就永久拿不回来），
+# 所以它们走**独立豁免额度**入库，不占 news_daily_quota（见 scripts/news_daily）。
+#
+# 判定只做标题 / 摘要的字符串启发式，与上面的词表同款风格。强度分三档，
+# 强度只用于豁免池内部排序——豁免额度有限（默认 10 条/天），先给最硬的官宣：
+MAJOR_STRONG = 3  # 改编 / 新企划形态：「アニメ化」「映画化」「コミカライズ」本身已是官宣
+MAJOR_SEQUEL = 2  # 续作形态：「続編」「第2期」「新シーズン」
+MAJOR_WEAK = 1    # 双信号：形态词 × 决定词（例「新动画宣布制作」）
+MAJOR_NONE = 0
+
+# 强形态：出现即算官宣（「〇〇アニメ化決定」这类标题里，形态词自带决定含义）。
+# 「劇場版」带来的误伤（劇場版グッズ発売）由 news_filters 的商业促销层挡掉，
+# 豁免**不绕过**收录过滤——豁免只管配额与排序。
+_MAJOR_STRONG_WORDS: tuple[str, ...] = (
+    "アニメ化", "アニメーション化", "动画化", "动漫化", "映像化", "映画化",
+    "劇場版", "劇場アニメ", "実写化", "ドラマ化", "真人化",
+    "コミカライズ", "漫画化", "ノベライズ", "小説化", "小说化",
+    "リメイク", "重制", "重置版", "リブート",
+    "アニメプロジェクト", "新プロジェクト", "新企划", "新企劃",
+)
+
+# 续作形态：比「化」类弱一档（档期交替期数量大），但仍比普通稿值钱。
+_MAJOR_SEQUEL_WORDS: tuple[str, ...] = (
+    "続編", "続篇", "第2期", "第3期", "第4期", "第5期", "二期", "三期", "四期",
+    "新シリーズ", "新シーズン", "新系列", "second season", "season 2", "season 3",
+)
+
+# 双信号的形态词（弱档）：命中形态词**且**命中决定词才算，避免「制作」二字单飞。
+_MAJOR_FORM_WORDS: tuple[str, ...] = (
+    _MAJOR_STRONG_WORDS
+    + _MAJOR_SEQUEL_WORDS
+    + ("アニメ", "动画", "动漫", "漫画", "コミック", "小説", "小说",
+       "ゲーム", "游戏", "新作", "新番")
+)
+
+# 决定词：与形态词同时出现在标题里才构成官宣（单飞不认，见上）。
+# 刻意**不收**「制作 / 製作」：它俩太泛（「アニメ制作会社〇〇、△△社を買収」会被误判成
+# 官宣，实际是行业并购）。真正写「制作決定」的标题靠「決定」命中，写「宣布制作」的靠
+# 「宣布」命中，都不需要这两个词。
+_MAJOR_DECISION_WORDS: tuple[str, ...] = (
+    "決定", "决定", "発表", "发表", "始動", "官宣", "立项", "宣布",
+    "決定へ", "グリーンライト",
+)
+
+
+def detect_major_announcement(title: str, summary: str = "") -> tuple[int, str]:
+    """重大官宣判定，返回 ``(强度, 命中的词)``；非官宣返回 ``(MAJOR_NONE, "")``。
+
+    只看**标题**：RSS 的摘要里顺带提一句「アニメ化」不该让整条稿子豁免。
+    命中词回传给调用方写运行明细，便于事后校验词表误伤。
+    """
+    headline = (title or "").lower()
+    if not headline:
+        return (MAJOR_NONE, "")
+    for word in _MAJOR_STRONG_WORDS:
+        if word.lower() in headline:
+            return (MAJOR_STRONG, word)
+    for word in _MAJOR_SEQUEL_WORDS:
+        if word.lower() in headline:
+            return (MAJOR_SEQUEL, word)
+    forms = [word for word in _MAJOR_FORM_WORDS if word.lower() in headline]
+    if forms:
+        for word in _MAJOR_DECISION_WORDS:
+            if word.lower() in headline:
+                return (MAJOR_WEAK, f"{forms[0]}+{word}")
+    del summary  # 只认标题（摘要不参与判定），显式丢弃避免误以为漏判
+    return (MAJOR_NONE, "")
+
+
+def is_major_announcement(title: str, summary: str = "") -> bool:
+    """是否重大官宣（detect_major_announcement 的布尔包装，便于测试与调用）。"""
+    return detect_major_announcement(title, summary)[0] != MAJOR_NONE
+
+
+# 官宣优先级加成：让豁免条目在首页 / 资讯列表排到普通稿之前
+# （连官方 PR 的 -25 与商品宣传的 -30 都能盖过去）。
+MAJOR_ANNOUNCEMENT_BONUS = 60
+
 # 日本厂商 / 平台信号：欧美源里出现任天堂等日本厂商时，实际是日本内容，不该被算作欧美。
 _JP_VENDOR_SIGNALS = (
     "任天堂", "nintendo", "switch", "playstation", "sega", "capcom", "カプコン",
@@ -424,4 +504,11 @@ def compute_priority_score(
     haystack = (text or "").lower()
     if any(word.lower() in haystack for word in MERCH_PROMO_WORDS):
         score += MERCH_PROMO_PENALTY
+
+    # 重大官宣加成（2026-10-22）：动画化 / 制作決定 / 续作決定 是站内最该被看到的一类，
+    # 加到能盖过官方 PR(-25) 与商品宣传(-30)。这里与配额豁免用同一个判定函数，
+    # 保证「豁免进来的」和「排在最前的」永远是同一批稿子。
+    headline, _, rest = (text or "").partition("\n")
+    if detect_major_announcement(headline, rest)[0] != MAJOR_NONE:
+        score += MAJOR_ANNOUNCEMENT_BONUS
     return score

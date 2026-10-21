@@ -170,7 +170,8 @@ TASKS: tuple[TaskSpec, ...] = (
         scope_placeholder="",
         scope_help=(
             f"按自然日配额抓取（当前上限 {settings.news_daily_quota} 条/天）；"
-            "日文源需要配置 NEWS_LLM_* 才会启用"
+            f"动画化 / 制作決定 / 续作決定 等重大官宣另享 "
+            f"{settings.news_exempt_max_per_day} 条/天豁免额度，不占上面配额"
         ),
     ),
 )

@@ -58,7 +58,9 @@ def test_music_news_falls_into_related_subject_and_gets_priority():
 
 def test_merch_promo_gets_lower_priority():
     """商品宣传降权：同主体下，周边/联名稿的优先级必须低于作品动态稿。"""
-    work_news = _score(category="动画", text="「ベルセルク」新作アニメの制作が決定")
+    # 「制作が決定」这类写法会被判成重大官宣拿到 +60 加成（见 detect_major_announcement），
+    # 本条只验商品宣传降权，所以作品动态稿用不带决定词的写法，避免两个加成叠加进来。
+    work_news = _score(category="动画", text="「ベルセルク」新作アニメの放送が開始")
     merch = _score(
         category="动画",
         text="「ベルセルク」ガッツ＆グリフィスがセットでフィギュア化！",

@@ -305,9 +305,12 @@ class TestDailyImport:
         first = run_import_daily(
             factory, apply=True, quota=1, sources=(ZH_SOURCE,), fetch=fetch
         )
-        assert first.added == 1
+        # 「新动画宣布制作」命中官宣豁免（形态 动画 × 决定 制作），走豁免额度不占配额；
+        # 「旧闻一条」是普通稿，用掉这唯一的 1 条配额 → 本轮共 2 条。
+        assert first.added == 2
+        assert first.exempted == 1
 
-        # 当天配额用完：第二轮直接停（新增为 0），不重复入库
+        # 当天配额用完：第二轮普通稿一条不收，官宣额度虽有余但无新官宣 → 新增为 0
         second = run_import_daily(
             factory, apply=True, quota=1, sources=(ZH_SOURCE,), fetch=fetch
         )
@@ -454,9 +457,11 @@ class TestDailyImport:
             return ["【译】" + t for t in texts]
 
         fetch = fake_fetch({JA_SOURCE.url: RSS_JA, ZH_SOURCE.url: RSS_ZH})
+        # exempt_quota=0：本条只验「普通条目按 priority 竞争」，豁免语义见
+        # TestMajorAnnouncementExemption（官宣不占配额，会绕过这里的优先级比较）。
         summary = run_import_daily(
-            factory, apply=True, quota=1, sources=(JA_SOURCE, ZH_SOURCE),
-            fetch=fetch, translate=translate,
+            factory, apply=True, quota=1, exempt_quota=0,
+            sources=(JA_SOURCE, ZH_SOURCE), fetch=fetch, translate=translate,
         )
         assert summary.added == 1
         assert summary.per_source == {"ja-test": 1}  # 中文源根本没被抓取
@@ -540,7 +545,7 @@ class TestSoftQuotaAndClassification:
             "g", "综合源", "https://g.example/rss", "rss", "综合动态", "zh"
         )
         pool = [_cand(general, f"综合资讯第 {i} 条") for i in range(20)]
-        selected, _ = select_quota(pool, 10)
+        selected, _ = select_quota(pool, 10, 0)
         assert len(selected) == 10  # 没有综合动态专属封顶
         assert _PER_SUBJECT_CAP == {}
 
@@ -553,7 +558,8 @@ class TestSoftQuotaAndClassification:
             _cand(src, "新作アニメ「ホシ」制作決定、2027年放送"),
             _cand(src, "新作アニメ「ホシ」制作決定、2027年放送へ"),
         ]
-        selected, deduped = select_quota(pool, 10)
+        # 两条都是「制作決定」类官宣 → 走豁免额度，所以显式给豁免额度（默认 0 会一条不收）
+        selected, deduped = select_quota(pool, 10, 10)
         assert len(selected) == 1
         assert deduped == 1
 
@@ -565,7 +571,7 @@ class TestSoftQuotaAndClassification:
         west = SourceSpec("w", "欧美源", "https://w.example/rss", "rss", "游戏", "zh", region="欧美")
         title = "新作ゲーム発売決定、2027年春に配信"
         pool = [_cand(west, title), _cand(jp, title)]
-        selected, _ = select_quota(pool, 10)
+        selected, _ = select_quota(pool, 10, 10)
         assert len(selected) == 1
         assert selected[0].source.key == "jp"
 
@@ -643,6 +649,150 @@ class TestSoftQuotaAndClassification:
             assert row.subcategory == ""  # 非游戏不打子类
         finally:
             db.close()
+
+
+# ---------- 2026-10-22：重大官宣配额豁免 ----------
+
+RSS_MAJOR = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel><title>官宣源</title>
+<item><title>『ホシ』アニメ化決定、2027年放送</title><link>https://zh.example/m1</link>
+<description>アニメ化が決定しました。制作会社は後日発表されます。</description>
+<pubDate>Mon, 20 Oct 2026 12:00:00 +0900</pubDate></item>
+<item><title>旧闻一条</title><link>https://zh.example/m2</link>
+<description>纯文本摘要，跟官宣没有任何关系的一条普通资讯。</description>
+<pubDate>Mon, 20 Oct 2026 11:00:00 +0900</pubDate></item>
+</channel></rss>"""
+
+RSS_MAJOR_2 = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel><title>官宣源2</title>
+<item><title>『ツキ』第2期制作決定</title><link>https://zh.example/m3</link>
+<description>第2期の制作が決定しました。続報をお待ちください。</description>
+<pubDate>Mon, 20 Oct 2026 13:00:00 +0900</pubDate></item>
+</channel></rss>"""
+
+
+class TestMajorAnnouncementExemption:
+    def test_word_table_hits_and_misses(self):
+        """词表三档：改编/新企划 > 续作 > 双信号；普通稿不命中。"""
+        from scripts.news_classify import (
+            MAJOR_NONE,
+            MAJOR_SEQUEL,
+            MAJOR_STRONG,
+            MAJOR_WEAK,
+            detect_major_announcement,
+        )
+
+        assert detect_major_announcement("『ホシ』アニメ化決定、2027年放送")[0] == MAJOR_STRONG
+        assert detect_major_announcement("『ホシ』映画化が決定")[0] == MAJOR_STRONG
+        assert detect_major_announcement("『ホシ』コミカライズ決定")[0] == MAJOR_STRONG
+        assert detect_major_announcement("『ホシ』第2期制作決定")[0] == MAJOR_SEQUEL
+        assert detect_major_announcement("『ホシ』続編制作決定")[0] == MAJOR_SEQUEL
+        assert detect_major_announcement("新动画宣布制作")[0] == MAJOR_WEAK
+        # 普通稿：没有决定词，或没有形态词，都不算官宣
+        assert detect_major_announcement("旧闻一条")[0] == MAJOR_NONE
+        assert detect_major_announcement("ゲームアップデート実施")[0] == MAJOR_NONE
+        assert detect_major_announcement("〇〇のグッズ発売")[0] == MAJOR_NONE
+
+    def test_major_is_admitted_when_quota_exhausted(self, factory):
+        """配额跑满（quota=0）时仍收官宣，普通稿一条不进。"""
+        fetch = fake_fetch({ZH_SOURCE.url: RSS_MAJOR})
+        summary = run_import_daily(
+            factory, apply=True, quota=0, exempt_quota=2,
+            sources=(ZH_SOURCE,), fetch=fetch,
+        )
+        assert summary.added == 1
+        assert summary.exempted == 1
+        db = factory()
+        try:
+            row = db.scalars(select(Article)).one()
+            assert row.title == "『ホシ』アニメ化決定、2027年放送"
+            assert row.is_major is True
+        finally:
+            db.close()
+
+    def test_major_does_not_consume_daily_quota(self, factory):
+        """官宣走豁免额度，不占普通配额：quota=1 时应进 1 条官宣 + 1 条普通稿。"""
+        fetch = fake_fetch({ZH_SOURCE.url: RSS_MAJOR})
+        summary = run_import_daily(
+            factory, apply=True, quota=1, exempt_quota=5,
+            sources=(ZH_SOURCE,), fetch=fetch,
+        )
+        assert summary.added == 2
+        assert summary.exempted == 1
+        db = factory()
+        try:
+            rows = {row.title: row for row in db.scalars(select(Article))}
+            assert rows["『ホシ』アニメ化決定、2027年放送"].is_major is True
+            assert rows["旧闻一条"].is_major is False
+        finally:
+            db.close()
+
+    def test_exempt_budget_is_counted_across_runs(self, factory):
+        """豁免额度按天累计（跨轮查 is_major），用完当天不再收。"""
+        first = run_import_daily(
+            factory, apply=True, quota=0, exempt_quota=1,
+            sources=(ZH_SOURCE,), fetch=fake_fetch({ZH_SOURCE.url: RSS_MAJOR}),
+        )
+        assert first.exempted == 1
+
+        # 第二轮：额度已用完（不是每轮重置），换一批官宣标题也不收
+        second = run_import_daily(
+            factory, apply=True, quota=0, exempt_quota=1,
+            sources=(ZH_SOURCE,), fetch=fake_fetch({ZH_SOURCE.url: RSS_MAJOR_2}),
+        )
+        assert second.exempted == 0
+        assert second.added == 0
+        assert "达到每日上限" in second.message
+
+    def test_major_sorts_ahead_of_plain_in_same_round(self):
+        """豁免池先入场：普通配额为 0 时，只有官宣能被选中。"""
+        from scripts.news_daily import select_quota
+
+        pr = SourceSpec(
+            "pr", "官方PR源", "https://pr.example/rss", "rss", "动画", "zh",
+            source_type="官方PR",
+        )
+        media = SourceSpec("m", "媒体源", "https://m.example/rss", "rss", "动画", "zh")
+        major = _cand(pr, "『ホシ』アニメ化決定")
+        plain = _cand(media, "アニメ新作の放送開始")
+        selected, _ = select_quota([plain, major], 0, 1)
+        # 官方 PR 源有 -25 降权，但豁免只看官宣强度，所以它排在前面
+        assert [candidate.title for candidate in selected] == ["『ホシ』アニメ化決定"]
+
+    def test_ensure_article_major_column_is_idempotent(self, tmp_path):
+        """老库补 is_major 列：补完历史行置 0，且可重复执行（每轮 cron 都会跑 init_db）。"""
+        from sqlalchemy import create_engine, inspect, text
+
+        from app import crud
+
+        engine = create_engine(f"sqlite:///{tmp_path / 'old.db'}")
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "CREATE TABLE articles (id INTEGER PRIMARY KEY, "
+                    "title VARCHAR(200) NOT NULL, summary TEXT NOT NULL, body TEXT NOT NULL)"
+                )
+            )
+            connection.execute(
+                text("INSERT INTO articles (title, summary, body) VALUES ('旧闻', 's', 'b')")
+            )
+
+        assert crud.ensure_article_major_column(engine) == ["is_major"]
+        assert "is_major" in {c["name"] for c in inspect(engine).get_columns("articles")}
+        with engine.begin() as connection:
+            assert connection.execute(text("SELECT is_major FROM articles")).scalar() == 0
+        assert crud.ensure_article_major_column(engine) == []  # 幂等
+        engine.dispose()
+
+    def test_major_priority_bonus_beats_official_pr_penalty(self):
+        """官宣加成（+60）要盖得住官方 PR 的 -25 与商品宣传的 -30。"""
+        from scripts.news_classify import MAJOR_ANNOUNCEMENT_BONUS, compute_priority_score
+
+        base = dict(category="动画", region="日本", event_type="新作发布",
+                    source_type="官方PR")
+        plain = compute_priority_score(**base, text="『ホシ』の新情報")
+        major = compute_priority_score(**base, text="『ホシ』アニメ化決定")
+        assert major == plain + MAJOR_ANNOUNCEMENT_BONUS
 
 
 # ---------- 2026-10-21：游民星空标题污染修复 + 新源注册 + 停用开关 ----------
