@@ -1,4 +1,10 @@
 {% extends "base_content.html" %}
+{% from "_work_card.html" import poster_card with context %}
+{# 声优 / 制作人页：按 Bangumi 人物 id 反查其参与的全部作品。
+   版式与 /creators/{name}（staff 作品页）保持一致：同一套头部结构 +
+   works-grid--card 海报卡网格；差别只在每张卡片的 persona 行——
+   声优页显示「配音：角色」与「职责：职位」，staff 页只显示「职责」。
+   卡片宏已按人物页场景抑制摘要（关系信息优先），故此处不传 tags。 #}
 {% block title %}{{ person_name }}{% endblock %}
 {% block content %}
 <div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-3">
@@ -12,29 +18,9 @@
 </div>
 
 {% if rows %}
-<div class="row g-3">
+<div class="works-grid works-grid--card">
     {% for row in rows %}
-    <div class="col-12 col-md-6">
-        <a class="work-card" href="/contents/{{ row.content.id }}">
-            <span class="work-cover" aria-hidden="true">{{ row.content.title[:1] }}</span>
-            <span class="work-card-body">
-                <span class="d-flex justify-content-between align-items-center gap-2">
-                    <span class="fw-semibold text-truncate">{{ row.content.title }}</span>
-                    <span class="small text-muted">{% if row.content.rating > 0 %}{{ '%.1f' % row.content.rating }}{% else %}暂无评分{% endif %}</span>
-                </span>
-                <span class="small text-muted mt-1">
-                    {% if row.content.year %}{{ row.content.year }}{% endif %}
-                    {% if row.content.media %} · {{ row.content.media }}{% endif %}
-                </span>
-                {% if row.characters %}
-                <span class="small mt-1">配音：{{ row.characters|join(' / ') }}</span>
-                {% endif %}
-                {% if row.roles %}
-                <span class="small text-secondary mt-1">{{ row.roles|join(' / ') }}</span>
-                {% endif %}
-            </span>
-        </a>
-    </div>
+    {{ poster_card(row.content, 'card', persona=row.persona or None) }}
     {% endfor %}
 </div>
 {% else %}

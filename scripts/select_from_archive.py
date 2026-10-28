@@ -34,9 +34,10 @@ from scripts.import_bangumi import (  # noqa: E402
     DEFAULT_RETRIES,
     DEFAULT_TIMEOUT,
     DEFAULT_USER_AGENT,
+    MARGIN_MAX_RANK,
     build_opener,
     fetch_related_subjects,
-    is_galge_payload,
+    is_acgn_game_payload,
     resolve_book,
     resolve_content_type,
 )
@@ -240,24 +241,28 @@ def natural_quota(total: int) -> dict[str, int]:
     }
 
 
-# ---------- 收录口径过滤（2026-10-21 用户定稿） ----------
+# ---------- 收录口径过滤（2026-10-23 v3 用户定稿） ----------
 # - 小说只留轻小说（classify_book 判成 literature / 判不出文库信号的一律剔除）；
-# - 游戏：galge（tags 可判，不出网）直接收；非 galge 查镜像关联条目
-#   （/v0/subjects/{id}/subjects），确认有动画/漫画相关 -> payload 打
-#   ``_site_related_ip=True`` 标记（服务端 map_subject 凭此放行）；
-#   未命中或查询失败 -> 剔除（宁缺勿错：不推明知会被服务端跳过的候选）。
-# 服务端 map_subject 有同一套规则的兜底闸口，标记不可伪造绕过业务约束
-# 之外的场景（随机导入 / 手动 run_sync 的游戏走总闸）。
+# - 游戏（ACGN 向，五类）：galge/视觉小说、动画/漫画/轻小说改编与联动、
+#   二游/动漫风、日式RPG/同人独立、少量宽泛兜底（详见 import_bangumi.
+#   is_acgn_game_payload）。选品端先按标签免联网预过滤；未命中再查镜像
+#   关联条目（/v0/subjects/{id}/subjects），确认有动画/漫画/轻小说原作关联
+#   -> payload 打 ``_site_related_ip=True`` 标记；未命中或查询失败 -> 剔除
+#   （宁缺勿错）。服务端 map_subject 用同一套 is_acgn_game_payload 兜底，
+#   标记不可伪造绕过随机导入 / 手动 run_sync 等场景。
 
-ANIME_TYPE = 2  # Bangumi 动画；关联条目列表的 item.type 命中即算动画相关
+ANIME_TYPE = 2  # Bangumi 动画；关联条目列表的 item.type 命中即算原作关联
+NOVEL_TYPE = 1  # 轻小说（书籍区）；游戏改编自轻小说也算「有明确原作关联」
 
 
 def has_anime_manga_relation(rel_payload) -> bool:
-    """关联条目列表里是否有动画（type=2）或漫画（关系文案带「漫画/动画」）。
+    """关联条目列表里是否命中「有明确原作关联」——动画(type=2) / 轻小说等书籍
+    (type=1)，或关系文案带「动画/漫画/小说/轻小说/原作/改编/联动」。
 
-    端点响应的 item 结构未完全定死（见 app.entity_links.parse_related_subjects
-    的防御性注释），这里只认 dict；type 缺失时退回关系文案兜底——
-    游戏条目上出现「动画化 / 漫画化」即说明有对应改编。
+    游戏改编自动画、漫画、轻小说都算「有明确原作关联」。端点响应的 item 结构未
+    完全定死（见 app.entity_links.parse_related_subjects 的防御性注释），这里
+    只认 dict；type 缺失时退回关系文案兜底——游戏条目上出现「动画化 / 漫画化 /
+    小说原作」即说明有对应改编。
     """
     if not isinstance(rel_payload, list):
         return False
@@ -265,11 +270,27 @@ def has_anime_manga_relation(rel_payload) -> bool:
         if not isinstance(item, dict):
             continue
         relation = str(item.get("relation") or "")
-        if item.get("type") == ANIME_TYPE:
+        if item.get("type") in (ANIME_TYPE, NOVEL_TYPE):
             return True
-        if "动画" in relation or "漫画" in relation:
+        if (
+            "动画" in relation or "漫画" in relation or "小说" in relation
+            or "轻小说" in relation or "原作" in relation or "改编" in relation
+            or "联动" in relation
+        ):
             return True
     return False
+
+
+def _game_stat_key(reason: str) -> str:
+    """把 is_acgn_game_payload 的命中文案映射到 apply_ingest_policy 的统计键。"""
+    return {
+        "galge/视觉小说": "game_galge",
+        "改编/联动": "game_adaptation",
+        "二游/动漫风": "game_anime_style",
+        "日式RPG/同人独立": "game_jrpg_indie",
+        "宽泛兜底(高rank)": "game_margin",
+        "原作关联(选品标记)": "game_related",
+    }.get(reason, "game_dropped")
 
 
 def apply_ingest_policy(
@@ -282,12 +303,17 @@ def apply_ingest_policy(
     user_agent: str = DEFAULT_USER_AGENT,
     sleep=time.sleep,
     related_fetcher=None,
+    request_interval: float = 0.0,
 ) -> tuple[list[dict], dict]:
-    """按站点收录口径过滤选品结果，返回 ``(保留的 payload, 统计)``。
+    """按站点收录口径（v3）过滤选品结果，返回 ``(保留的 payload, 统计)``。
 
-    只对小说 / 游戏动手（动画、漫画原样保留）；非 galge 游戏逐个查镜像
-    关联条目，命中动画 / 漫画就打 ``_site_related_ip`` 标记，查询失败按
-    「无相关」剔除——宁缺勿错，与补库 / 选品的一贯口径一致。
+    只对小说 / 游戏动手（动画、漫画原样保留）；游戏先按 ``is_acgn_game_payload``
+    标签免联网预过滤（galge/改编/二游/日式RPG/兜底），未命中再逐个查镜像关联
+    条目，确认有动画/漫画/轻小说原作关联就打 ``_site_related_ip`` 标记，查询
+    失败按「无相关」剔除——宁缺勿错，与补库 / 选品的一贯口径一致。
+
+    ``request_interval``：联网查关联时每个请求前的间隔（秒）。候选量大时
+    给镜像留余量，避免连续请求触发 429（重试次数有限，误剔除不划算）。
     """
     base = base_url or resolve_base_url()
     opener = opener or build_opener(None)
@@ -295,11 +321,15 @@ def apply_ingest_policy(
 
     kept: list[dict] = []
     stats = {
-        "novel_dropped": 0,      # 文学 / 判不出文库信号的小说
-        "game_galge": 0,         # galge（tags 命中）直接收
-        "game_related": 0,       # 非 galge 但有动画/漫画相关（打标记收）
-        "game_dropped": 0,       # 非 galge 且无相关
-        "game_fetch_failed": 0,  # 关联查询失败（该候选按剔除计）
+        "novel_dropped": 0,       # 文学 / 判不出文库信号的小说
+        "game_galge": 0,          # galge/视觉小说（tags 命中）直接收
+        "game_adaptation": 0,     # 改编/联动（标签命中）
+        "game_anime_style": 0,    # 二游/动漫风（标签命中）
+        "game_jrpg_indie": 0,     # 日式RPG/同人独立（标签命中）
+        "game_margin": 0,         # 宽泛兜底（标签+高 rank）
+        "game_related": 0,        # 联网查到动画/漫画/轻小说原作关联（打标记收）
+        "game_dropped": 0,        # 非 ACGN 向且无关联
+        "game_fetch_failed": 0,   # 关联查询失败（该候选按剔除计）
     }
     for payload in payloads:
         content_type = payload.get("_content_type")
@@ -310,10 +340,15 @@ def apply_ingest_policy(
                 continue
             kept.append(payload)
         elif content_type == "game":
-            if is_galge_payload(payload):
-                stats["game_galge"] += 1
+            accepted, reason = is_acgn_game_payload(payload)
+            if accepted:
+                # 标签命中（galge/改编/二游/日式RPG/兜底）免联网直接收
+                stats[_game_stat_key(reason)] += 1
                 kept.append(payload)
                 continue
+            # 未命中标签：联网查原作关联（动画/漫画/轻小说），命中打标记收
+            if request_interval > 0:
+                sleep(request_interval)
             subject_id = payload.get("id")
             try:
                 related = fetch(
@@ -377,19 +412,21 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(f"扫描 {scanned} 行；候选分布：{dict(type_counter)}；选中 {len(payloads)} 条")
 
-    # 收录口径过滤（2026-10-21）：小说只留轻小说，游戏只留 galge / 有动画漫画相关
+    # 收录口径过滤（2026-10-23 v3）：小说只留轻小说；游戏只收 ACGN 向五类
     if payloads:
         payloads, policy_stats = apply_ingest_policy(payloads)
         print(
             "收录口径过滤：剔除文学小说 "
-            f"{policy_stats['novel_dropped']}、普通游戏 {policy_stats['game_dropped']}"
-            f"（galge 收 {policy_stats['game_galge']}、"
-            f"标记动画/漫画相关游戏 {policy_stats['game_related']}）"
+            f"{policy_stats['novel_dropped']}、非ACGN游戏 {policy_stats['game_dropped']}"
+            f"（galge {policy_stats['game_galge']}、改编联动 {policy_stats['game_adaptation']}"
+            f"、二游动漫风 {policy_stats['game_anime_style']}、日式RPG独立 "
+            f"{policy_stats['game_jrpg_indie']}、宽泛兜底 {policy_stats['game_margin']}"
+            f"、关联标记 {policy_stats['game_related']}）"
         )
         if policy_stats["game_fetch_failed"]:
             print(
                 f"  ⚠ {policy_stats['game_fetch_failed']} 个游戏的关联条目查询失败，"
-                "按「无动画/漫画相关」剔除（宁缺勿错）"
+                "按「无原作关联」剔除（宁缺勿错）"
             )
 
     out = Path(args.out)

@@ -4,7 +4,8 @@
 - 作品关系（content_relations）：双向镜像、替换式写入幂等；
 - 系列作品区：真实关系 ∪ 同系列，去重且关系标签优先，按关系远近 + 年份排序；
 - 相关内容推荐：实体关系优先于题材、跨类型只降权「无真实关系」的候选、
-  默认排除系列区作品、无信号才回落同类型榜单、理由可追溯；
+  默认排除系列区作品、无信号才回落同类型榜单、理由可追溯、
+  默认 12 条（PC 海报网格 6 列排满 2 行，候选不足不凑数）；
 - 相关资讯：短标题不走 LIKE，只认真实关联。
 
 独立临时 SQLite，不联网、不触碰开发库。
@@ -286,6 +287,28 @@ class TestRelatedContents:
 
             ranked = crud.list_related_contents(db, main, limit=6)
             assert [row.title for row in ranked] == ["唯一相关"]
+        finally:
+            db.close()
+
+    def test_default_limit_is_twelve_for_pc_grid(self, factory):
+        """默认上限 12（2026-10-24 从 6 抬高）：详情页海报网格 PC 6 列排满 2 行。
+
+        候选充足时按默认条数截断；「候选不足不凑数」由上一条用例钉住。
+        """
+        db = factory()
+        try:
+            main = _content(db, "本篇")
+            _links(db, main, [("麻枝准", "person", "原作")])
+            for index in range(15):
+                _links(
+                    db,
+                    _content(db, f"同原作作品{index}"),
+                    [("麻枝准", "person", "原作")],
+                )
+
+            pairs = crud.list_related_contents_with_reasons(db, main)
+            assert len(pairs) == 12
+            assert all(reason.startswith("同原作") for _row, reason in pairs)
         finally:
             db.close()
 

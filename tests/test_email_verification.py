@@ -29,7 +29,13 @@ from app.config import settings
 from app.database import Base, get_db
 from app.main import app
 from app.models import EmailVerificationToken, User
-from auth_helpers import ADMIN_USERNAME, ADMIN_PASSWORD, create_accounts, login
+from auth_helpers import (
+    ADMIN_PASSWORD,
+    ADMIN_USERNAME,
+    create_accounts,
+    login,
+    register,
+)
 
 TOKEN_PATTERN = re.compile(r"/verify/email\?token=([A-Za-z0-9_\-]+)")
 
@@ -72,11 +78,33 @@ def env(tmp_path):
         app.dependency_overrides.pop(get_db, None)
 
 
-def _register(client, username: str, email: str = "user@example.com",
+def _register(env, username: str, email: str = "user@example.com",
               password: str = "pw-123456", **extra):
-    data = {"username": username, "password": password, "confirm": password, "email": email}
-    data.update(extra)
-    return client.post("/register", data=data, follow_redirects=False)
+    """准备一个「邮箱未验证」的账号，返回等价于「注册后待验证」的响应。
+
+    注册流程已改为「邮箱验证码 -> 建号即已验证」（见 tests/test_register.py），
+    本文件覆盖的是**链接验证这条存量路径**——找回密码、管理员放行、令牌生命周期
+    仍在用它。因此这里直接建一个待验证账号，再借 /verify/resend 取得待验证
+    Cookie，让后续用例仍能从「注册后的状态」出发。
+    """
+    client = env.client
+    client.cookies.clear()
+    if not settings.email_verification_enabled:
+        # 总开关关闭：走真实的「填表即注册」路径。
+        data = {"username": username, "password": password, "confirm": password, "email": email}
+        data.update(extra)
+        return client.post("/register", data=data, follow_redirects=False)
+    db = env.session_factory()
+    try:
+        crud.create_user(
+            db, username=username, password=password,
+            role=crud.ROLE_USER, email=email, require_verification=True,
+        )
+    finally:
+        db.close()
+    return client.post(
+        "/verify/resend", data={"email": email, "next": "/"}, follow_redirects=False
+    )
 
 
 def _link(client, next_url: str = "/") -> str:
@@ -117,13 +145,20 @@ def _token_rows(env) -> list[EmailVerificationToken]:
 
 class TestRegistrationPendingState:
     def test_register_redirects_to_pending_without_session(self, env):
-        resp = _register(env.client, "pend", email="pend@example.com")
+        resp = _register(env, "pend", email="pend@example.com")
         assert resp.status_code == 303
         assert resp.headers["location"].startswith("/verify/pending")
         assert not env.client.cookies.get("acgn_session")
 
+    def test_new_registration_flow_skips_pending_state(self, env):
+        """新注册流程（验证码）建号即已验证，不再有待验证中间态。"""
+        resp = register(env.client, "direct", "pw-123456", email="direct@example.com")
+        assert resp.status_code == 303
+        assert resp.headers["location"] == "/"
+        assert env.client.cookies.get("acgn_session")
+
     def test_register_issues_one_token(self, env):
-        _register(env.client, "tokencount", email="tokencount@example.com")
+        _register(env, "tokencount", email="tokencount@example.com")
         rows = _token_rows(env)
         assert len(rows) == 1
         assert rows[0].consumed_at is None
@@ -131,7 +166,7 @@ class TestRegistrationPendingState:
 
     def test_pending_page_shows_email_and_link_when_smtp_missing(self, env):
         """未配置 SMTP：点「生成验证链接」后页面直接给出链接与邮箱。"""
-        _register(env.client, "shown", email="shown@example.com")
+        _register(env, "shown", email="shown@example.com")
         html = env.client.post("/verify/link", data={"next": "/"}).text
         assert "shown@example.com" in html
         assert "/verify/email?token=" in html
@@ -149,7 +184,7 @@ class TestRegistrationPendingState:
 
 class TestLoginBlockedUntilVerified:
     def test_unverified_user_cannot_login(self, env):
-        _register(env.client, "blocked", email="blocked@example.com")
+        _register(env, "blocked", email="blocked@example.com")
         resp = login(env.client, "blocked", "pw-123456")
         assert resp.status_code == 400
         assert "邮箱尚未验证" in resp.text
@@ -164,20 +199,20 @@ class TestLoginBlockedUntilVerified:
             return True, "ok"
 
         monkeypatch.setattr("app.auth.mailer.send_verification_email", fake_send)
-        _register(env.client, "nospam", email="nospam@example.com")
+        _register(env, "nospam", email="nospam@example.com")
         sent.clear()
         login(env.client, "nospam", "pw-123456")
         assert sent == []
 
     def test_user_can_login_after_verification(self, env):
-        _register(env.client, "after", email="after@example.com")
+        _register(env, "after", email="after@example.com")
         assert "邮箱验证成功" in env.client.get(_link(env.client)).text
         resp = login(env.client, "after", "pw-123456")
         assert resp.status_code == 303
         assert env.client.cookies.get("acgn_session")
 
     def test_verification_clears_pending_cookie(self, env):
-        _register(env.client, "cleared", email="cleared@example.com")
+        _register(env, "cleared", email="cleared@example.com")
         resp = env.client.get(_link(env.client), follow_redirects=False)
         # 验证成功后待验证 Cookie 被删除（Set-Cookie 里带上过期/空值）。
         assert "acgn_pending" in resp.headers.get("set-cookie", "")
@@ -188,7 +223,7 @@ class TestLoginBlockedUntilVerified:
 
 class TestTokenLifecycle:
     def test_valid_token_marks_email_verified(self, env):
-        _register(env.client, "lifecycle", email="lifecycle@example.com")
+        _register(env, "lifecycle", email="lifecycle@example.com")
         user = _user_by_name(env, "lifecycle")
         assert user.email_verified is False
         assert user.email_verified_at is None
@@ -199,7 +234,7 @@ class TestTokenLifecycle:
         assert user.email_verified_at is not None
 
     def test_token_cannot_be_reused(self, env):
-        _register(env.client, "reuse", email="reuse@example.com")
+        _register(env, "reuse", email="reuse@example.com")
         url = _link(env.client)
         assert env.client.get(url).status_code == 200
         resp = env.client.get(url, follow_redirects=False)
@@ -216,7 +251,7 @@ class TestTokenLifecycle:
 
     def test_expired_token_is_rejected(self, env, monkeypatch):
         monkeypatch.setattr(settings, "email_verification_token_ttl_seconds", -1)
-        _register(env.client, "expired", email="expired@example.com")
+        _register(env, "expired", email="expired@example.com")
         url = _link(env.client)
         resp = env.client.get(url, follow_redirects=False)
         assert resp.status_code == 400
@@ -224,7 +259,7 @@ class TestTokenLifecycle:
         assert user.email_verified is False
 
     def test_token_stored_only_as_hash(self, env):
-        _register(env.client, "hashed", email="hashed@example.com")
+        _register(env, "hashed", email="hashed@example.com")
         url = _link(env.client)
         token = TOKEN_PATTERN.search(url).group(1)
         rows = _token_rows(env)
@@ -240,7 +275,7 @@ class TestTokenLifecycle:
 class TestResend:
     def test_resend_invalidates_previous_link(self, env, monkeypatch):
         monkeypatch.setattr(settings, "email_resend_cooldown_seconds", 0)
-        _register(env.client, "resend", email="resend@example.com")
+        _register(env, "resend", email="resend@example.com")
         first = _link(env.client)
 
         resp = env.client.post("/verify/resend", data={"next": "/"}, follow_redirects=False)
@@ -252,14 +287,14 @@ class TestResend:
         assert env.client.get(second, follow_redirects=False).status_code == 200
 
     def test_resend_is_rate_limited(self, env):
-        _register(env.client, "cooldown", email="cooldown@example.com")
+        _register(env, "cooldown", email="cooldown@example.com")
         second = env.client.post("/verify/resend", data={"next": "/"}, follow_redirects=False)
         assert second.status_code == 400
         assert "发送过于频繁" in second.text
 
     def test_resend_by_email_without_cookie(self, env, monkeypatch):
         monkeypatch.setattr(settings, "email_resend_cooldown_seconds", 0)
-        _register(env.client, "byemail", email="byemail@example.com")
+        _register(env, "byemail", email="byemail@example.com")
         fresh = TestClient(app, follow_redirects=False)
         resp = fresh.post(
             "/verify/resend", data={"email": "byemail@example.com", "next": "/"},
@@ -286,29 +321,34 @@ class TestEmailValidation:
         ["", "   ", "no-at-sign", "a@b", "a@b.", "@example.com", "a b@example.com"],
     )
     def test_invalid_email_returns_400_and_echoes_reason(self, env, email):
+        """非法邮箱在「申请验证码」这一步就被拦住，不会发信也不会建号。"""
         before = len(_user_rows(env))
-        resp = _register(env.client, "mailcheck", email=email)
+        resp = env.client.post("/register/code", data={"email": email}, follow_redirects=False)
         assert resp.status_code == 400
         assert "邮箱" in resp.text
         assert len(_user_rows(env)) == before
         assert not env.client.cookies.get("acgn_session")
 
     def test_duplicate_email_is_rejected(self, env):
-        _register(env.client, "first", email="dup@example.com")
+        _register(env, "first", email="dup@example.com")
         before = len(_user_rows(env))
-        resp = _register(env.client, "second", email="dup@example.com")
+        resp = env.client.post(
+            "/register/code", data={"email": "dup@example.com"}, follow_redirects=False
+        )
         assert resp.status_code == 400
-        assert "邮箱" in resp.text
+        assert "邮箱已被注册" in resp.text
         assert len(_user_rows(env)) == before
 
     def test_duplicate_email_is_case_insensitive(self, env):
-        _register(env.client, "case1", email="Case@Example.com")
-        resp = _register(env.client, "case2", email="CASE@example.COM")
+        _register(env, "case1", email="Case@Example.com")
+        resp = env.client.post(
+            "/register/code", data={"email": "CASE@example.COM"}, follow_redirects=False
+        )
         assert resp.status_code == 400
-        assert "邮箱" in resp.text
+        assert "邮箱已被注册" in resp.text
 
     def test_email_is_normalized_before_saving(self, env):
-        _register(env.client, "normal", email="  Normal@Example.COM  ")
+        _register(env, "normal", email="  Normal@Example.COM  ")
         assert _user_by_name(env, "normal").email == "normal@example.com"
 
 
@@ -371,7 +411,7 @@ def smtp_env(env, monkeypatch):
 
 class TestSmtpDelivery:
     def test_registration_sends_real_mail_when_configured(self, smtp_env):
-        resp = _register(smtp_env.client, "mailuser", email="mailuser@example.com")
+        resp = _register(smtp_env, "mailuser", email="mailuser@example.com")
         assert resp.status_code == 303
         assert "sent=1" in resp.headers["location"]
 
@@ -394,13 +434,13 @@ class TestSmtpDelivery:
         assert "/verify/email?token=" in body
 
     def test_pending_page_hides_link_when_smtp_configured(self, smtp_env):
-        _register(smtp_env.client, "hidden", email="hidden@example.com")
+        _register(smtp_env, "hidden", email="hidden@example.com")
         html = smtp_env.client.get("/verify/pending").text
         assert "hidden@example.com" in html
         assert "/verify/email?token=" not in html
 
     def test_link_route_unavailable_when_smtp_configured(self, smtp_env):
-        _register(smtp_env.client, "nolink", email="nolink@example.com")
+        _register(smtp_env, "nolink", email="nolink@example.com")
         resp = smtp_env.client.post("/verify/link", data={"next": "/"}, follow_redirects=False)
         assert resp.status_code == 303
         assert resp.headers["location"].startswith("/verify/pending")
@@ -414,7 +454,7 @@ class TestSmtpDelivery:
             raise RuntimeError("connection refused")
 
         monkeypatch.setattr("smtplib.SMTP", boom)
-        resp = _register(env.client, "mailfail", email="mailfail@example.com")
+        resp = _register(env, "mailfail", email="mailfail@example.com")
         assert resp.status_code == 303
         assert "sent=0" in resp.headers["location"]
         assert _user_by_name(env, "mailfail") is not None
@@ -439,14 +479,14 @@ class TestAdminVerification:
         assert env.client.get("/admin/accounts", follow_redirects=False).status_code == 403
 
     def test_admin_sees_pending_accounts(self, env):
-        _register(env.client, "pending1", email="pending1@example.com")
+        _register(env, "pending1", email="pending1@example.com")
         login(env.client, ADMIN_USERNAME, ADMIN_PASSWORD)
         html = env.client.get("/admin/accounts").text
         assert "pending1" in html
         assert "pending1@example.com" in html
 
     def test_admin_can_manually_verify_account(self, env):
-        _register(env.client, "manual", email="manual@example.com")
+        _register(env, "manual", email="manual@example.com")
         target = _user_by_name(env, "manual")
         login(env.client, ADMIN_USERNAME, ADMIN_PASSWORD)
         resp = env.client.post(f"/admin/accounts/{target.id}/verify", follow_redirects=False)
@@ -464,7 +504,7 @@ class TestAdminVerification:
         assert "error=" in resp.headers["location"]
 
     def test_admin_can_generate_link_without_smtp(self, env):
-        _register(env.client, "adminlink", email="adminlink@example.com")
+        _register(env, "adminlink", email="adminlink@example.com")
         target = _user_by_name(env, "adminlink")
         login(env.client, ADMIN_USERNAME, ADMIN_PASSWORD)
         resp = env.client.post(f"/admin/accounts/{target.id}/link", follow_redirects=False)
@@ -475,7 +515,7 @@ class TestAdminVerification:
 
     def test_admin_link_still_works_when_smtp_configured(self, smtp_env):
         """邮件服务故障时的兜底：即使配了 SMTP，管理员仍能取到转交链接。"""
-        _register(smtp_env.client, "adminlink2", email="adminlink2@example.com")
+        _register(smtp_env, "adminlink2", email="adminlink2@example.com")
         target = _user_by_name(smtp_env, "adminlink2")
         login(smtp_env.client, ADMIN_USERNAME, ADMIN_PASSWORD)
         resp = smtp_env.client.post(f"/admin/accounts/{target.id}/link", follow_redirects=False)
@@ -485,7 +525,7 @@ class TestAdminVerification:
 
     def test_admin_generated_link_can_verify_account(self, smtp_env):
         """管理员生成的链接，用户打开后即可完成验证并登录。"""
-        _register(smtp_env.client, "adminlink3", email="adminlink3@example.com")
+        _register(smtp_env, "adminlink3", email="adminlink3@example.com")
         target = _user_by_name(smtp_env, "adminlink3")
         login(smtp_env.client, ADMIN_USERNAME, ADMIN_PASSWORD)
         resp = smtp_env.client.post(f"/admin/accounts/{target.id}/link", follow_redirects=False)
@@ -503,7 +543,7 @@ class TestAdminVerification:
 class TestFeatureSwitch:
     def test_registration_signs_in_when_disabled(self, env, monkeypatch):
         monkeypatch.setattr(settings, "email_verification_enabled", False)
-        resp = _register(env.client, "noswitch", email="noswitch@example.com")
+        resp = _register(env, "noswitch", email="noswitch@example.com")
         assert resp.status_code == 303
         assert resp.headers["location"] == "/"
         assert env.client.cookies.get("acgn_session")

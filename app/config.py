@@ -25,6 +25,25 @@ class Settings(BaseSettings):
     default_user_username: str = "demo"
     default_user_password: str = "demo123456"
 
+    # ---------- 第三方应用单点登录（OAuth 风格，站点侧授权） ----------
+    # 总开关：false 时所有 /oauth/* 与 /api/auth/* 直接 400，默认关（安全默认，
+    # 未显式开启前任何合作方调用都失败，绝不会误开）。
+    oauth_enabled: bool = False
+    # 合作方应用标识（明文，须经浏览器传递给授权页，非机密）。
+    oauth_client_id: str = ""
+    # 合作方密钥：仅平台后端持有，服务端到服务端换令牌时恒定时间比对校验，
+    # 永不进浏览器。生产必须由 .env 注入高强度随机值；默认值仅本地联调可用，
+    # 且为空时令牌端点一律 401（等于没配置就不放行）。
+    oauth_client_secret: str = ""
+    # 允许回跳的 redirect_uri 白名单（逗号 / 分号分隔）：票据只发往白名单内的地址，
+    # 防止授权页被诱导把一次性票据发到任意站点造成泄漏。留空 = 不接受任何回跳。
+    oauth_redirect_uris: str = ""
+    # 一次性票据有效期（秒），默认 120；过期作废，与 used 共同压死泄漏窗口。
+    oauth_ticket_ttl_seconds: int = 120
+    # 访问令牌有效期（秒），默认 3600（1 小时）；仅用于身份握手，App 拿到
+    # external_user_id 后可自行维持会话，无需反复调用。
+    oauth_token_ttl_seconds: int = 3600
+
     # ---------- 邮箱验证（可插拔） ----------
     # 总开关：置为 False 后注册即登录、登录不再校验邮箱，行为完全退回加该功能之前。
     email_verification_enabled: bool = True
@@ -38,13 +57,33 @@ class Settings(BaseSettings):
     # 站点对外基址（如 https://acgn.example.com）；留空时取当前请求的 host。
     public_base_url: str = ""
 
+    # ---------- 注册邮箱验证码（注册前验证邮箱） ----------
+    # 注册流程为「填邮箱 -> 收验证码 -> 填验证码 -> 设密码 -> 建号」，
+    # 验证码在建号之前校验，因此新账号一建好就是「邮箱已验证」。
+    email_code_digits: int = 6
+    # 验证码有效期（秒），默认 10 分钟。
+    email_code_ttl_seconds: int = 10 * 60
+    # 同一个验证码最多允许输错几次；超过即作废，必须重新发送。
+    email_code_max_attempts: int = 5
+    # 发码频率限制：同一邮箱 / 同一 IP 在窗口内最多发几封（防轰炸、防滥用）。
+    email_code_max_per_email: int = 5
+    email_code_email_window_seconds: int = 3600
+    email_code_max_per_ip: int = 20
+    email_code_ip_window_seconds: int = 3600
+    # 未配置邮件服务时，是否把验证码直接显示在注册页（本地联调用）。
+    # 线上务必置 False：否则任何人填别人的邮箱都能白拿验证码完成注册。
+    email_code_dev_fallback: bool = True
+
     # ---------- 注册控制 ----------
     # 注册模式：
-    # - invite（默认）：关闭公开注册，/register 必须提供有效邀请码
-    #   （管理员在 /admin/invites 生成，或 scripts/create_invite.py 批量生成）；
-    # - open：任何人可自助注册（加邀请码功能之前的旧行为）。
-    # 任何非法取值都按 invite 处理（安全默认），只有显式 open 才放开发布。
+    # - invite（默认）：/register 展示邀请码输入框，填了就校验并消费；
+    # - open：不展示邀请码输入框（加邀请码功能之前的旧行为）。
+    # 注意：邀请码自 2026-10 起改为**可选**——是否必填由下面的
+    # registration_invite_required 决定，registration_mode 只控制输入框的展示。
     registration_mode: str = "invite"
+    # 邀请码是否必填：False（默认）= 允许不填邀请码直接注册；
+    # 置 True 则退回「无有效邀请码不给注册」。
+    registration_invite_required: bool = False
 
     # ---------- 御宅成分检测（Bangumi 公开收藏 + 可选 LLM） ----------
     # Bangumi API 基址，一般不用改。
@@ -159,6 +198,18 @@ class Settings(BaseSettings):
     # 当天已入库多少就从配额里扣多少，跑满即停。
     # 取数口径：日语源优先于中文源；题材优先级 动画 > 漫画 > 轻小说 > 游戏 > 其他。
     news_daily_quota: int = 30
+    # 单轮入库上限（条/轮）：cron 每天跑多轮（现为 3 轮），没有这个闸门时第一轮就能把
+    # 当天额度吃光，随后十几小时首页不再更新。实际本轮额度 = min(当日剩余, 本值)。
+    # 0 = 不限制（退回「只看日配额」的旧行为）。
+    news_run_quota: int = 50
+    # 每个主体类型（动画 / 漫画 / 轻小说 / 游戏）**每天至少**入库多少条（保底）。
+    # 保底按「动画 → 漫画 → 轻小说 → 游戏」顺序从日配额里预留，剩下的额度再按
+    # priority_score 自由竞争；额度不足以覆盖全部保底时，按这个顺序优先满足前面的类别。
+    # 0 = 关闭保底（退回纯权重竞争）。
+    news_category_floor: int = 10
+    # 当天最后一轮抓取的起始小时（含）。cron 现为 00 / 08 / 16 三轮，所以默认 16：
+    # 16 点这轮起不再为类别保底预留额度/额外扫源，剩余配额全部按正常权重补上。
+    news_final_run_hour: int = 16
     # 「重大官宣」豁免额度（条/天）：动画化 / 制作決定 / 续作決定 这类官宣不受上面的
     # 配额限制，走这个独立额度入库（不消耗 news_daily_quota）。0 = 关闭豁免。
     # 豁免条目落 Article.is_major，额度按自然日累计（cron 每轮独立进程，靠库统计）。
@@ -166,6 +217,22 @@ class Settings(BaseSettings):
     # 停用的资讯源（逗号分隔 key，如 "gamersky,natalie_comic"）：
     # run_import_daily 直接跳过这些源——不改代码即可下线一个源。留空 = 全部启用。
     news_disabled_sources: str = ""
+    # 置顶抓取的源（逗号分隔 key，按书写顺序排在最前）：这些源先抓，再按类别优先级
+    # 抓其余源。2026-10-23 用户定稿：acgch（日本媒体的中文编译，覆盖动画/漫画/游戏，
+    # 标题规范）第一个抓，先把它当天的好稿收进来，再让日文源补类别。
+    news_priority_sources: str = "acgch"
+    # 需要过「ACGN 游戏准入闸门」的源（逗号分隔 key）：只有这些源产出的**游戏类**稿子
+    # 要过判定（见 scripts/news_filters.judge_game_admission），其余源与其余类别不受影响。
+    # 用于泛游戏媒体（4gamer 这类日更上百条、七成是普通游戏的源）。
+    news_game_filter_sources: str = "4gamer"
+    # 游戏白名单的人工补丁表（一行一个 IP，`|` 分隔别名）：补那些站内没有 ACG 标签、
+    # 也没有动画改编的 IP（宝可梦、二游等）。路径相对项目根目录。
+    news_game_whitelist_file: str = "data/game_ip_whitelist.txt"
+    # 综合动态里默认放行的主体分组（逗号分隔，顺序即优先级）：日系音乐 / 日偶 / VTuber。
+    # 分组的信号词表在 scripts/news_filters.COMPREHENSIVE_ALLOW_GROUPS——要细化规则
+    # 改那张表（或给某组加排除词），要临时关掉某组就把它从这里删掉。
+    # 留空 = 关闭整条放行规则（回到「按普通综合稿判」的旧行为）。
+    news_comprehensive_allow_groups: str = "anisong,idol,vtb,jmusic"
     # 日文源自动翻译（OpenAI 兼容接口）：NEWS_LLM_* 留空则回退 PERSONA_LLM_*，
     # 两边都没配就跳过日文源、只用中文源（不产出看不懂的日文条目）。
     news_llm_provider: str = ""

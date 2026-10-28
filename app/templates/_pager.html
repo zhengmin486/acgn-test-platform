@@ -1,9 +1,11 @@
 {# 分页控件：调用方传入 base（已拼好除 page 外的查询串，以 ? 或 &amp; 结尾）。
    frag 为可选锚点（如 #works-list），默认空串——不传时输出与从前完全一致，
-   只有显式传入的调用方才在链接末尾追加片段，用于翻页后把视口落到列表顶部。 #}
+   只有显式传入的调用方才在链接末尾追加片段，用于翻页后把视口落到列表顶部。
+   除「上一页 / 下一页」外，额外提供「跳至第 N 页」输入框，支持直接跳页，
+   不再只能一页页翻。 #}
 {% macro pager(base, page, total_pages, frag='') %}
 {% if total_pages > 1 %}
-<nav aria-label="分页">
+<nav aria-label="分页" class="d-flex flex-wrap align-items-center gap-2 my-2">
     <ul class="pagination pagination-sm mb-0">
         <li class="page-item{% if page <= 1 %} disabled{% endif %}">
             <a class="page-link" href="{{ base }}page={{ page - 1 }}{{ frag }}">上一页</a>
@@ -15,6 +17,40 @@
             <a class="page-link" href="{{ base }}page={{ page + 1 }}{{ frag }}">下一页</a>
         </li>
     </ul>
+    <span class="pager-jump d-inline-flex align-items-center gap-1">
+        <label class="small text-muted mb-0">跳至</label>
+        <input class="form-control form-control-sm pager-jump-input" type="number"
+               min="1" max="{{ total_pages }}" value="{{ page }}"
+               inputmode="numeric" aria-label="跳转到指定页"
+               style="width: 4.5rem;">
+        <span class="small text-muted mb-0">页</span>
+        <button type="button" class="btn btn-outline-secondary btn-sm pager-jump-btn"
+                data-pager-base="{{ base }}" data-pager-frag="{{ frag }}"
+                data-pager-max="{{ total_pages }}">跳转</button>
+    </span>
 </nav>
+<script>
+/* 跳页：点击「跳转」按 base + page=N + frag 直接跳转。base 在 Jinja 里以 ?/& 结尾，
+   拼接后天然合法；data 属性里的 &amp; 由浏览器自动还原为 &，无需额外处理。
+   用全局标志保证整页只绑定一次（多处调用 macro 也不会重复绑定）。 */
+if (!window.__pagerJumpInit) {
+    window.__pagerJumpInit = true;
+    document.addEventListener("click", function (e) {
+        var btn = e.target.closest && e.target.closest(".pager-jump-btn");
+        if (!btn) return;
+        var wrap = btn.closest(".pager-jump");
+        if (!wrap) return;
+        var inp = wrap.querySelector(".pager-jump-input");
+        var raw = parseInt(inp && inp.value, 10);
+        var max = parseInt(btn.getAttribute("data-pager-max"), 10);
+        var v = isNaN(raw) ? 1 : raw;
+        if (v < 1) v = 1;
+        if (!isNaN(max) && v > max) v = max;
+        var base = btn.getAttribute("data-pager-base") || "";
+        var frag = btn.getAttribute("data-pager-frag") || "";
+        window.location.href = base + "page=" + v + frag;
+    });
+}
+</script>
 {% endif %}
 {% endmacro %}

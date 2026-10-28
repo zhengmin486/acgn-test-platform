@@ -1,4 +1,8 @@
 {% extends "base_content.html" %}
+{% from "_work_card.html" import poster_card with context %}
+{# 制作公司页：该公司在库内的全部作品（按评分倒序）。
+   与 /cast/{id}、/creators/{name} 共用同一套海报卡网格；公司没有
+   per-work 职责数据（ ContentStudio 只有名称），故不传 persona 行。 #}
 {% block title %}{{ studio_name }}{% endblock %}
 {% block content %}
 <div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-3">
@@ -9,27 +13,13 @@
     <a class="btn btn-outline-secondary btn-sm" href="/contents">&larr; 全部作品</a>
 </div>
 
-<div class="row g-3">
+{% if contents %}
+<div class="works-grid works-grid--card">
     {% for item in contents %}
-    <div class="col-12 col-sm-6 col-lg-4">
-        <a class="work-card" href="/contents/{{ item.id }}">
-            <span class="work-cover" aria-hidden="true">{{ item.title[:1] }}</span>
-            <span class="work-card-body">
-                <span class="d-flex justify-content-between align-items-center gap-2">
-                    <span class="fw-semibold text-truncate">{{ item.title }}</span>
-                    <span class="badge detail-type-badge-sm">{{ type_labels.get(item.type, item.type) }}</span>
-                </span>
-                <span class="d-flex align-items-center gap-2 mt-1">
-                    <span class="small text-muted">{% if item.rating > 0 %}评分 {{ '%.1f' % item.rating }}{% else %}暂无评分{% endif %}</span>
-                </span>
-                <span class="small text-muted mt-1">
-                    {% if item.year %}{{ item.year }}{% endif %}
-                    {% if item.media %} · {{ item.media }}{% endif %}
-                    {% if item.episodes %} · {{ item.episodes }} 话{% endif %}
-                </span>
-            </span>
-        </a>
-    </div>
+    {{ poster_card(item, 'card') }}
     {% endfor %}
 </div>
+{% else %}
+<div class="detail-empty">库内还没有该制作公司的作品记录。</div>
+{% endif %}
 {% endblock %}

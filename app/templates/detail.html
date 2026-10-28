@@ -54,9 +54,20 @@
                 </div>
 
                 <div class="detail-stat-row">
-                    {% if content.rating > 0 %}
+                    {# 评分必须连**人数**一起判断：Bangumi 的 score 是原始均值，
+                       只有 1 个人打 10 分时它就是 10.0；源站对此显示「--」，
+                       本站保持同一口径（见 app/rating.py） #}
+                    {% set _rd = rating_display(content.rating, content.rating_count) %}
+                    {% if _rd == '--' %}
+                    <span class="detail-score-box" title="评分人数太少，暂不显示具体分数">
+                        <span class="detail-score">--</span>
+                        <span class="detail-score-meta">
+                            <span class="detail-score-unit">评分人数不足</span>
+                        </span>
+                    </span>
+                    {% elif _rd %}
                     <span class="detail-score-box">
-                        <span class="detail-score">{{ '%.1f' % content.rating }}</span>
+                        <span class="detail-score">{{ _rd }}</span>
                         <span class="detail-score-meta">
                             <span class="detail-stars" aria-hidden="true">{% for i in range(1, 6) %}<span class="{{ 'star-on' if i <= star_count else 'star-off' }}">★</span>{% endfor %}</span>
                             <span class="detail-score-unit">满分 10 分</span>
@@ -152,6 +163,8 @@
                     </span>
                     {% endif %}
         </div>
+        {# 关闭 .detail-hero-grid：操作栏是栅格里跨满整行的最后一行，必须留在栅格内 #}
+        </div>
     </div>
 </section>
 
@@ -230,11 +243,11 @@
                     </dd>
                 </div>
                 {% endif %}
-                {% if content_entity_roles %}
+                {% if content_org_roles %}
                 <div class="detail-fact-row">
                     <dt>关系</dt>
                     <dd class="detail-relations">
-                        {% for role, names in content_entity_roles.items() %}
+                        {% for role, names in content_org_roles.items() %}
                         <span class="detail-relation-row">
                             <span class="detail-spec-k">{{ role }}</span>
                             <span class="detail-relation-names">
@@ -272,16 +285,18 @@
             </div>
             {% endif %}
 
-            {% if not content_tags and not content_studios and not content_entity_roles and not content_cast and not content_credits and not content_facts %}
+            {% if not content_tags and not content_studios and not content_org_roles and not content_cast and not content_staff_main and not content_facts %}
             <p class="detail-facts-empty text-muted small mb-0">暂无其他标签数据</p>
             {% endif %}
         </div>
 
-        {# 右：角色与声优 / Staff #}
+        {# 右：角色与声优 / Staff。
+           数据口径（2026-10-22）：主创（导演 / 系列构成 / 音乐 / 人物设定 …）
+           从「基本信息·关系」搬到这里，按职位排出完整 Staff 表；人名有实体页时
+           仍是 /creators/{name} 链接，标签反查能力不变。
+           角色按 Bangumi 的 relation（主角 → 配角 → 旁白 → 闲角）排序，
+           不再被接口返回顺序里的旁白 / 闲角挤掉主角。 #}
         <div class="detail-meta-card detail-meta-card--people">
-            {% set main_credits = content_credits | selectattr('tier', 'equalto', 'main') | list %}
-            {% set long_credits = content_credits | selectattr('tier', 'equalto', 'long') | list %}
-
             {% if content_cast %}
             <section class="detail-people detail-people--cast">
                 <div class="detail-people-head">
@@ -292,7 +307,7 @@
                 </div>
                 <div class="detail-people-wrap">
                     <ul class="detail-people-rail" data-credits-rail>
-                        {% for item in content_cast[:6] %}
+                        {% for item in content_cast[:8] %}
                         {# 有剧照才留图位；现在库里没有人物图，就走纯文字卡，避免大片空色块 #}
                         <li class="detail-person-card{% if item.image_url %} detail-person-card--photo{% endif %}">
                             {% if item.image_url %}
@@ -301,6 +316,7 @@
                             </span>
                             {% endif %}
                             <span class="detail-person-name">{{ item.character }}</span>
+                            {% if item.relation %}<span class="detail-person-tag">{{ item.relation }}</span>{% endif %}
                             {% if item.person_id %}
                             <a class="detail-person-role" href="/cast/{{ item.person_id }}">CV {{ item.actor }}</a>
                             {% else %}
@@ -315,7 +331,7 @@
                     <div class="detail-cast-grid">
                         {% for item in content_cast %}
                         <span class="detail-cast-cell">
-                            <span class="detail-cast-char">{{ item.character }}</span>
+                            <span class="detail-cast-char">{{ item.character }}{% if item.relation %} <span class="detail-cast-tag">{{ item.relation }}</span>{% endif %}</span>
                             {% if item.person_id %}
                             <a class="detail-cast-actor" href="/cast/{{ item.person_id }}">{{ item.actor }}</a>
                             {% else %}
@@ -326,10 +342,9 @@
                     </div>
                 </div>
             </section>
-
             {% endif %}
 
-            {% if main_credits or long_credits %}
+            {% if content_staff_main or content_staff_long %}
             <section class="detail-people detail-people--staff">
                 <div class="detail-people-head">
                     <h3 class="detail-people-title">Staff</h3>
@@ -339,31 +354,43 @@
                 </div>
                 <div class="detail-people-wrap">
                     <ul class="detail-people-rail" data-credits-rail>
-                        {% for item in main_credits[:6] %}
-                        <li class="detail-person-card{% if item.image_url %} detail-person-card--photo{% endif %}">
-                            {% if item.image_url %}
-                            <span class="detail-person-photo">
-                                <img src="{{ thumb_src(item.image_url) }}" alt="" loading="lazy" width="300" height="400" decoding="async">
-                            </span>
-                            {% endif %}
-                            <span class="detail-person-name">{{ item.name }}</span>
+                        {% for item in content_staff_main[:8] %}
+                        <li class="detail-person-card">
+                            <span class="detail-person-name">{% if item.name in content_people_entities %}<a class="detail-person-link" href="/creators/{{ item.name|urlencode }}">{{ item.name }}</a>{% else %}{{ item.name }}{% endif %}</span>
                             <span class="detail-person-role">{{ item.role }}</span>
                         </li>
                         {% endfor %}
                     </ul>
                 </div>
                 <div class="detail-people-all" id="staff-all" hidden>
+                    {# 展开后的排布与角色区一致：紧凑网格，每格「姓名 + 职位」两行，
+                       一行铺满多列；不再是「职位 | 姓名」的长列表（19~26 行走不完）。 #}
                     <p class="detail-credit-group">制作人员</p>
-                    <div class="detail-credit-grid">
-                        {% for item in main_credits %}
-                        <span class="detail-credit-cell"><span class="detail-credit-role">{{ item.role }}</span><span class="detail-credit-name">{{ item.name }}</span></span>
-                        {% endfor %}
-                        {% for item in long_credits %}
-                        <span class="detail-credit-cell"><span class="detail-credit-role">{{ item.role }}</span><span class="detail-credit-name">{{ item.name }}</span></span>
+                    <div class="detail-staff-grid">
+                        {% for item in content_staff_main %}
+                        <span class="detail-staff-cell">
+                            <span class="detail-staff-name">{% if item.name in content_people_entities %}<a href="/creators/{{ item.name|urlencode }}">{{ item.name }}</a>{% else %}{{ item.name }}{% endif %}</span>
+                            <span class="detail-staff-role">{{ item.role }}</span>
+                        </span>
                         {% endfor %}
                     </div>
+                    {% if content_staff_long %}
+                    <p class="detail-credit-group">制作执行</p>
+                    <div class="detail-staff-grid">
+                        {% for item in content_staff_long %}
+                        <span class="detail-staff-cell">
+                            <span class="detail-staff-name">{% if item.name in content_people_entities %}<a href="/creators/{{ item.name|urlencode }}">{{ item.name }}</a>{% else %}{{ item.name }}{% endif %}</span>
+                            <span class="detail-staff-role">{{ item.role }}</span>
+                        </span>
+                        {% endfor %}
+                    </div>
+                    {% endif %}
                 </div>
             </section>
+            {% endif %}
+
+            {% if not content_cast and not content_staff_main and not content_staff_long %}
+            <p class="detail-facts-empty text-muted small mb-0">暂无角色与制作人员数据</p>
             {% endif %}
         </div>
     </div>
@@ -403,7 +430,7 @@
                             <span class="detail-badge-rel">{{ series_relation_labels[rel.id] }}</span>
                             {% endif %}
                             {% if rel.year %}<span class="detail-series-sub">{{ rel.year }}</span>{% endif %}
-                            {% if rel.rating > 0 %}<span class="detail-series-sub">评分 {{ '%.1f' % rel.rating }}</span>{% endif %}
+                            {% set _rd = rating_display(rel.rating, rel.rating_count) %}{% if _rd == '--' %}<span class="detail-series-sub" title="评分人数太少，暂不显示">评分 --</span>{% elif _rd %}<span class="detail-series-sub">评分 {{ _rd }}</span>{% endif %}
                         </span>
                     </span>
                 </a>
@@ -473,7 +500,7 @@
                 {% endif %}
                 {# 评分放到封面角标：窄卡片里「类型 · 年份 · 评分」一行放不下会折行，
                    角标既省一行又更容易扫到探索价值 #}
-                {% if rel.rating > 0 %}<span class="detail-poster-score">{{ '%.1f' % rel.rating }}</span>{% endif %}
+                {% set _rd = rating_display(rel.rating, rel.rating_count) %}{% if _rd == '--' %}<span class="detail-poster-score" title="评分人数太少，暂不显示">--</span>{% elif _rd %}<span class="detail-poster-score">{{ _rd }}</span>{% endif %}
             </span>
             <span class="detail-poster-title">{{ rel.title }}</span>
             <span class="detail-poster-meta">{{ type_labels.get(rel.type, rel.type) }}{% if rel.year %} · {{ rel.year }}{% endif %}</span>

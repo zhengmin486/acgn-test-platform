@@ -455,6 +455,22 @@ class TestEntityCrud:
         finally:
             db.close()
 
+    def test_list_entity_contents_with_roles(self, factory):
+        _recognized_factory(factory)
+        db = factory()
+        try:
+            entity = crud.get_entity_by_name(db, "晓枣")
+            # 同一部作品多个角色：作品只出现一次，职责合并（顺序不设断言）
+            crud.add_content_entity_link(db, 1, "晓枣", "系列构成")
+            rows = crud.list_entity_contents_with_roles(db, entity.id)
+            assert [content.id for content, _roles in rows] == [1]
+            assert sorted(rows[0][1]) == sorted(["原作", "系列构成"])
+            # 未关联实体的作品不会出现（内连接）
+            other = crud.get_entity_by_name(db, "动画工房")
+            assert [content.id for content, _ in crud.list_entity_contents_with_roles(db, other.id)] == [1]
+        finally:
+            db.close()
+
 
 class TestSeriesCrud:
     def test_set_and_clear_series(self, factory):
@@ -817,6 +833,10 @@ class TestCreatorPages:
         assert resp.status_code == 200
         assert "为美好的世界献上祝福 第二季" in resp.text
         assert "/contents?creator=" in resp.text
+        # 每张卡显示该实体在这部作品里的职责（persona 行，替代摘要）
+        assert "work-card--card" in resp.text
+        assert "work-card-persona" in resp.text
+        assert "原作" in resp.text
 
     def test_series_detail(self, page_env):
         _recognized_factory(page_env.session_factory)
@@ -892,6 +912,54 @@ class TestManageEntitiesPage:
             assert crud.count_content_entity_links(db, 3) == 0
         finally:
             db.close()
+
+    def test_delete_links_batch(self, page_env):
+        """关联也能多选删除：一次提交多个 link_id，全部删掉并回显条数。"""
+        login_as_admin(page_env.client)
+        for name, role in (("批量作者甲", "原作"), ("批量作者乙", "系列构成")):
+            resp = page_env.client.post(
+                "/manage/entities/link/add",
+                data={"content_id": 3, "name": name, "role": role},
+            )
+            assert resp.status_code == 303
+        db = page_env.session_factory()
+        try:
+            link_ids = [row[0] for row in crud.list_content_entity_links(db, 3)]
+            assert len(link_ids) == 2
+        finally:
+            db.close()
+
+        resp = page_env.client.post(
+            "/manage/entities/link/delete",
+            data={"link_id": [str(link_ids[0]), str(link_ids[1])]},
+        )
+        assert resp.status_code == 303
+        assert "note=removed" in resp.headers["location"]
+        assert "deleted=2" in resp.headers["location"]
+        db = page_env.session_factory()
+        try:
+            assert crud.count_content_entity_links(db, 3) == 0
+        finally:
+            db.close()
+
+    def test_delete_links_without_selection_is_missing(self, page_env):
+        """未勾选任何关联：不删任何东西，回显「关联不存在」。"""
+        login_as_admin(page_env.client)
+        resp = page_env.client.post("/manage/entities/link/delete", data={})
+        assert resp.status_code == 303
+        assert "note=link_missing" in resp.headers["location"]
+
+    def test_page_renders_pickable_chips(self, page_env):
+        """关联卡片支持勾选：每条关联有 chip 标记与勾选框，删除带二次确认。"""
+        _recognized_factory(page_env.session_factory)
+        login_as_admin(page_env.client)
+        body = page_env.client.get("/manage/entities").text
+        assert "data-chip-check" in body
+        assert 'form="bulk-link-delete"' in body
+        assert "data-bulk-submit" in body
+        # 单条删除的 χ 按钮也要经过确认弹窗
+        assert "data-confirm=" in body
+        assert 'data-label="作者/公司关联"' in body
 
     def test_add_link_empty_name_is_bad_input(self, page_env):
         login_as_admin(page_env.client)

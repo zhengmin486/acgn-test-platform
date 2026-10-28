@@ -10,20 +10,26 @@
   * API ：未登录 -> 401；已登录但角色不足 -> 403（均为 JSON 响应）；
 - 仅「测试管理平台」（页面 /testcases、/runs、/batches、/manage/sync/runs 与
   对应的测试管理 API）需要管理员及以上；内容平台对所有人（含未登录）开放。
-- **注册入口只创建普通用户（user）**：角色由服务端常量决定，表单与查询串中
+- **注册角色只由服务端决定，绝不取信前端**：普通用户注册不需要邀请码（默认即开放注册）；若填了**管理员邀请码**（仅站长可发放），注册出的账号即为 ``admin``。表单 / 查询串里的任何 role 值一律忽略，角色只来自数据库里那张邀请码的记录。站长（owner）不通过此通道发放，仍走 scripts/create_user.py / 角色管理页。
   出现的任何 role 值一律忽略，管理员账号只能通过 scripts/create_user.py 创建。
-- **邮箱验证可插拔**：注册带邮箱的账号后不直接登录，需点验证链接；未配置 SMTP 时
-  不发真实邮件，链接可在待验证页面/管理员页面取得（详见 app/mailer.py）。
+- **注册前验证邮箱**：注册流程为「填邮箱 -> 收 6 位验证码 -> 填验证码 -> 设密码
+  -> 建号」，验证码在服务端签发与校验（入库只存哈希，校验通过立即失效），
+  因此新账号建好即「邮箱已验证」并可登录，不再有待验证中间态。
+  邮件经 Gmail SMTP 发送（详见 app/mailer.py）；未配置 SMTP 时验证码只显示在
+  注册页（本地联调），配置后发送失败一律如实回显、不伪造成功。
   关闭 ``email_verification_enabled`` 即完全退回「注册即登录」的旧行为。
+- **邀请码可选，且只决定「是否管理员」**：留空直接注册为普通用户；填了普通用户
+  邀请码仍是普通用户；只有管理员邀请码才会注册成管理员。``registration_invite_required``
+  置 True 可退回「必须填邀请码」的旧行为。
 """
 
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from urllib.parse import quote
 
 from fastapi import APIRouter, Form, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -366,18 +372,36 @@ def logout_via_link() -> RedirectResponse:
 
 def _register_page(request: Request, *, next_url: str, error: str = "",
                    username: str = "", email: str = "", invite_code: str = "",
-                   status_code: int = 200) -> HTMLResponse:
+                   code_sent: bool = False, notice: str = "", dev_code: str = "",
+                   cooldown: int = 0, status_code: int = 200,
+                   invite_role: str = "") -> HTMLResponse:
+    """渲染注册页。
+
+    ``code_sent=True`` 表示验证码已签发，页面切到「填验证码 + 设密码」阶段；
+    ``dev_code`` **只在完全没有配置邮件服务时**由路由层传入（本地联调用）——
+    一旦配置了 SMTP，哪怕发送失败也不会出现，避免任何人靠页面白拿验证码。
+    ``invite_role`` 为已校验邀请码登记的目标角色（'admin' 表示管理员邀请码），
+    用于页面提示「将以管理员身份注册」；空串表示普通注册（或邀请码尚未校验）。
+    """
     return templates.TemplateResponse(
         request=request,
         name="register.html",
         context={
             "next": next_url,
             "error": error,
+            "notice": notice,
             "username": username,
             "email": email,
             "invite_code": invite_code,
-            "invite_required": settings.registration_invite_only,
+            # 邀请码：默认展示输入框（可留空），只有 open 模式才完全隐藏。
+            "invite_field_visible": settings.registration_mode.strip().lower() != "open",
+            "invite_required": settings.registration_invite_required,
             "require_email": settings.email_verification_enabled,
+            "code_sent": code_sent,
+            "dev_code": dev_code,
+            "cooldown": cooldown,
+            "invite_role": invite_role,
+            "code_ttl_minutes": max(1, settings.email_code_ttl_seconds // 60),
             "max_email_length": MAX_EMAIL_LENGTH,
             "min_username_length": MIN_USERNAME_LENGTH,
             "max_username_length": MAX_USERNAME_LENGTH,
@@ -386,6 +410,43 @@ def _register_page(request: Request, *, next_url: str, error: str = "",
         },
         status_code=status_code,
     )
+
+
+def _client_ip(request: Request) -> str:
+    """取请求来源 IP（反代后取 X-Forwarded-For 首段），用于发码频率限制。"""
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else ""
+
+
+def resolve_registration_role(db: Session, invite: str) -> tuple[str, str]:
+    """根据邀请码解析注册角色：返回 ``(角色, 错误信息)``，错误信息空串表示通过。
+
+    - open 模式（``registration_invite_only=False``）：完全不碰邀请码，恒为普通用户；
+    - invite 模式：留空且非必填 -> 普通用户（**普通用户注册不需要邀请码**）；
+      留空但必填 -> 报错；填了 -> 校验码，有效则取码内 ``role``（管理员邀请码即 admin），
+      无效则报错。角色只来自数据库里那张邀请码的记录，绝不信任前端传入值。
+    """
+    if not settings.registration_invite_only:
+        return ROLE_USER, ""
+    invite = (invite or "").strip()
+    if not invite:
+        if settings.registration_invite_required:
+            return "", "请填写邀请码"
+        return ROLE_USER, ""
+    row, invite_error = crud.check_invite_code(db, invite)
+    if invite_error:
+        return "", invite_error
+    return row.role, ""
+
+
+def _consume_optional_invite(db: Session, invite: str, account) -> str:
+    """建号后消费邀请码（只在 invite 模式且填了码时消费）；失败由调用方删号回显。"""
+    if not invite or not settings.registration_invite_only:
+        return ""
+    consumed, consume_error = crud.consume_invite_code(db, invite, account.id)
+    return "" if consumed else consume_error
 
 
 # ---------- 邮箱验证 ----------
@@ -526,6 +587,116 @@ def register_page(
     return _register_page(request, next_url=target)
 
 
+@router.post("/register/code", response_class=HTMLResponse)
+def register_send_code(
+    request: Request,
+    db: DbSession,
+    email: str = Form(""),
+    username: str = Form(""),
+    invite_code: str = Form(""),
+    next_url: str = Form("/", alias="next"),
+):
+    """注册第一步：给邮箱发一枚 6 位数字验证码（服务端签发，入库只存哈希）。
+
+    - 邮箱格式、是否已注册、可选邀请码都在**发码前**校验，避免白扔邮件；
+    - 冷却（默认 60 秒）与邮箱 / IP 维度的频率限制在此拦截；
+    - **发信失败一律如实回显**（连接失败 / 认证失败 / 发送失败），不伪造成功，
+      也不在页面上显示验证码——只有「压根没配邮件服务」时才显示（本地联调）。
+    - 出口分两路（只看请求头，业务分支完全一样）：
+      * 普通表单提交（无 JS / fetch 失败回退）→ 整页重渲染；
+      * 前端带 ``X-Requested-With: fetch`` → 只回轻量 JSON。
+      注册页已改成「先填账号信息，再点发送验证码」，整页刷新会把已经填好的用户名
+      清掉；所以无 JS 回退路径也要把 username 回填（setdefault 一处统一补，
+      免得每个 return 都记得带）。密码一律不回填——不把明文塞进 HTML 响应。
+    """
+    target = safe_next_url(next_url)
+    if not settings.email_verification_enabled:
+        return RedirectResponse(
+            f"/register?next={quote(target, safe='/')}", status_code=303
+        )
+    typed_name = (username or "").strip()
+
+    def respond(**kw):
+        """发码结果统一出口：包一层是为了「同一份业务分支」既能出 HTML 也能出 JSON。"""
+        kw.setdefault("username", typed_name)
+        if request.headers.get("x-requested-with", "").strip().lower() != "fetch":
+            return _register_page(request, **kw)
+        return JSONResponse(
+            {
+                "ok": not kw.get("error") and bool(kw.get("code_sent")),
+                "error": kw.get("error", ""),
+                "notice": kw.get("notice", ""),
+                "dev_code": kw.get("dev_code", ""),
+                "cooldown": int(kw.get("cooldown") or 0),
+                "code_sent": bool(kw.get("code_sent")),
+            },
+            status_code=kw.get("status_code", 200),
+        )
+
+    invite = (invite_code or "").strip()
+    address, mail_error = validate_email(email)
+    if mail_error:
+        return respond(
+            next_url=target, error=mail_error,
+            email=email, invite_code=invite, status_code=400,
+        )
+    if crud.get_user_by_email(db, address) is not None:
+        return respond(
+            next_url=target, error=f"邮箱已被注册：{address}",
+            email=address, invite_code=invite, status_code=400,
+        )
+    invite_error = ""
+    role, invite_error = resolve_registration_role(db, invite)
+    if invite_error:
+        return respond(
+            next_url=target, error=invite_error,
+            email=address, invite_code=invite, status_code=400,
+        )
+
+    remaining = crud.email_code_cooldown_remaining(db, address)
+    if remaining > 0:
+        return respond(
+            next_url=target,
+            error=f"发送过于频繁，请 {remaining} 秒后再试",
+            email=address, invite_code=invite,
+            code_sent=True, cooldown=remaining, status_code=400,
+        )
+    ip = _client_ip(request)
+    blocked = crud.email_code_send_blocked_reason(db, address, ip)
+    if blocked:
+        return respond(
+            next_url=target, error=blocked,
+            email=address, invite_code=invite, status_code=400,
+        )
+
+    code = crud.issue_email_code(db, address, ip=ip)
+    delivered, detail = mailer.send_registration_code(address, code)
+    if not delivered and mailer.smtp_enabled():
+        # 配了邮件服务却发不出去：如实报错，本次不发码（验证码不出现在页面上）。
+        return respond(
+            next_url=target, error=detail,
+            email=address, invite_code=invite, status_code=400,
+        )
+    if not delivered and not settings.email_code_dev_fallback:
+        # 没配邮件服务、又不允许把验证码显示在页面上：注册暂时走不通，
+        # 宁可挡住也不泄露验证码（线上在补 SMTP 凭据之前就是这个状态）。
+        return respond(
+            next_url=target,
+            error="当前未配置邮件服务，暂时无法发送验证码，请联系管理员",
+            email=address, invite_code=invite, status_code=400,
+        )
+    return respond(
+        next_url=target,
+        email=address,
+        invite_code=invite,
+        code_sent=True,
+        notice=detail,
+        dev_code="" if delivered else code,
+        invite_role=role,
+        cooldown=settings.email_resend_cooldown_seconds,
+    )
+
+
 @router.post("/register", response_class=HTMLResponse)
 def register_submit(
     request: Request,
@@ -534,119 +705,154 @@ def register_submit(
     password: str = Form(""),
     confirm: str = Form(""),
     email: str = Form(""),
+    code: str = Form(""),
     invite_code: str = Form(""),
     next_url: str = Form("/", alias="next"),
 ):
-    """注册普通用户账号。
+    """注册账号（第二步：校验验证码 + 设置密码 + 建号）。
 
-    - 角色恒为 **普通用户**（`REGISTRATION_ROLE`），忽略表单里的任何 role 值；
-    - 用户名/邮箱被占用、参数不合法一律回显原因（400），不抛异常；
-    - **邀请码模式（REGISTRATION_MODE=invite，默认）**：必须提供有效邀请码，
-      注册成功后原子消费（条件 UPDATE 兜并发，失败则删除刚建的账号）；
-      模式为 open 时完全不校验邀请码，行为退回公开注册；
-    - **启用邮箱验证时注册后不签发会话**，改为跳转待验证页，完成验证后才能登录；
-      功能关闭（或该账号无邮箱）时沿用「注册即登录」的旧行为。
+    - 角色由邀请码决定：填了**管理员邀请码**即注册成管理员，普通邀请码 / 不填
+      则注册成普通用户；前端传的任何 role 值一律不信，只认数据库里邀请码记录的 role；
+    - **邮箱验证码在服务端校验**：验证码与邮箱绑定、过期 / 输错超限 / 已用过
+      一律拒绝，校验通过立即失效；只有这一步过了才建号，因此新账号建好即
+      「邮箱已验证」，可以直接登录（不再有待验证中间态）；
+    - **邀请码可选**：填了才校验并原子消费（条件 UPDATE 兜并发，失败删号回显）；
+      留空也能注册（普通用户）；
+    - 用户名/邮箱被占用、参数不合法一律回显原因（400），不抛异常。
     """
     target = safe_next_url(next_url)
-    address = crud.normalize_email(email)
-    code = (invite_code or "").strip()
-    # 传入原始输入（可能为空串），由 validate_registration 判断是否校验邮箱。
-    name, error = validate_registration(username, password, confirm, email)
+    invite = (invite_code or "").strip()
+    if not settings.email_verification_enabled:
+        return _register_without_verification(
+            request, db, username=username, password=password, confirm=confirm,
+            email=email, invite=invite, next_url=target,
+        )
+
+    address, mail_error = validate_email(email)
+    if mail_error:
+        return _register_page(
+            request, next_url=target, error=mail_error,
+            email=email, invite_code=invite, status_code=400,
+        )
+    if crud.get_user_by_email(db, address) is not None:
+        return _register_page(
+            request, next_url=target, error=f"邮箱已被注册：{address}",
+            email=address, invite_code=invite, status_code=400,
+        )
+    invite_error = ""
+    role, invite_error = resolve_registration_role(db, invite)
+    if invite_error:
+        return _register_page(
+            request, next_url=target, error=invite_error,
+            email=address, invite_code=invite, status_code=400,
+        )
+    # 用户名 / 密码规则先查（纯格式校验，不碰库），避免手滑打错就白白烧掉验证码。
+    name, error = validate_registration(username, password, confirm, address)
     if error:
         return _register_page(
-            request,
-            next_url=target,
-            error=error,
-            username=name,
-            email=email,
-            invite_code=code,
-            status_code=400,
+            request, next_url=target, error=error, username=name,
+            email=address, invite_code=invite, code_sent=True, status_code=400,
         )
-    # 邀请码先校验后消费：校验只读、给出准确原因；消费在建号之后条件 UPDATE。
-    if settings.registration_invite_only:
-        _invite, invite_error = crud.check_invite_code(db, code)
-        if invite_error:
-            return _register_page(
-                request,
-                next_url=target,
-                error=invite_error,
-                username=name,
-                email=email,
-                invite_code=code,
-                status_code=400,
-            )
+
+    # 服务端校验验证码：通过即消费（同一枚码不能完成第二次注册）。
+    verified, code_error = crud.verify_email_code(db, address, code)
+    if not verified:
+        return _register_page(
+            request, next_url=target, error=code_error, username=name,
+            email=address, invite_code=invite, code_sent=True, status_code=400,
+        )
+
     try:
+        # 邮箱已由验证码证明可用，建号即已验证（require_verification=False）。
+        # role 来自邀请码记录：普通邀请码 / 无码 -> 普通用户；管理员邀请码 -> 管理员。
         account = crud.create_user(
             db,
             username=name,
             password=password,
-            role=REGISTRATION_ROLE,
+            role=role,
             email=address,
+            require_verification=False,
         )
     except IntegrityError:
         # 并发注册同一用户名/邮箱时由唯一索引拦截；回滚后区分提示，保持会话可用。
         db.rollback()
-        if address and crud.get_user_by_email(db, address) is not None:
+        if crud.get_user_by_email(db, address) is not None:
             message = f"邮箱已被注册：{address}"
         else:
             message = f"用户名已被注册：{name}"
         return _register_page(
-            request,
-            next_url=target,
-            error=message,
-            username=name,
-            email=email,
-            invite_code=code,
-            status_code=400,
+            request, next_url=target, error=message, username=name,
+            email=address, invite_code=invite, code_sent=True, status_code=400,
         )
     except ValueError as exc:  # 数据层校验（空用户名 / 非法角色 / 重名 / 邮箱重名）
         return _register_page(
-            request,
-            next_url=target,
-            error=str(exc),
-            username=name,
-            email=email,
-            invite_code=code,
-            status_code=400,
+            request, next_url=target, error=str(exc), username=name,
+            email=address, invite_code=invite, code_sent=True, status_code=400,
         )
     except Exception as exc:
         # 与项目其它管理操作一致：意外错误也只回显原因，不抛 500、不影响其它功能。
         return _register_page(
-            request,
-            next_url=target,
-            error=f"注册失败：{exc}",
-            username=name,
-            email=email,
-            invite_code=code,
-            status_code=400,
+            request, next_url=target, error=f"注册失败：{exc}", username=name,
+            email=address, invite_code=invite, code_sent=True, status_code=400,
         )
 
-    if settings.registration_invite_only:
-        # 并发兜底：同一邀请码同时只放行一个账号，消费失败则删号回显。
-        consumed, consume_error = crud.consume_invite_code(db, code, account.id)
-        if not consumed:
-            crud.delete_user(db, account)
-            return _register_page(
-                request,
-                next_url=target,
-                error=consume_error,
-                username=name,
-                email=email,
-                invite_code=code,
-                status_code=400,
-            )
+    # 邮箱已经过验证码证明，补上验证时间（建号时不知道「何时验证」，这里补齐）。
+    crud.mark_email_verified(db, account)
+    consume_error = _consume_optional_invite(db, invite, account)
+    if consume_error:
+        crud.delete_user(db, account)
+        return _register_page(
+            request, next_url=target, error=consume_error, username=name,
+            email=address, invite_code=invite, code_sent=True, status_code=400,
+        )
+    return _session_redirect(target, account)
 
-    if not settings.email_verification_enabled or not account.email:
-        # 关闭验证或历史账号（无邮箱）：保持注册即登录的旧行为。
-        return _session_redirect(target, account)
 
-    delivered, _detail = _send_verification(request, db, account)
-    response = RedirectResponse(
-        f"/verify/pending?sent={1 if delivered else 0}&next={quote(target, safe='/')}",
-        status_code=303,
-    )
-    _set_pending_cookie(response, account.id)
-    return response
+def _register_without_verification(
+    request: Request,
+    db: Session,
+    *,
+    username: str,
+    password: str,
+    confirm: str,
+    email: str,
+    invite: str,
+    next_url: str,
+) -> HTMLResponse:
+    """邮箱验证总开关关闭时的旧行为：填表即建号并登录（不发验证码）。"""
+    address = crud.normalize_email(email)
+    name, error = validate_registration(username, password, confirm)
+    if error:
+        return _register_page(
+            request, next_url=next_url, error=error, username=name,
+            email=email, invite_code=invite, status_code=400,
+        )
+    role, invite_error = resolve_registration_role(db, invite)
+    if invite_error:
+        return _register_page(
+            request, next_url=next_url, error=invite_error, username=name,
+            email=email, invite_code=invite, status_code=400,
+        )
+    try:
+        account = crud.create_user(
+            db, username=name, password=password,
+            role=role, email=address,
+        )
+    except (IntegrityError, ValueError) as exc:
+        db.rollback()
+        message = str(exc) if isinstance(exc, ValueError) else f"用户名已被注册：{name}"
+        return _register_page(
+            request, next_url=next_url, error=message, username=name,
+            email=email, invite_code=invite, status_code=400,
+        )
+    consume_error = _consume_optional_invite(db, invite, account)
+    if consume_error:
+        crud.delete_user(db, account)
+        return _register_page(
+            request, next_url=next_url, error=consume_error, username=name,
+            email=email, invite_code=invite, status_code=400,
+        )
+    return _session_redirect(next_url, account)
 
 
 @router.get("/verify/pending", response_class=HTMLResponse)

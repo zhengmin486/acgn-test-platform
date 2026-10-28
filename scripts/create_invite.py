@@ -50,7 +50,8 @@ def _list_codes(db) -> None:
             else "未使用"
         )
         note = f"  备注={row.note}" if row.note else ""
-        print(f"  {row.code}  [{status}]  有效期至={expires}  {used}{note}")
+        role_tag = "管理员" if row.role == "admin" else "普通用户"
+        print(f"  {row.code}  [{status}]  {role_tag}  有效期至={expires}  {used}{note}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -62,6 +63,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--days", type=int, default=0,
                         help="有效期天数，0 表示永不过期（默认 0）")
     parser.add_argument("--note", default="", help="备注：发给谁 / 用途，便于日后核对")
+    parser.add_argument("--role", choices=["user", "admin"], default="user",
+                        help="邀请码登记的目标角色：user=普通用户（默认），admin=管理员"
+                             "（注册即用管理员身份；管理页仅站长可发，本脚本由服务端运行，可直接指定）")
     parser.add_argument("--list", action="store_true", help="列出全部邀请码后退出")
     parser.add_argument("--database-url", default=settings.database_url,
                         help="数据库连接串（默认取配置 / .env）")
@@ -82,14 +86,15 @@ def main(argv: list[str] | None = None) -> int:
         )
         try:
             codes = crud.create_invite_codes(
-                db, count=args.count, expires_at=expires_at, note=args.note
+                db, count=args.count, expires_at=expires_at, note=args.note,
+                role=args.role,
             )
         except (ValueError, RuntimeError) as exc:
             print(f"生成失败：{exc}")
             return 1
 
         print(f"注册模式：{settings.registration_mode}"
-              f"（{'需要邀请码' if settings.registration_invite_only else '公开注册，邀请码暂不参与校验'}）")
+              f"（{'必须填写邀请码' if settings.registration_invite_required else '邀请码可选，留空也能注册'}）")
         print(f"已生成 {len(codes)} 个邀请码：")
         for row in codes:
             expires = row.expires_at.strftime("%Y-%m-%d %H:%M") if row.expires_at else "永不过期"

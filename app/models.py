@@ -40,6 +40,9 @@ class Content(Base):
     type: Mapped[str] = mapped_column(String(20), nullable=False)
     summary: Mapped[str] = mapped_column(Text, nullable=False)
     rating: Mapped[float] = mapped_column(Float, nullable=False)
+    # 评分人数（Bangumi 的 rating.total），用于判断评分有没有参考意义。
+    # 可空：NULL 表示「没问到人数」，和 0 不同；0 是问到了、确实没人打分。
+    rating_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     bangumi_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     source_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     image_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
@@ -134,6 +137,9 @@ class ContentCast(Base):
 
     Bangumi 的 ``actors`` 数组第一位即原版配音（日配），后续是中配 / 英配等，
     因此取第一位即可，无需语言字段。
+
+    ``relation`` 存 Bangumi 的角色重要度（主角 / 配角 / 客串 / 旁白 / 闲角）：
+    接口返回顺序不是重要度序，排序由它决定，详情页也据此出小标注。
     """
 
     __tablename__ = "content_cast"
@@ -152,6 +158,7 @@ class ContentCast(Base):
     character_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     person_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     actor: Mapped[str] = mapped_column(String(100), nullable=False)
+    relation: Mapped[str | None] = mapped_column(String(10), nullable=True)
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
 
@@ -383,6 +390,11 @@ class AnimeSchedule(Base):
       cn_movie=大陆引进剧场版；源站 Atom 条目名（新番卫星观测站 / Movie-OVA-SP /
       内地上映动画电影）在入库时统一改写为本站点名；
     - bangumi_subject_id / content_id：档期与作品库的关联（见下方列注释）；
+    - air_date：解析出的播出/上映 ISO 日期（YYYY-MM-DD），特殊分类按时间分组
+      排版与排序的依据；只有季度描述（如 2027冬）时为 NULL，原文留在
+      broadcast_note，页面按原文归组；
+    - box_office：内地总票房（仅大陆引进剧场版 /movie/ 页有），源站原文，
+      如「内地总票房￥6.78亿」；
     - 同步只新增/更新本表记录，不触碰 Content、Article 等其他模块数据。
     """
 
@@ -403,6 +415,10 @@ class AnimeSchedule(Base):
     weekday: Mapped[int | None] = mapped_column(Integer, nullable=True)
     broadcast_time: Mapped[str | None] = mapped_column(String(20), nullable=True)
     broadcast_note: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # 特殊分类按时间分组排版：air_date 为解析出的 ISO 日期（YYYY-MM-DD），
+    # NULL 时页面回退用 broadcast_note 原文（如「2027冬」）归组。
+    air_date: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    box_office: Mapped[str | None] = mapped_column(String(50), nullable=True)
     work_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
     work_tags: Mapped[str | None] = mapped_column(String(200), nullable=True)
     image_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
@@ -434,6 +450,8 @@ class AnimeSchedule(Base):
             "weekday": self.weekday,
             "broadcast_time": self.broadcast_time,
             "broadcast_note": self.broadcast_note,
+            "air_date": self.air_date,
+            "box_office": self.box_office,
             "work_type": self.work_type,
             "work_tags": self.work_tags,
             "image_url": self.image_url,
@@ -578,6 +596,55 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
 
 
+class OAuthTicket(Base):
+    """第三方登录的一次性票据：授权页为已登录用户签发，平台后端凭它换令牌。
+
+    - ticket_hash 是明文票据的 SHA-256，库中只存摘要；明文仅在回跳 URL 里出现一次；
+    - used 保证一次性：兑换成功后即置 True，重复兑换返回 invalid_grant；
+    - expires_at 默认 120 秒，过期作废；二者共同把票据泄露后的可利用窗口压到极小。
+    """
+
+    __tablename__ = "oauth_tickets"
+    __table_args__ = (
+        Index("ix_oauth_tickets_hash", "ticket_hash"),
+        Index("ix_oauth_tickets_user", "user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    ticket_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    client_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    issued_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    used: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class AppAccessToken(Base):
+    """第三方应用持有的可撤销访问令牌：仅用于身份读取（scope=identity）。
+
+    - token_hash 是明文令牌的 SHA-256，明文只在签发时返回一次；
+    - revoked 支持站点侧随时吊销（应急）；expires_at 兜底过期；
+    - scope 起步固定 identity（用户资料），二期收藏 / 状态读写在此扩展，不返工。
+    """
+
+    __tablename__ = "app_access_tokens"
+    __table_args__ = (
+        Index("ix_app_access_tokens_hash", "token_hash"),
+        Index("ix_app_access_tokens_user", "user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    client_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    scope: Mapped[str] = mapped_column(String(32), nullable=False, default="identity")
+    issued_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    revoked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class ContentFavorite(Base):
     """个人空间「作品收藏」：登录用户与内容平台作品的关系行。
 
@@ -608,6 +675,31 @@ class ContentFavorite(Base):
     status_updated_at: Mapped[datetime | None] = mapped_column(
         DateTime, nullable=True, default=None
     )
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
+
+
+class ArticleFavorite(Base):
+    """资讯收藏（2026-10-24）：登录用户收藏资讯条目，与个人空间「资讯收藏」Tab 对应。
+
+    和 ``ContentFavorite``（作品收藏）**分开建表**：两者主体不同（作品 vs 资讯）。
+    挤在一张表里就得靠可空外键 + 类型列区分，唯一约束与查询（作品收藏还要带
+    标注 status）都会变复杂，而两类收藏在产品上是两个 Tab，本来就不混排。
+    - ``(user_id, article_id)`` 联合唯一：重复收藏不产生多行；
+    - ``article_id`` 为弱关联（不设外键级联）：资讯被管理员删除后关系行保留，
+      列表内连接查不到即不展示，清理由用户显式操作触发；
+    - 查询一律带 user_id，保证列表只属于当前登录账号。
+    """
+
+    __tablename__ = "article_favorites"
+    __table_args__ = (
+        UniqueConstraint("user_id", "article_id", name="uq_article_favorites_user_article"),
+        Index("ix_article_favorites_user", "user_id"),
+        Index("ix_article_favorites_article", "article_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    article_id: Mapped[int] = mapped_column(Integer, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
 
 
@@ -784,6 +876,52 @@ class PersonaReport(Base):
     # B站追番表绑定的数字 UID（成分检测第二数据源；NULL 表示未绑定）。
     bilibili_mid: Mapped[str | None] = mapped_column(String(30), nullable=True)
     generated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
+
+
+class PersonaLabelStat(Base):
+    """成分稀有度统计：按「主身份 · 题材簇」分桶计数，用来算「占已测用户的 X%」。
+
+    为什么不是统计完整人格标签组合：persona_tags 是「身份 + 题材簇 + 至多两个
+    衍生标签」，组合空间几乎等于「每人一份」，分母永远是 1，百分比永远贴着
+    「0.1%」没有区分度。用「主身份 · 题材簇」这一对做桶，空间只有 4 × 8 = 32
+    种，样本过百就能给出稳定的占比。
+
+    计数是「生成一次就 +1」，不做用户去重：同一人多点几次「生成」会推高自身
+    桶与分母，占比方向大致不变。要精确得按 user_id / 设备去重，当前不值得为
+    这个展示位加一张关联表（2026-10-28）。
+    """
+
+    __tablename__ = "persona_label_stats"
+    __table_args__ = (Index("uq_persona_label_key", "label_key", unique=True),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    label_key: Mapped[str] = mapped_column(String(60), nullable=False)
+    count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class AnonymousPersonaResult(Base):
+    """游客算完即走的成分结果快照：保留 30 天，期间注册可「领回」成正式报告。
+
+    动机：游客结果页原本明写「刷新就没了」，注册因此没有任何具体理由。
+    改成本表留一份，注册后用签名 Cookie 里的结果 id 认领——转化钩子从
+    「保存到账号」变成「别丢了我这份」。
+
+    - payload 结构与 PersonaReport.payload 一致，认领时整份搬过去；
+    - claimed_by 非空即已被认领，不可二次认领（换了浏览器也不能抢别人的）；
+    - 不用 user_id 做外键：认领前根本没有用户。
+    """
+
+    __tablename__ = "anonymous_persona_results"
+    __table_args__ = (Index("ix_anonymous_persona_created", "created_at"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    # 来源：quiz（站内选题）/ preview（Bangumi / B站试算），用于运营侧看哪条入口有效
+    source: Mapped[str] = mapped_column(String(20), nullable=False, default="quiz")
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
+    claimed_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    claimed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class UserSiteImport(Base):
@@ -1047,13 +1185,16 @@ class Series(Base):
 
 
 class InviteCode(Base):
-    """注册邀请码：公开注册关闭（REGISTRATION_MODE=invite）后，注册必须提供有效邀请码。
+    """注册邀请码：公开注册关闭（REGISTRATION_MODE=invite）后，注册需经邀请码准入。
 
     - code 唯一且**明文存储**：邀请码本身就是管理员要分发的东西，列表页需要
       展示与转交，因此不做哈希（与密码、一次性令牌的保密语义不同）；
     - 单次有效：used_by / used_at 落库即消费，重复使用被拒；
     - expires_at 可空：为空表示永不过期；revoked_at 非空表示管理员提前作废；
-    - created_by 为弱关联（不设外键）：签发人账号被删除后记录仍可解读。
+    - created_by 为弱关联（不设外键）：签发人账号被删除后记录仍可解读；
+    - role 记录该码登记的目标角色（user / admin）：消费时以**码内记录**为准建号，
+      **前端传什么角色一律不信**。普通用户注册本来就不要邀请码，管理员邀请码是
+      唯一的「注册即管理员」提权入口；站长（owner）邀请码不在此发放（仍走脚本/角色页）。
 
     借鉴 LunaTV 邀请码系统的数据模型（过期 / 使用痕迹 / 追溯），
     字符集去掉 0/O/1/I 等易混淆字符，避免口头转抄时出错。
@@ -1074,6 +1215,9 @@ class InviteCode(Base):
     used_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
     used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 该邀请码登记的目标角色：user（默认）/ admin。消费时以本列为准建号，
+    # 普通用户注册无需邀请码，管理员邀请码是唯一的提权入口。
+    role: Mapped[str] = mapped_column(String(20), nullable=False, default="user")
 
     def as_dict(self) -> dict:
         """序列化为 JSON 结构；时间为秒级 ISO 字符串（管理接口备用）。"""
@@ -1081,6 +1225,7 @@ class InviteCode(Base):
             "id": self.id,
             "code": self.code,
             "note": self.note,
+            "role": self.role,
             "created_by": self.created_by,
             "created_at": self.created_at.isoformat(sep=" ", timespec="seconds"),
             "expires_at": self.expires_at.isoformat(sep=" ", timespec="seconds")
@@ -1198,6 +1343,38 @@ class PhoneVerificationCode(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
 
 
+class EmailVerificationCode(Base):
+    """注册用的邮箱验证码：建号之前验证邮箱，因此「按邮箱寻址」而不是按账号。
+
+    与邮箱验证**令牌**（EmailVerificationToken，发链接给已存在的账号）不同：
+    验证码属于「还没有账号的邮箱」，库里只存哈希 + 邮箱 + 来源 IP。
+
+    - 6 位数字码只有百万种可能，必须同时限制有效期（默认 10 分钟）与尝试次数，
+      超限即作废、要求重新发送；
+    - 签发时作废该邮箱同类未消费的旧码，保证「同一时刻只有一个有效码」；
+    - 校验通过立即写 consumed_at，重复使用 / 过期 / 输错均不能完成注册。
+    """
+
+    __tablename__ = "email_verification_codes"
+    __table_args__ = (
+        Index("ix_email_codes_email", "email"),
+        Index("ix_email_codes_ip", "ip"),
+        Index("ix_email_codes_hash", "code_hash"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    email: Mapped[str] = mapped_column(String(200), nullable=False)
+    # 用途（目前只有 register，留列以便将来复用到「换绑邮箱」等场景）。
+    purpose: Mapped[str] = mapped_column(String(16), nullable=False)
+    code_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
+    # 请求来源 IP（反代后取 X-Forwarded-For 首段），用于发码频率限制；可为空。
+    ip: Mapped[str | None] = mapped_column(String(45), nullable=True)
+
+
 class ScheduleSyncRun(Base):
     """新番档期同步运行记录（独立于作品数据，dry-run 与 apply 均记录）。
 
@@ -1246,3 +1423,58 @@ class ScheduleSyncRun(Base):
             "failed": self.failed,
             "message": self.message,
         }
+
+class HomePoster(Base):
+    """首页海报轮播的全站生效名单（一行一张，sort_order 即展示顺序）。
+
+    与「页面内手动浏览」严格分层：本表只存服务端口径下的**一份**名单，
+    所有访客打开首页看到的都是同一份（顺序一致）；访客在页面上的左右切换
+    纯前端状态，不写库、不回传、不影响任何人。
+
+    - content_id：站内作品主键（弱关联，不建外键：作品被删时名单行保留，
+      渲染层按「取不到作品/封面」跳过，不会把首页打成白板）；
+    - source：auto = 当季新番轮转生成，manual = 管理员手动指定，
+      只作审计展示，不参与业务判断；
+    - 名单的更新模式 / 频率 / 最近成功时间在同表的 HomePosterConfig（单行）。
+    """
+
+    __tablename__ = "home_posters"
+    __table_args__ = (
+        Index("ix_home_posters_order", "sort_order"),
+        Index("ix_home_posters_content", "content_id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    content_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    source: Mapped[str] = mapped_column(String(20), nullable=False, default="auto")
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
+
+
+class HomePosterConfig(Base):
+    """首页海报轮播的更新配置（单行，id 固定 1）。
+
+    三种模式（默认 off，即「关闭自动更新」）：
+    - off：定时任务不跑、不替换名单；保留当前有效名单与排序，首页照常展示，
+      页面内手动浏览不受影响；
+    - auto：按 frequency（daily / weekly）从当季新番候选里轮转生成新名单，
+      整批替换生效；生成与校验失败时保留旧名单；
+    - manual：名单完全由管理员手动指定与排序，定时任务一律不碰
+      （避免「手动编辑后被定时任务意外覆盖」）。
+
+    rotation_cursor 是轮转游标：候选按稳定序排好后，每次更新从游标处取
+    COVERFLOW_SIZE 条，游标前进同等步长（循环），于是名单内容会换、但排序
+    规则稳定，不会每次执行都无规律地大幅洗牌。
+    """
+
+    __tablename__ = "home_poster_config"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, default=1)
+    mode: Mapped[str] = mapped_column(String(20), nullable=False, default="off")
+    frequency: Mapped[str] = mapped_column(String(20), nullable=False, default="daily")
+    rotation_cursor: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_status: Mapped[str] = mapped_column(String(20), nullable=False, default="never")
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)

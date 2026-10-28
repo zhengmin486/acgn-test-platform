@@ -592,6 +592,64 @@ class TestIngestPolicy20261021:
         assert not import_bangumi.is_galge_payload({})
 
 
+class TestIngestPolicyV3Game:
+    """收录口径 v3（2026-10-23）：游戏区只收 ACGN 向五类，其余（含西式普通游戏）拒收。
+
+    map_subject 的总闸与选品端 apply_ingest_policy 共用 import_bangumi.
+    is_acgn_game_payload，这里锁定各分类边界，防止日后漂移。
+    """
+
+    @staticmethod
+    def _game_payload(**extra) -> dict:
+        payload = make_payload(530, 4)
+        payload.update(extra)
+        return payload
+
+    def test_galge_still_imports(self):
+        payload = self._game_payload(tags=[{"name": "GALGAME", "count": 88}])
+        assert import_bangumi.map_subject(payload).type == "game"
+
+    def test_anime_style_game_imports(self):
+        payload = self._game_payload(tags=[{"name": "手游", "count": 99}])
+        assert import_bangumi.map_subject(payload).type == "game"
+
+    def test_jrpg_with_japanese_signal_imports(self):
+        payload = self._game_payload(
+            name="ペルソナ5", tags=[{"name": "RPG", "count": 200}]
+        )
+        assert import_bangumi.map_subject(payload).type == "game"
+
+    def test_jrpg_without_japanese_signal_rejected(self):
+        """日式RPG 类要求日系信号：纯西式 RPG（无假名/日本）按非 ACGN 拒收。"""
+        payload = self._game_payload(tags=[{"name": "RPG", "count": 200}])
+        with pytest.raises(import_bangumi.SubjectMappingError):
+            import_bangumi.map_subject(payload)
+
+    def test_adaptation_tag_game_imports(self):
+        payload = self._game_payload(tags=[{"name": "漫画改编", "count": 30}])
+        assert import_bangumi.map_subject(payload).type == "game"
+
+    def test_margin_game_imports_with_high_rank(self):
+        payload = self._game_payload(
+            tags=[{"name": "奇幻", "count": 40}], rating={"score": 8.0, "rank": 500}
+        )
+        assert import_bangumi.map_subject(payload).type == "game"
+
+    def test_margin_game_rejected_when_rank_too_low(self):
+        """兜底只放行 rank 靠前少量作品；长尾宽泛标签游戏拒收。"""
+        payload = self._game_payload(
+            tags=[{"name": "奇幻", "count": 40}], rating={"score": 8.0, "rank": 50000}
+        )
+        with pytest.raises(import_bangumi.SubjectMappingError):
+            import_bangumi.map_subject(payload)
+
+    def test_plain_western_game_rejected(self):
+        """西式普通游戏（如 FPS、无日系信号、无 ACGN 标签）拒收。"""
+        payload = self._game_payload(tags=[{"name": "FPS", "count": 80}])
+        with pytest.raises(import_bangumi.SubjectMappingError):
+            import_bangumi.map_subject(payload)
+
+
 # ---------- 网络层：超时、重试与代理配置 ----------
 
 

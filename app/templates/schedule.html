@@ -1,4 +1,5 @@
 {% extends "base_content.html" %}
+{% from "_pager.html" import pager %}
 {% block title %}新番档期{% endblock %}
 
 {# 档期卡与作品卡共用同一套视觉语言（2:3 海报 + 标题 + 元信息），
@@ -35,6 +36,10 @@
         {% endif %}
         {% if item.work_type %}
         <span class="schedule-type">{{ item.work_type }}</span>
+        {% endif %}
+        {% if item.box_office %}
+        {# 内地票房（大陆引进剧场版）：源站原文如「内地总票房￥6.78亿」#}
+        <span class="schedule-note schedule-box-office">{{ item.box_office }}</span>
         {% endif %}
         {% if item.work_tags %}
         <span class="schedule-work-tags">{{ item.work_tags }}</span>
@@ -129,6 +134,28 @@
 
 {% if not works %}
 <div class="detail-empty">该档期暂无匹配的作品记录（可能尚未同步，或筛选条件过严）。</div>
+{% elif date_groups %}
+{# ===== 特殊分类默认视图：按播出/上映日期分组的时间线 =====
+   组头 = 日期（12月11日）+ 周几 + 距今天数；无具体日期的季度描述
+   （2027冬）按原文归组；时间待定排最后。桌面端沿用星期组的左侧轴样式。
+   剧场类两分类（ova_sp / cn_movie）分组到月：组头只有「2026年11月」+ 条数，
+   没有周几与距今天数（月份不是时间点，后端两个字段给 None，此处判空隐藏）。 #}
+{% for group in date_groups %}
+<section class="schedule-day">
+    <header class="schedule-day-head">
+        <h2 class="schedule-day-name">{{ group.name }}</h2>
+        <span class="schedule-day-count">{{ group.works|length }} 部</span>
+        {% if group.countdown %}<span class="schedule-day-count schedule-day-countdown">{{ group.countdown }}</span>{% endif %}
+        {% if group.weekday_name %}
+        <span class="schedule-day-note">{{ group.weekday_name }}</span>
+        {% endif %}
+        <span class="schedule-day-line" aria-hidden="true"></span>
+    </header>
+    <div class="schedule-grid">
+        {% for item in group.works %}{{ work_card(item, weekday_names, false) }}{% endfor %}
+    </div>
+</section>
+{% endfor %}
 {% elif grouped_mode %}
 {# ===== 默认视图：按播出星期分组的周更时间表 ===== #}
 {% for group in weekday_groups %}
@@ -153,18 +180,8 @@
 </div>
 
 {% if total_pages > 1 %}
-{% set page_query = '/schedule?' ~ ('category=' ~ (current_category|urlencode) ~ '&' if current_category else 'season=' ~ (current_season|urlencode) ~ '&') ~ 'weekday=' ~ (weekday if weekday else '') ~ '&q=' ~ (q|urlencode) ~ '&page=' %}
-<nav class="mt-3">
-    <ul class="pagination pagination-sm mb-0">
-        {% if page > 1 %}
-        <li class="page-item"><a class="page-link" href="{{ page_query }}{{ page - 1 }}">上一页</a></li>
-        {% endif %}
-        <li class="page-item disabled"><span class="page-link">第 {{ page }} / {{ total_pages }} 页</span></li>
-        {% if page < total_pages %}
-        <li class="page-item"><a class="page-link" href="{{ page_query }}{{ page + 1 }}">下一页</a></li>
-        {% endif %}
-    </ul>
-</nav>
+{% set sched_base = '/schedule?' ~ ('category=' ~ (current_category|urlencode) ~ '&' if current_category else 'season=' ~ (current_season|urlencode) ~ '&') ~ 'weekday=' ~ (weekday if weekday else '') ~ '&q=' ~ (q|urlencode) ~ '&' %}
+{{ pager(sched_base, page, total_pages) }}
 {% endif %}
 {% endif %}
 {% endif %}

@@ -435,18 +435,25 @@ def test_list_view_and_view_switch(browse_env):
     assert resp.status_code == 200
     assert 'class="works-list"' in resp.text
     assert 'class="work-row"' in resp.text
-    # 视图切换链接：卡片（默认）不写参数，网格写 view=grid，列表写 view=list
+    # 视图切换链接：网格（默认）不写参数，卡片写 view=bili，列表写 view=list
     assert 'href="/contents?q=&amp;type=&amp;tags=&amp;creator=&amp;view=list"' in resp.text
-    assert 'href="/contents?q=&amp;type=&amp;tags=&amp;creator=&amp;view=grid"' in resp.text
+    assert 'href="/contents?q=&amp;type=&amp;tags=&amp;creator=&amp;view=bili"' in resp.text
+    assert 'href="/contents?q=&amp;type=&amp;tags=&amp;creator="' in resp.text
 
-    # 默认页 = B站卡片视图（封面 + 标题 + 元数据行），不再是旧网格
+    # 默认页 = 网格（紧凑瓦片，无卡身、无摘要）
     default = browse_env.client.get("/contents")
-    assert 'class="works-grid works-grid--bili"' in default.text
-    assert 'class="bili-card"' in default.text
+    assert 'class="works-grid"' in default.text
+    assert "work-card--tile" in default.text
+    assert "work-card-summary" not in default.text
 
+    # 卡片视图 = 同一套海报卡，列更少 + 带摘要
+    card = browse_env.client.get("/contents?view=bili")
+    assert 'class="works-grid works-grid--card"' in card.text
+    assert "work-card-summary" in card.text
+
+    # 老链接 view=grid 仍落在网格视图上
     grid = browse_env.client.get("/contents?view=grid")
-    assert 'class="works-grid"' in grid.text  # 信息模式：带摘要
-    assert "work-card-summary" in grid.text
+    assert "work-card--tile" in grid.text
 
 
 def test_new_params_absent_when_unselected(browse_env):
@@ -481,16 +488,20 @@ def test_favorite_counts_batch_query(browse_env):
         db.close()
 
 
-def test_default_view_is_bili_cards(browse_env):
-    """默认视图抄哔哩哔哩：封面 + 标题 + 元数据行；未选 view 时不写 URL。"""
+def test_default_view_is_grid(browse_env):
+    """默认视图是网格：封面（左上类型签）+ 标题 + 元信息行；未选 view 不写 URL。"""
     resp = browse_env.client.get("/contents")
     assert resp.status_code == 200
-    assert 'class="works-grid works-grid--bili"' in resp.text
-    assert 'class="bili-card"' in resp.text
-    assert 'class="bili-title"' in resp.text
-    assert 'class="bili-meta"' in resp.text
+    assert 'class="works-grid"' in resp.text
+    assert 'class="work-card work-card--tile"' in resp.text
+    assert 'class="work-card-title"' in resp.text
+    assert 'class="work-card-meta"' in resp.text
+    # 分类签只在封面上，且走统一组件
+    assert 'class="work-type" data-type="anime"' in resp.text
+    # 封面不再叠加年份/评分角标
+    assert 'class="work-card-year"' not in resp.text
     # 无排序回退默认序：评分前置加粗
-    assert 'class="bili-rating bili-strong">★' in resp.text
+    assert 'class="work-meta-rating is-strong"' in resp.text
     # 卡片链接形状不变（新参数未选不写入）
     assert 'href="/contents?q=&amp;type=&amp;tags=&amp;creator="' in resp.text
 
@@ -520,21 +531,21 @@ def test_sticky_bar_holds_tabs_and_view_switch(browse_env):
 
 
 def test_meta_row_adapts_to_sort(browse_env):
-    """元数据行随排序自适应：收藏排序 ♥ 前置、最新排序年份前置。"""
+    """元信息行随排序自适应：收藏排序 ♥ 前置、最新排序年份前置。"""
     fav = browse_env.client.get("/contents?type=anime&sort=favorites")
-    assert 'class="bili-fav bili-strong">♥' in fav.text
-    assert 'class="bili-rating bili-strong"' not in fav.text
+    assert 'class="work-meta-fav is-strong"' in fav.text
+    assert 'class="work-meta-rating is-strong"' not in fav.text
 
     new = browse_env.client.get("/contents?type=anime&sort=newest")
-    assert 'class="bili-year bili-strong">' in new.text
-    assert 'class="bili-fav bili-strong"' not in new.text
+    assert 'class="work-meta-year is-strong"' in new.text
+    assert 'class="work-meta-fav is-strong"' not in new.text
 
     # 收藏最多排序下，卡片 ♥ 计数与收藏排序同源（丙 2 > 甲 1 > 乙 0）
     assert "♥ 2" in fav.text and "♥ 1" in fav.text
 
 
-def test_current_year_badge_on_cards(browse_env):
-    """当年作品封面带「新」角标；非当年作品没有。"""
+def test_year_renders_in_meta_row(browse_env):
+    """年份落在元信息行（封面只留分类签，不再单独挂年份/「新」角标）。"""
     db = browse_env.session_factory()
     try:
         db.add(
@@ -552,9 +563,12 @@ def test_current_year_badge_on_cards(browse_env):
     finally:
         db.close()
 
-    resp = browse_env.client.get("/contents?type=anime&sort=newest")
-    assert resp.text.count('class="bili-new"') == 1  # 只有当年那部
-    assert "当年新番丁" in resp.text
+    resp = browse_env.client.get("/contents?type=anime")
+    html = resp.text
+    assert "当年新番丁" in html
+    card = html[html.index("当年新番丁") : html.index("当年新番丁") + 700]
+    assert f'<span class="work-meta-year">{datetime.now().year}</span>' in card
+    assert 'class="bili-new"' not in html
 
 
 def test_empty_state_illustration(browse_env):

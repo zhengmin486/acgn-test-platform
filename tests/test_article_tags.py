@@ -1369,7 +1369,10 @@ class TestArticlePages:
         )
         resp = page_env.client.get(f"/articles/{article_id}")
         assert resp.status_code == 200
-        assert "暂未关联到作品" in resp.text
+        # 关联作品空态是**刻意移除**的：无数据时整块不渲染（不留占位）。
+        # 所以断言整个区块不出现，而不是断言某个已被删掉的占位文案
+        # （旧断言查「暂未关联到作品」，在空态移除后必然失败，2026-10-27 修正）。
+        assert "article-related" not in resp.text
         assert 'class="tag-chip"' not in resp.text
         assert "识别标签" not in resp.text
 

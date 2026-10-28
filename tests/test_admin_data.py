@@ -259,6 +259,28 @@ def test_delete_article(data_env):
     assert _count(data_env, Article) == 1
 
 
+def test_delete_articles_batch(data_env):
+    """资讯批量删除：勾选多个 id 一次提交，全删并回显条数。"""
+    first, second = _ids(data_env, Article)
+    resp = data_env.admin.post(
+        "/manage/articles/delete",
+        data={"ids": [str(first), str(second)]},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert "deleted=2" in resp.headers["location"]
+    assert _count(data_env, Article) == 0
+
+
+def test_delete_articles_without_selection_is_noop(data_env):
+    """资讯未勾选：不删任何东西，回显 0 条。"""
+    resp = data_env.admin.post("/manage/articles/delete", data={},
+                               follow_redirects=False)
+    assert resp.status_code == 303
+    assert "deleted=0" in resp.headers["location"]
+    assert _count(data_env, Article) == 2
+
+
 def test_delete_missing_article_returns_404(data_env):
     """删除不存在的资讯：返回 404 页面并落在管理平台布局。"""
     resp = data_env.admin.post("/manage/articles/999999/delete",
@@ -302,6 +324,53 @@ def test_delete_missing_schedule_returns_404(data_env):
                                follow_redirects=False)
     assert resp.status_code == 404
     assert "返回新番档期" in resp.text
+
+
+def test_delete_schedules_batch(data_env):
+    """档期批量删除：一次提交多个 id，全删并回显条数。"""
+    first, second, third = _ids(data_env, AnimeSchedule)
+    resp = data_env.admin.post(
+        "/manage/schedules/delete",
+        data={"ids": [str(first), str(second)]},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert "deleted=2" in resp.headers["location"]
+    assert _ids(data_env, AnimeSchedule) == [third]
+
+
+# ---------- 移动端卡片表格与多选（共用骨架） ----------
+
+ADMIN_TABLE_PAGES = ["/manage/contents", "/manage/articles", "/manage/schedules"]
+
+
+@pytest.mark.parametrize("path", ADMIN_TABLE_PAGES)
+def test_admin_table_is_card_ready(data_env, path):
+    """三张管理表共用同一套卡片化骨架：表头全选 + 每行勾选框 + 单元格 data-label。
+
+    data-label 是窄屏卡片布局里「标签: 值」的标签来源，缺了卡片就没有字段名。
+    """
+    body = data_env.admin.get(path).text
+    assert 'class="table-responsive table-card admin-table"' in body
+    assert "data-select-all" in body
+    assert "data-row-check" in body
+    assert "data-bulk-submit" in body
+    assert 'data-label="ID"' in body
+    assert 'class="cell-actions"' in body
+
+
+def test_admin_delete_forms_require_confirmation(data_env):
+    """危险操作必须二次确认：删除表单带 data-confirm，由 base.html 的弹窗接管。"""
+    for path, marker in (
+        ("/manage/contents", "确定删除《作品A》"),
+        ("/manage/articles", "确定删除资讯《资讯一》"),
+        ("/manage/schedules", "确定删除档期作品《作品X》"),
+    ):
+        body = data_env.admin.get(path).text
+        assert 'data-confirm="' in body, path
+        assert marker in body, path
+        # 批量按钮本身不写死提示文案，选中数在点击时由 JS 动态补上
+        assert 'data-ajax-delete' in body, path
 
 
 # ---------- 重新同步 ----------

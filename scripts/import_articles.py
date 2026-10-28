@@ -45,6 +45,7 @@ import re
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -70,11 +71,16 @@ SITE_BASE = "https://news.aniplex.co.jp"
 SITE_LABEL = "news.aniplex.co.jp"
 
 DEFAULT_USER_AGENT = (
-    "acgn-test-platform/0.1 (local import script; news.aniplex.co.jp reader)"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 )
-DEFAULT_TIMEOUT = 15.0  # 单次请求超时（秒）
+# 2026-10-25：旧 UA 是 `acgn-test-platform/0.1 (local import script; ...reader)`，
+# 自曝脚本身份，部分源站/ CDN 直接 403 或返回风控页。统一换成主流浏览器 UA，
+# 与 scripts/news_sources.DEFAULT_USER_AGENT 保持一致（两边抓的是同一批页面）。
+DEFAULT_TIMEOUT = 20.0  # 单次请求超时（秒）；服务器出口慢时 15s 偏紧，2026-10-25 上调
 DEFAULT_RETRIES = 2  # 失败后的重试次数（总请求次数 = 1 + retries）
-RETRY_BACKOFF = 0.8  # 重试间隔基数（秒），第 n 次重试等待 n * 基数
+RETRY_BACKOFF = 0.8  # 重试间隔基数（秒），指数退避：0.8 → 1.6 → 3.2
+RETRY_BACKOFF_MAX = 4.0  # 单次退避上限，防止慢站点把整轮拖死
 
 DEFAULT_LIMIT = 12  # 未指定条数时的默认抓取量（约等于一个列表页）
 MAX_LIST_PAGES = 5  # 列表最多翻页数，避免「不限条数」时无边界抓取
@@ -181,11 +187,30 @@ def clean_text(raw: str) -> str:
     return re.sub(r"\s+", " ", unescape(text)).strip()
 
 
-def absolute_image_url(src: str) -> str:
+def _origin_of(base: str | None) -> str:
+    """取 base 的 origin（scheme://host）；非法或为空时返回空串。"""
+    text = (base or "").strip()
+    if not text:
+        return ""
+    if "://" not in text:
+        text = f"https://{text}"
+    parsed = urllib.parse.urlsplit(text)
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def absolute_image_url(src: str, base: str | None = None) -> str:
     """把源站的相对图片地址补全为绝对地址。
 
     源站图片形如 ``SYS/CONTENTS/<uuid>``（无扩展名；也见过 ``/SYS/...``、
     ``//host/...`` 与完整 http 地址），统一补成可直接下载的绝对 URL。
+
+    ``base`` 是**页面地址**（详情页 URL 或订阅源地址）。多源抓取时各站域名不同，
+    相对路径必须按页面 origin 补全：2026-10-25 修复前兜底写死 Aniplex 域名，
+    导致 acgch 的 ``/mascot/sticker-pointing.webp``、lnnews 的
+    ``/images/logo_x_white.png`` 全被补成 ``news.aniplex.co.jp/...``（404），
+    详情页正文里留一片裂图。``base`` 为空时保持旧行为（Aniplex 单源导入）。
     """
     text = (src or "").strip()
     if not text:
@@ -194,19 +219,62 @@ def absolute_image_url(src: str) -> str:
         return f"https:{text}"
     if text.startswith(("http://", "https://")):
         return text
-    return f"{SITE_BASE.rstrip('/')}/{text.lstrip('/')}"
+    if text.startswith("data:"):
+        # data URI 内嵌占位图：原样返回，由装饰图判定丢弃（不当外链保留）
+        return text
+    prefix = _origin_of(base) or SITE_BASE
+    return f"{prefix.rstrip('/')}/{text.lstrip('/')}"
+
+
+# 装饰图 = 站点模板资产（logo / 图标 / 角标 / 占位），不是文章内容。
+# 旧规则只认路径里的 ``/assets/``，漏网实测（2026-10-25）：acgch `/brand/*logo*`、
+# animeanime `/base/images/header-logo*` 与 `/feature/images/logo-*`、
+# lisani `themes/lisani/assets/images/logo-*.svg|icon-*`、
+# lnnews `/images/logo_*`、chuapp `Public/Home/images/logo.png`。
+# 判定=「目录段命中模板目录」且「后续路径含模板关键词」，两者缺一不可——
+# lnnews 的正文图就在 `assets.ln-news.com/images/medias/<hash>.jpg`，
+# 只按目录判会把正文图误杀，所以关键词条件必须保留。
+_DECORATIVE_DIR_RE = re.compile(
+    r"/(?:assets?|static|brand|mascot|common|ui|skin|themes?|images?|img|pics?)/",
+    re.IGNORECASE,
+)
+_DECORATIVE_NAME_RE = re.compile(
+    r"(?:logo|icon|sprite|banner|avatar|badge|button|qrcode|qr_code|"
+    r"loading|placeholder|spacer|blank|pixel|spacer)",
+    re.IGNORECASE,
+)
+# 统计 / 追踪像素：animeanime 详情页**第一个** img 就是 Facebook 追踪像素
+# （`https://www.facebook.com/tr?id=...&ev=PageView`），进了正文就是一张坏图。
+_TRACKING_IMAGE_RE = re.compile(
+    r"(?:facebook\.com/tr\?|google-analytics\.com|doubleclick\.net|"
+    r"googletagmanager\.com|/pixel\?|/beacon\?)",
+    re.IGNORECASE,
+)
 
 
 def _is_decorative_image(url: str) -> bool:
-    """站点模板图（logo / 图标，路径含 /assets/）不算正文图，直接丢弃。"""
-    return "/assets/" in url
+    """站点模板图（logo / 图标 / 追踪像素 / data 占位）不算正文图，直接丢弃。"""
+    text = (url or "").strip()
+    if not text:
+        return False
+    if text.startswith("data:"):
+        return True
+    if _TRACKING_IMAGE_RE.search(text):
+        return True
+    path = urllib.parse.urlsplit(text).path if "://" in text else text
+    return bool(_DECORATIVE_DIR_RE.search(path) and _DECORATIVE_NAME_RE.search(path))
 
 
-def html_to_text(raw: str) -> str:
+def html_to_text(raw: str, base: str | None = None) -> str:
     """详情正文 HTML -> 纯文本：保留段落换行，图片转 ``[图]`` 行，内嵌视频/音频转 ``[媒体]`` 行。
 
-    图片只保留前 ``MAX_BODY_IMAGES`` 张（按出现顺序），模板图（``/assets/``）跳过且不占配额；
-    超过上限的图直接丢弃——正文的阅读价值优先于图片数量。
+    图片只保留前 ``MAX_BODY_IMAGES`` 张（按出现顺序），模板图（logo / 图标 /
+    追踪像素 / data 占位）跳过且不占配额；超过上限的图直接丢弃——正文的阅读
+    价值优先于图片数量。
+
+    ``base`` 是页面地址（详情页 URL / 订阅源地址）：相对图片路径按它的 origin
+    补全（见 ``absolute_image_url``）。多源资讯（scripts/news_sources）必须传，
+    否则所有相对路径都会补到 Aniplex 域名。
     """
     text = raw or ""
     text = _IFRAME_SRC_RE.sub(lambda m: f"\n[媒体] {unescape(m.group(1))}\n", text)
@@ -218,7 +286,7 @@ def html_to_text(raw: str) -> str:
         if kept >= MAX_BODY_IMAGES:
             return "\n"
         src_match = _IMG_SRC_RE.search(match.group(0))
-        url = absolute_image_url(src_match.group(1)) if src_match else ""
+        url = absolute_image_url(src_match.group(1), base) if src_match else ""
         if not url or _is_decorative_image(url):
             return "\n"
         kept += 1
@@ -420,11 +488,24 @@ def fetch_page(
     timeout: float = DEFAULT_TIMEOUT,
     retries: int = DEFAULT_RETRIES,
 ) -> str:
-    """获取页面 HTML（标准库 urllib）；网络错误重试，仍失败抛 ArticleFetchError。"""
+    """获取页面 HTML（标准库 urllib）；网络错误重试，仍失败抛 ArticleFetchError。
+
+    2026-10-25：① UA 换成主流浏览器（旧值是自曝脚本身份，见 DEFAULT_USER_AGENT
+    注释）；② 补 Accept-Language，避免日文源按默认语言返回简版页；③ 重试改
+    **指数退避**（0.8→1.6→3.2，封顶 4s），线性退避在慢站点上等于继续撞；
+    ④ 429 尊重 ``Retry-After``（封顶 30s）——以前 429 和 503 一样只退避固定值，
+    限速窗口内会把剩余重试次数一次耗光。
+    """
     last_error: Exception | None = None
     for attempt in range(retries + 1):
         try:
-            request = urllib.request.Request(url, headers={"User-Agent": DEFAULT_USER_AGENT})
+            request = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": DEFAULT_USER_AGENT,
+                    "Accept-Language": "ja,zh-CN;q=0.9,en;q=0.5",
+                },
+            )
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 charset = response.headers.get_content_charset() or "utf-8"
                 return response.read().decode(charset, "replace")
@@ -435,11 +516,26 @@ def fetch_page(
                     f"请求 {url} 返回 HTTP {exc.code} {exc.reason}"
                 ) from exc
             last_error = exc
+            if exc.code == 429 and attempt < retries:
+                time.sleep(_retry_after_seconds(exc))
+                continue
         except Exception as exc:  # 网络抖动、超时、TLS 握手失败等
             last_error = exc
         if attempt < retries:
-            time.sleep(RETRY_BACKOFF * (attempt + 1))
+            time.sleep(min(RETRY_BACKOFF * (2**attempt), RETRY_BACKOFF_MAX))
     raise ArticleFetchError(f"请求 {url} 失败：{last_error}")
+
+
+def _retry_after_seconds(exc: urllib.error.HTTPError, *, cap: float = 30.0) -> float:
+    """读 429 的 ``Retry-After``（秒）；缺失或非法时退回默认退避值。"""
+    raw = ""
+    try:
+        raw = (exc.headers.get("Retry-After") or "").strip()
+    except Exception:  # noqa: BLE001 - 头缺失/类型异常都走默认值
+        raw = ""
+    if raw.isdigit():
+        return min(float(raw), cap)
+    return min(RETRY_BACKOFF, cap)
 
 
 def collect_news(
@@ -613,7 +709,7 @@ def run_import_articles(
                 continue
             # 硬广过滤：只挡最露骨广告（营销活动保留）。
             skip_reason = news_filters.should_skip_article(
-                item.title, item.summary, channel.label
+                item.title, item.summary, channel.label, url=item.url
             )
             if skip_reason:
                 summary.filtered += 1

@@ -86,11 +86,19 @@
         {% if guest_mode %}
         <div class="d-flex flex-wrap align-items-end justify-content-between gap-3">
             <div class="small">
+                {% if quiz_back_url %}
+                正在分析你在本次选题里标记的 <strong>{{ guest_total }}</strong> 条作品（{{ guest_sources }}）。
+                结果不保存、不建账号。
+                {% else %}
                 正在分析 <strong>{{ guest_targets }}</strong> 的公开数据，共识别
                 <strong>{{ guest_total }}</strong> 条（{{ guest_sources }}；Bangumi 最多读前
                 {{ guest_max_items }} 条、B站 {{ guest_bili_max_items }} 条）。
                 结果不保存、不建账号。
+                {% endif %}
             </div>
+            {% if quiz_back_url %}
+            <a class="btn btn-sm btn-outline-primary" href="{{ quiz_back_url }}">重新选题</a>
+            {% else %}
             <form method="post" action="/persona/preview" class="d-flex align-items-end gap-2"
                   onsubmit="var b=this.querySelector('button[type=submit]'); b.disabled=true; b.textContent='读取中…';">
                 <div>
@@ -106,6 +114,7 @@
                 </div>
                 <button class="btn btn-sm btn-outline-primary" type="submit">重新试算</button>
             </form>
+            {% endif %}
         </div>
         {% else %}
         <p class="small mb-3">
@@ -287,13 +296,25 @@
 {% if report and payload %}
 {% if guest_mode %}
 <div class="alert alert-info py-2">
+{% if result_kept_days %}
+    这份结果我们已经留了 {{ result_kept_days }} 天：现在注册登录，它就自动变成你账号里的报告，
+    不用重测一遍。也可以把「下载成分卡」存下来分享。
+{% else %}
     下面是免登录试算结果，刷新就没了；登录后可保存、导入本站、生成完整文案。
+{% endif %}
 </div>
 {% endif %}
 <div class="card app-card mb-3">
     <div class="card-body p-4">
         <div class="d-flex flex-wrap justify-content-between align-items-start gap-3">
             <div>
+                <div class="mb-2">
+                    <div class="fw-bold" style="font-size:1.5rem;line-height:1.3;">「{{ template_report.hero_title }}」</div>
+                    <div class="mt-1">
+                        <span class="badge bg-dark me-2">{{ template_report.hero_code }}</span>
+                        <span class="text-muted small">{{ template_report.hero_note }}</span>
+                    </div>
+                </div>
                 <h2 class="persona-title mb-1">{{ template_report.title }}</h2>
                 <p class="persona-subtitle mb-0">{{ template_report.subtitle }}</p>
             </div>
@@ -302,7 +323,7 @@
 
         <div class="row g-4 mt-1 align-items-center">
             <div class="col-12 col-lg-5">
-                <svg class="persona-radar" viewBox="0 0 300 240" width="100%" role="img" aria-label="六维成分">
+                <svg class="persona-radar" viewBox="0 0 300 240" width="100%" role="img" aria-label="维度成分">
                     {% for ring in radar.grid %}
                     <polygon points="{{ ring }}" fill="none" stroke="#d8e3ef" stroke-width="1"/>
                     {% endfor %}
@@ -359,11 +380,28 @@
         <div class="row g-3 mt-3">
             <div class="col-md-6">
                 <h3 class="h6">二次元人格</h3>
-                <div class="d-flex flex-wrap gap-1">
+                <div class="d-flex flex-wrap gap-3 align-items-start">
                     {% for tag in template_report.persona_tags %}
-                    <span class="badge bg-primary">{{ tag }}</span>
+                    <div class="text-center" style="max-width: 10rem;">
+                        <span class="badge bg-primary">{{ tag }}</span>
+                        {% set note = template_report.get('trait_blurbs', {}).get(tag) %}
+                        {% if note %}<div class="small text-muted mt-1">{{ note }}</div>{% endif %}
+                    </div>
                     {% endfor %}
                 </div>
+                {% if payload.rarity and payload.rarity.total %}
+                <p class="small text-muted mt-2 mb-0">
+                    稀有度 <span class="badge bg-dark">{{ payload.rarity.tier }}</span>
+                    {{ payload.rarity.note }} · 同样成分在已测的
+                    <strong>{{ payload.rarity.total }}</strong> 人里占
+                    <strong>{{ payload.rarity.share }}%</strong>
+                </p>
+                {% endif %}
+                {% if share_card_token %}
+                <a class="btn btn-sm btn-outline-secondary mt-2"
+                   href="/persona/card?d={{ share_card_token }}"
+                   target="_blank" rel="noopener" download="otaku-成分卡.svg">下载成分卡</a>
+                {% endif %}
             </div>
             <div class="col-md-6">
                 <h3 class="h6">代表作</h3>
@@ -395,7 +433,7 @@
                         <span class="work-card-body">
                             <span class="d-flex justify-content-between align-items-center gap-2">
                                 <span class="fw-semibold text-truncate">{{ item.title }}</span>
-                                <span class="small text-muted">{% if item.rating > 0 %}{{ '%.1f' % item.rating }}{% else %}暂无评分{% endif %}</span>
+                                <span class="small text-muted">{% set _rd = rating_display(item.rating, item.rating_count) %}{% if _rd == '--' %}--{% elif _rd %}{{ _rd }}{% else %}暂无评分{% endif %}</span>
                             </span>
                             <span class="d-flex flex-wrap gap-1 mt-1">
                                 {% for tag in item.matched %}

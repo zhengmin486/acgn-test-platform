@@ -7,7 +7,7 @@
     <div>
         <h1 class="h3 mb-1 section-heading">新番档期</h1>
         <p class="text-muted small mb-0">
-            共 {{ total }} 条档期作品。删除只清理本地记录；重新同步按档期从源站拉取并写回。
+            共 <span data-admin-total>{{ total }}</span> 条档期作品。删除只清理本地记录；重新同步按档期从源站拉取并写回。
         </p>
     </div>
     {% if current_season or current_category %}
@@ -80,10 +80,25 @@
 {% if not works %}
 <div class="detail-empty">没有符合条件的档期作品。</div>
 {% else %}
-<div class="table-responsive table-card">
+<div class="admin-panel" data-admin-scope data-bulk-form="bulk-schedule-delete" data-page-size="20">
+{# 批量删除表单：只承载隐藏的筛选条件，勾选框与按钮用 form 属性归入本表单 #}
+<form id="bulk-schedule-delete" method="post" action="/manage/schedules/delete"
+      class="admin-bulkform" data-ajax-delete data-remove="row"
+      data-id-field="ids" data-count-param="deleted" data-verb="删除" data-entity="档期作品">
+    <input type="hidden" name="season" value="{{ current_season or '' }}">
+    <input type="hidden" name="category" value="{{ current_category or '' }}">
+    <input type="hidden" name="q" value="{{ q }}">
+    <input type="hidden" name="page" value="{{ page }}">
+</form>
+
+<div class="table-responsive table-card admin-table">
     <table class="table table-hover align-middle">
         <thead>
         <tr>
+            <th class="cell-check">
+                <input class="form-check-input" type="checkbox" data-select-all
+                       aria-label="全选本页档期作品">
+            </th>
             <th>ID</th>
             <th>档期</th>
             <th>标题</th>
@@ -96,15 +111,20 @@
         </thead>
         <tbody>
         {% for w in works %}
-        <tr>
-            <td>{{ w.id }}</td>
-            <td>
+        <tr data-row-id="{{ w.id }}">
+            <td class="cell-check">
+                <input class="form-check-input" type="checkbox" data-row-check
+                       name="ids" value="{{ w.id }}" form="bulk-schedule-delete"
+                       aria-label="选择档期作品 {{ w.id }}">
+            </td>
+            <td class="cell-id" data-label="ID">{{ w.id }}</td>
+            <td class="cell-season" data-label="档期">
                 <span class="badge bg-info text-dark">{{ w.season_code }}</span>
                 {% if w.category %}
                 <span class="badge bg-secondary">{{ category_labels.get(w.category, w.category) }}</span>
                 {% endif %}
             </td>
-            <td>
+            <td class="cell-title" data-label="标题">
                 <div>{{ w.title_main }}</div>
                 {% if w.title_jp and w.title_jp != w.title_main %}
                 <div class="small text-muted">{{ w.title_jp }}</div>
@@ -116,17 +136,19 @@
                 <div class="small text-muted">{{ w.work_type or '' }}{% if w.work_type and w.work_tags %} · {% endif %}{{ w.work_tags or '' }}</div>
                 {% endif %}
             </td>
-            <td>{{ weekday_names.get(w.weekday, '待定') }}</td>
-            <td class="small">{{ w.broadcast_time or '—' }}</td>
-            <td>
+            <td class="cell-weekday" data-label="星期">{{ weekday_names.get(w.weekday, '待定') }}</td>
+            <td class="cell-time small" data-label="播出">{{ w.broadcast_time or '—' }}</td>
+            <td class="cell-platform" data-label="平台">
                 {% if w.platforms %}
                 <span class="badge bg-secondary">{{ w.platforms|length }} 个</span>
                 {% else %}
                 <span class="text-muted small">—</span>
                 {% endif %}
             </td>
-            <td class="text-muted small">{{ w.last_synced_at.strftime('%Y-%m-%d %H:%M') }}</td>
-            <td class="text-nowrap">
+            <td class="cell-synced text-muted small" data-label="最近同步">
+                {{ w.last_synced_at.strftime('%Y-%m-%d %H:%M') }}
+            </td>
+            <td class="cell-actions" data-label="操作">
                 {% if w.category %}
                 <a class="btn btn-sm btn-outline-secondary" href="/schedule?category={{ w.category }}">查看</a>
                 {% else %}
@@ -140,7 +162,11 @@
                     <input type="hidden" name="page" value="{{ page }}">
                     <button class="btn btn-sm btn-outline-primary" type="submit">重新同步</button>
                 </form>
-                <form method="post" action="/manage/schedules/{{ w.id }}/delete" class="d-inline">
+                <form method="post" action="/manage/schedules/{{ w.id }}/delete" class="d-inline"
+                      data-ajax-delete data-remove="row" data-count-param="deleted"
+                      data-verb="删除" data-entity="档期作品" data-ids="{{ w.id }}"
+                      data-confirm="确定删除档期作品《{{ w.title_main }}》？只清理本地记录，之后可重新同步。"
+                      data-confirm-title="删除档期作品" data-confirm-ok="确认删除">
                     <input type="hidden" name="season" value="{{ current_season or '' }}">
                     <input type="hidden" name="category" value="{{ current_category or '' }}">
                     <input type="hidden" name="q" value="{{ q }}">
@@ -154,8 +180,17 @@
     </table>
 </div>
 
-<div class="d-flex flex-wrap justify-content-end align-items-center gap-2 mt-3">
+<div class="admin-bulkbar">
+    <span class="admin-sel-info">已选 <b data-sel-count>0</b> 条</span>
+    {# 窄屏表头整行隐藏，全选框移到批量栏里，手指才够得着 #}
+    <label class="admin-select-all-mobile">
+        <input class="form-check-input" type="checkbox" data-select-all aria-label="全选本页">
+        <span>全选本页</span>
+    </label>
+    <button class="btn btn-sm btn-danger" type="submit" form="bulk-schedule-delete"
+            data-bulk-submit>批量删除选中</button>
     {{ pager('/manage/schedules?season=' ~ (current_season or '')|urlencode ~ '&category=' ~ (current_category or '')|urlencode ~ '&q=' ~ (q|urlencode) ~ '&', page, total_pages) }}
+</div>
 </div>
 {% endif %}
 {% endblock %}

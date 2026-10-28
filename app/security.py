@@ -68,6 +68,22 @@ def _sign(payload: bytes, secret_key: str) -> str:
     return _b64encode(hmac.new(secret_key.encode("utf-8"), payload, hashlib.sha256).digest())
 
 
+def generate_oauth_ticket() -> str:
+    """生成一次性票据明文：32 字节 URL-safe 随机串，仅回跳 URL 里明文出现一次。
+
+    库中只存其 SHA-256 摘要（见 ``hash_token``）；一次性由调用方置 used 保证。
+    """
+    return secrets.token_urlsafe(32)
+
+
+def generate_access_token() -> str:
+    """生成访问令牌明文：48 字节 URL-safe 随机串，仅签发时返回一次。
+
+    库中只存其 SHA-256 摘要（见 ``hash_token``）；可撤销由调用方置 revoked 保证。
+    """
+    return secrets.token_urlsafe(48)
+
+
 def create_signed_payload(
     payload: dict, secret_key: str, *, now: float | None = None
 ) -> str:
@@ -119,6 +135,30 @@ def read_device_token(token: str, secret_key: str) -> str | None:
         return None
     device = str(data.get("dev") or "").strip()
     return device or None
+
+
+def create_result_token(result_id: int, secret_key: str, *, now: float | None = None) -> str:
+    """签发「游客结果令牌」：只含结果行 id 与签发时间。
+
+    复用设备令牌那套签名：结果 id 不能被篡改，否则谁都能领走别人的结果。
+    真正的过期判据是表里的 created_at（30 天），令牌本身不携带有效期。
+    """
+    payload = {
+        "rid": int(result_id),
+        "iat": int(time.time() if now is None else now),
+    }
+    return create_signed_payload(payload, secret_key)
+
+
+def read_result_token(token: str, secret_key: str) -> int | None:
+    """校验结果令牌并返回结果行 id；无效返回 None。"""
+    data = _read_payload(token, secret_key)
+    if not data:
+        return None
+    try:
+        return int(data.get("rid"))
+    except (TypeError, ValueError):
+        return None
 
 
 def create_session_token(

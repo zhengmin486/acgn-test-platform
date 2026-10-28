@@ -46,7 +46,7 @@ ATOM_XML = """<?xml version="1.0" encoding="utf-8"?>
   <entry><title>2026年7月新番表</title><link href="http://yuc.wiki/202607/"/><updated>2026-09-01T00:00:00.000Z</updated></entry>
   <entry><title>2026年10月新番表</title><link href="http://yuc.wiki/202610/"/><updated>2026-08-01T00:00:00.000Z</updated></entry>
   <entry><title>Movie/OVA/OAD/SP etc.</title><link href="http://yuc.wiki/sp/"/><updated>2026-09-20T18:50:24.545Z</updated></entry>
-  <entry><title>内地上映动画电影</title><link href="http://yuc.wiki/cnmovie/"/><updated>2026-09-21T10:00:00.000Z</updated></entry>
+  <entry><title>日本动画电影-内地院线档期</title><link href="http://yuc.wiki/movie/"/><updated>2026-09-21T10:00:00.000Z</updated></entry>
   <entry><title>2025年1月新番表</title><link href="http://yuc.wiki/202501/"/><updated>2026-10-12T00:00:00.000Z</updated></entry>
 </feed>"""
 
@@ -94,6 +94,17 @@ PAGE_HEADER = """<!DOCTYPE html><html><head><title>2026年10月新番表 - 長�
 <div style="float:left"><div class="div_date_"><img width="120px" data-src="https://img.example/calendar.jpg"></div>
 <div><table width="120px" height="40px"><tr><td colspan="2" class="date_title_">赛博朋克 边缘行者2</td></tr></table></div></div>
 """
+
+
+def build_future_entry(num: int, *, title: str, work_type: str = "原创", date: str = "2027冬") -> str:
+    """按特殊分类页（未上线新番 /new/）2026-10 改版后的真实结构构造一个条目块。"""
+    return (
+        f'<div class="future_div">\n'
+        f'    <p class="future_type_a">{work_type}</p><p class="future_date">{date}</p>\n'
+        f'    <img width="150px" data-src="https://img.example/future{num}.jpg" '
+        f'referrerPolicy="no-referrer"></div><div><table class="future_table"><tr class="future_tr">\n'
+        f'    <td class="future_title__">{title}</td></tr></table></div></div>\n'
+    )
 
 
 def build_season_page(
@@ -258,37 +269,49 @@ class TestSpecialCategories:
         specials = sync_yuc.parse_special_categories(ATOM_XML)
         by_code = {s.code: s for s in specials}
         assert set(by_code) == {"unreleased", "ova_sp", "cn_movie"}
-        # 站点原文（新番卫星观测站 / Movie-OVA-SP / 内地上映动画电影）已改写
+        # 站点原文（新番卫星观测站 / Movie-OVA-SP / 日本动画电影-内地院线档期）已改写
         assert by_code["unreleased"].title == "未上线新番"
         assert by_code["unreleased"].url == "http://yuc.wiki/new/"
         assert by_code["ova_sp"].title == "剧场版ova与特别篇"
         assert by_code["ova_sp"].url == "http://yuc.wiki/sp/"
         assert by_code["cn_movie"].title == "大陆引进剧场版"
-        assert by_code["cn_movie"].url == "http://yuc.wiki/cnmovie/"
+        # 2026-10-24 实测：cn_movie 页链接为 /movie/（旧 /cnmovie/ 已变）
+        assert by_code["cn_movie"].url == "http://yuc.wiki/movie/"
 
     def test_parse_atom_still_only_seasons(self):
         """parse_atom 仍只返回季度档期，特殊分类不混进季度发现结果。"""
         seasons = sync_yuc.parse_atom(ATOM_XML)
         assert [s.code for s in seasons] == ["202610", "202607", "202501"]
         codes = {s.code for s in seasons}
-        assert "new" not in codes and "sp" not in codes and "cnmovie" not in codes
+        assert "new" not in codes and "sp" not in codes and "movie" not in codes
 
     def test_special_category_by_path_and_title(self):
-        """路径片段（/new/、/sp/）优先；拿不到路径时按标题子串兜底。"""
+        """路径片段（/new/、/sp/、/movie/）优先；拿不到路径时按标题子串兜底。"""
         atom = (
             '<feed xmlns="http://www.w3.org/2005/Atom">'
             '<entry><title>新番卫星观测站</title><link href="http://yuc.wiki/new/"/></entry>'
             '<entry><title>Movie/OVA/OAD/SP etc.</title><link href="http://yuc.wiki/sp/"/></entry>'
-            '<entry><title>内地上映动画电影</title><link href="http://yuc.wiki/cnmovie/"/></entry>'
+            '<entry><title>日本动画电影-内地院线档期</title><link href="http://yuc.wiki/movie/"/></entry>'
             "</feed>"
         )
         specials = {s.code: s for s in sync_yuc.parse_special_categories(atom)}
         assert set(specials) == {"unreleased", "ova_sp", "cn_movie"}
 
+    def test_special_category_title_fallback_without_path(self):
+        """链接缺失/路径不含片段时，标题子串「内地院线」兜底认出 cn_movie。"""
+        atom = (
+            '<feed xmlns="http://www.w3.org/2005/Atom">'
+            "<entry><title>日本动画电影-内地院线档期</title></entry>"
+            "</feed>"
+        )
+        specials = {s.code: s for s in sync_yuc.parse_special_categories(atom)}
+        assert set(specials) == {"cn_movie"}
+        assert specials["cn_movie"].title == "大陆引进剧场版"
+
     def test_find_special_category_locates_page(self):
         """find_special_category：按分类码定位页面地址与本站点名。"""
         info = sync_yuc.find_special_category(ATOM_XML, "cn_movie")
-        assert info.url == "http://yuc.wiki/cnmovie/"
+        assert info.url == "http://yuc.wiki/movie/"
         assert info.title == "大陆引进剧场版"
 
     def test_find_special_category_raises_when_missing(self):
@@ -305,7 +328,8 @@ class TestSpecialCategories:
             requested.append(url)
             if url.endswith("/atom.xml"):
                 return ATOM_XML
-            return SEASON_HTML
+            # 特殊分类页 2026-10 改版后的 future_div 结构（未上线新番）
+            return UNRELEASED_PAGE
 
         summary = sync_yuc.run_sync_special_category(
             "unreleased",
@@ -327,6 +351,207 @@ class TestSpecialCategories:
             assert seasons == []
         finally:
             db.close()
+
+
+# ---------- 特殊分类页新结构解析（2026-10-24 源站改版后） ----------
+
+# 未上线新番（/new/）：future_div 块，标题 <br> 折行、类型/档期/海报齐全。
+UNRELEASED_PAGE = """<!DOCTYPE html><html><body>
+<div class="future_div">
+    <p class="future_type_a">原创</p><p class="future_date">2027冬</p>
+    <img width="150px" data-src="https://i0.hdslb.com/bfs/new_dyn/aaa.jpg" referrerPolicy="no-referrer"></div><div><table class="future_table"><tr class="future_tr">
+    <td class="future_title__">LoveLive! 莲之空<br>女学院学园偶像俱乐部 第2章</td></tr></table></div></div>
+
+<div style="float:left"><div class="future_div">
+    <p class="future_type_b">漫画改</p><p class="future_date_">2027春</p>
+    <img width="150px" data-src="https://i0.hdslb.com/bfs/new_dyn/bbb.jpg" referrerPolicy="no-referrer"></div><div><table class="future_table"><tr class="future_tr">
+    <td class="future_title_">CHARISMA</td></tr></table></div></div>
+</body></html>"""
+
+# 剧场版ova与特别篇（/sp/）：div_sp 块 + 月度分组 details（应被忽略）。
+# 页顶图例说明块镜像源站真实结构：data-src="海报"、文字全是「标题/类型/时间」，
+# 切块时必须剔除（曾作为垃圾记录入库）。
+SP_PAGE = """<!DOCTYPE html><html><body>
+<div style="float:left">
+  <div
+ class="div_sp" ><img width="200px" data-src="海报" referrerPolicy="no-referrer"></div>
+  <div><table width="200px">
+    <tr><td colspan="2" class="sp_title">标题</td></tr>
+    <tr><td class="type-">类型</td><td class="sp_release">时间</td></tr></table></div></div>
+
+<details open><summary><p class="intro_sp"><b>-----2026年12月-----</b></p></summary>
+<div style="float:left">
+  <div
+ class="div_sp" ><img width="200px" data-src="https://i0.hdslb.com/bfs/new_dyn/sp1.jpg" referrerPolicy="no-referrer"></div>
+  <div><table width="200px">
+    <tr><td colspan="2" class="sp_title">某剧场版<br>后篇</td></tr>
+    <tr><td class="type-m">剧场版</td><td class="sp_release">2026/12/12上映</td></tr></table></div></div>
+
+<div style="float:left">
+  <div
+ class="div_sp" ><img width="200px" data-src="https://i0.hdslb.com/bfs/new_dyn/sp2.jpg" referrerPolicy="no-referrer"></div>
+  <div><table width="200px">
+    <tr><td colspan="2" class="sp_title_">某OVA</td></tr>
+    <tr><td class="type-o">OVA</td><td class="sp_release_">2027/1/1</td></tr></table></div></div>
+</body></html>"""
+
+# 大陆引进剧场版（/movie/）：div_sp 块 + movie_* 类名 + 平台链接 + 票房行。
+# 页顶图例块（movie_title 为空、movie_box 为「内地总票房￥」）同样须剔除。
+MOVIE_PAGE = """<!DOCTYPE html><html><body>
+<div style="float:left"><div
+ class="div_sp"><img width="270px" data-src="海报" referrerPolicy="no-referrer"></div>
+  <div><table width="270px">
+    <tr><td colspan="2" class="movie_title"></td></tr>
+    <tr><td class="type-o">Movie</td><td class="movie_release">上映时间</td></tr>
+  </table></div></div>
+<tr><td colspan="2" class="movie_box">内地总票房￥</td></tr>
+
+<div style="float:left"><div
+ class="div_sp"><img width="270px" data-src="https://i0.hdslb.com/bfs/new_dyn/mv1.jpg" referrerPolicy="no-referrer"></div>
+  <div><table width="270px">
+    <tr><td colspan="2" class="movie_title">蜡笔小新<br>灼热的春日部舞者们</td></tr>
+    <tr><td class="type-o">延期</td><td class="movie_release">原定2025/12/6上映</td></tr>
+    <tr><td colspan="2" class="movie_box">内地总票房￥1347.4万</td></tr>
+  </table></div></div>
+<a href="https://www.bilibili.com/bangumi/play/ss12345" target="_blank">哔哩哔哩</a>
+</body></html>"""
+
+
+class TestSpecialPageParser:
+    """特殊分类页 2026-10 改版后的 future_div / div_sp 结构解析。"""
+
+    def test_split_unreleased_blocks(self):
+        blocks = sync_yuc.split_special_entries(UNRELEASED_PAGE)
+        assert len(blocks) == 2
+
+    def test_parse_unreleased_entry(self):
+        entry = sync_yuc.parse_special_entry(
+            sync_yuc.split_special_entries(UNRELEASED_PAGE)[0]
+        )
+        # 标题 <br> 折行转空格；档期进 broadcast_note；类型/海报各就各位
+        assert entry.title_cn == "LoveLive! 莲之空 女学院学园偶像俱乐部 第2章"
+        assert entry.title_main == entry.title_cn
+        assert entry.broadcast_note == "2027冬"
+        assert entry.work_type == "原创"
+        assert entry.image_url == "https://i0.hdslb.com/bfs/new_dyn/aaa.jpg"
+        assert entry.title_jp is None
+
+    def test_parse_unreleased_variant_classes(self):
+        """第二条用 future_date_ / future_title_ 变体类名，同样要解析到。"""
+        entry = sync_yuc.parse_special_entry(
+            sync_yuc.split_special_entries(UNRELEASED_PAGE)[1]
+        )
+        assert entry.title_cn == "CHARISMA"
+        assert entry.broadcast_note == "2027春"
+        assert entry.work_type == "漫画改"
+
+    def test_parse_sp_entry_ignores_month_grouping(self):
+        """月度分组 details/intro_sp 不是条目：切块只认 div_sp。"""
+        blocks = sync_yuc.split_special_entries(SP_PAGE)
+        assert len(blocks) == 2
+        entry = sync_yuc.parse_special_entry(blocks[0])
+        assert entry.title_cn == "某剧场版 后篇"
+        assert entry.broadcast_note == "2026/12/12上映"
+        assert entry.work_type == "剧场版"
+        assert entry.image_url == "https://i0.hdslb.com/bfs/new_dyn/sp1.jpg"
+
+    def test_parse_sp_second_entry(self):
+        entry = sync_yuc.parse_special_entry(
+            sync_yuc.split_special_entries(SP_PAGE)[1]
+        )
+        assert entry.title_cn == "某OVA"
+        assert entry.work_type == "OVA"
+
+    def test_parse_movie_entry_with_platform(self):
+        entry = sync_yuc.parse_special_entry(
+            sync_yuc.split_special_entries(MOVIE_PAGE)[0]
+        )
+        assert entry.title_cn == "蜡笔小新 灼热的春日部舞者们"
+        assert entry.broadcast_note == "原定2025/12/6上映"
+        assert entry.work_type == "延期"
+        # 内地票房（movie_box）随条目解析，源站原文不改写
+        assert entry.box_office == "内地总票房￥1347.4万"
+        # 块内 bilibili 链接识别为播放平台
+        assert [p["url"] for p in entry.platforms] == [
+            "https://www.bilibili.com/bangumi/play/ss12345"
+        ]
+
+    def test_legend_blocks_filtered_out(self):
+        """页顶图例说明块（data-src="海报"/文字「标题 类型 时间」）不是条目。"""
+        # fixture 已含图例块：切块结果应只有真实条目（2 个）
+        assert len(sync_yuc.split_special_entries(SP_PAGE)) == 2
+        assert len(sync_yuc.split_special_entries(MOVIE_PAGE)) == 1
+        titles = [sync_yuc.parse_special_entry(b).title_main for b in sync_yuc.split_special_entries(SP_PAGE)]
+        assert "标题" not in titles
+
+    def test_legend_block_detector(self):
+        assert sync_yuc._is_legend_block('<div class="div_sp"><img data-src="海报"></div>')
+        assert sync_yuc._is_legend_block(
+            '<div class="div_sp"><img data-src="https://x/a.jpg">'
+            '<td class="movie_title">标题</td><td class="movie_release">上映时间</td></div>'
+        )
+        assert not sync_yuc._is_legend_block(
+            '<div class="div_sp"><img data-src="https://x/a.jpg">'
+            '<td class="sp_title">某OVA</td><td class="sp_release">2027/1/1</td></div>'
+        )
+
+    def test_extract_air_date(self):
+        """播出/上映说明 → ISO 日期；只有季度描述（2027冬）时返回 None。"""
+        assert sync_yuc.extract_air_date("2026/12/11上映") == "2026-12-11"
+        assert sync_yuc.extract_air_date("2025/11/14开始上映") == "2025-11-14"
+        assert sync_yuc.extract_air_date("2026/11/13先行上映") == "2026-11-13"
+        assert sync_yuc.extract_air_date("原定2025/12/6上映") == "2025-12-06"
+        assert sync_yuc.extract_air_date("2025-11-14") == "2025-11-14"
+        assert sync_yuc.extract_air_date("2026年11月13日") == "2026-11-13"
+        assert sync_yuc.extract_air_date("2027冬") is None
+        assert sync_yuc.extract_air_date("") is None
+        assert sync_yuc.extract_air_date(None) is None
+        # 非法月日不猜：提不出来就回退原文归组
+        assert sync_yuc.extract_air_date("2026/13/40上映") is None
+        # 源站手滑漏写年月分隔符（20262/20放送，本意 2026/2/20）也认
+        assert sync_yuc.extract_air_date("20262/20放送") == "2026-02-20"
+        assert sync_yuc.extract_air_date("202612/5上映") == "2026-12-05"
+        # 但越界的「年+数字/数字」依旧不掰成日期
+        assert sync_yuc.extract_air_date("202632/1放送") is None
+        # 没有年份的纯「9/2-9/9」不猜年份（见 MANUAL_PATCHES 人工补丁路径）
+        assert sync_yuc.extract_air_date("TV放送：9/2-9/9") is None
+
+    def test_normalize_note_dates(self):
+        """说明文本里漏写年月分隔符的日期补回斜杠；合法文本不动。"""
+        assert sync_yuc.normalize_note_dates("20262/20放送") == "2026/2/20放送"
+        assert sync_yuc.normalize_note_dates("202611/13先行上映") == "2026/11/13先行上映"
+        # 已合法/非日期文本原样返回
+        assert sync_yuc.normalize_note_dates("2026/2/20放送") == "2026/2/20放送"
+        assert sync_yuc.normalize_note_dates("2026年11月13日先行上映") == "2026年11月13日先行上映"
+        assert sync_yuc.normalize_note_dates("TV放送：9/2-9/9") == "TV放送：9/2-9/9"
+        assert sync_yuc.normalize_note_dates("202632/1放送") == "202632/1放送"
+        assert sync_yuc.normalize_note_dates(None) is None
+
+    def test_manual_patch_fills_source_missing_fields(self):
+        """源站缺字段的条目按 MANUAL_PATCHES 补齐；未命中原样返回。"""
+        key = sync_yuc.normalize_title_key("特别篇 五等分的新娘∽")
+        note, patch = sync_yuc.apply_manual_patch(key, "TV放送：9/2-9/9")
+        assert note == "TV放送：2023/9/2-9/9 16:30（TBS，前后篇）；9/10 22:00（BS11，两话连播）"
+        assert patch["broadcast_time"] == "16:30"
+        assert patch["air_date"] == "2023-09-02"
+        assert patch["weekday"] == 6
+        # 补丁说明自带年份，提取口径自洽
+        assert sync_yuc.extract_air_date(note) == "2023-09-02"
+        # 键不命中时零改动
+        miss_note, miss_patch = sync_yuc.apply_manual_patch("别的作品", "TV放送：9/2-9/9")
+        assert miss_note == "TV放送：9/2-9/9"
+        assert miss_patch == {}
+
+    def test_parsed_entry_air_date_from_note(self):
+        """解析出的 entry 能从 broadcast_note 推出 ISO 日期（run_sync 写入用）。"""
+        entry = sync_yuc.parse_special_entry(
+            sync_yuc.split_special_entries(SP_PAGE)[0]
+        )
+        assert sync_yuc.extract_air_date(entry.broadcast_note) == "2026-12-12"
+
+    def test_season_page_not_split_as_special(self):
+        """季度档期页（旧结构）没有 future_div/div_sp，切不出特殊块。"""
+        assert sync_yuc.split_special_entries(SEASON_HTML) == []
 
 
 # ---------- 字段清洗与映射 ----------
@@ -738,14 +963,15 @@ class TestRunSync:
     def test_apply_special_category_sync_stores_category(self, tmp_path):
         """特殊分类同步：season_code / category 都写为分类码，站点原文改写为本站点名。
 
-        用 build_entry 拼一份与季度页同结构的页面，验证解析复用与分类落库。
+        用 build_future_entry 拼一份 2026-10 改版后的未上线新番页（future_div
+        结构），验证新解析器与分类落库。
         """
         factory = make_db(tmp_path)
         special_url = "http://yuc.wiki/new/"
         special_page = (
             PAGE_HEADER
-            + build_entry(1, cn="未上线甲", jp="UPCOMING A", broadcast="10/3周六深夜")
-            + build_entry(2, cn="未上线乙", jp="UPCOMING B", broadcast="10/5深夜")
+            + build_future_entry(1, title="未上线甲")
+            + build_future_entry(2, title="未上线乙", date="2027春")
             + "</body></html>"
         )
         fetch = make_stub_fetch({ATOM_URL: ATOM_XML, special_url: special_page})
@@ -1404,7 +1630,8 @@ class TestScheduleModels:
             assert item["platforms"] == [{"name": "bilibili", "url": "https://www.bilibili.com/"}]
             assert set(item) == {
                 "id", "season_code", "source_key", "category", "title_main", "title_cn",
-                "title_jp", "weekday", "broadcast_time", "broadcast_note", "work_type",
+                "title_jp", "weekday", "broadcast_time", "broadcast_note", "air_date",
+                "box_office", "work_type",
                 "work_tags", "image_url", "platforms", "source_url", "last_synced_at",
                 "content_id",
             }

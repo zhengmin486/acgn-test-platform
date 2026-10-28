@@ -142,22 +142,36 @@ def test_articles_page_featured_only_for_anime(news_client):
 
 
 def test_articles_page_paginates(news_client, monkeypatch):
-    """分页生效：每页条数由 crud.ARTICLES_PAGE_SIZE 决定，翻页内容不同且回显页码。"""
-    monkeypatch.setattr(crud, "ARTICLES_PAGE_SIZE", 2)
+    """分页生效：第一页 = 1 条头条 + page_size 条网格，后续页按 page_size 顺延。"""
+    monkeypatch.setattr(crud, "ARTICLES_PAGE_SIZE", 1)
     page1 = news_client.get("/articles")
     assert page1.status_code == 200
     assert "第 1 / 2 页" in page1.text
     assert NORMAL_TITLE in page1.text  # 最新一篇在第一页头条位
+    # 头条 + 1 条网格（补满一页），共 2 条
+    assert page1.text.count('class="article-card"') == 1
 
     page2 = news_client.get("/articles", params={"page": 2})
     assert page2.status_code == 200
     assert "第 2 / 2 页" in page2.text
     assert NORMAL_TITLE not in page2.text
+    assert page2.text.count('class="article-card"') == 1
 
     # 页码越界夹回最后一页，不返回空白页
     over = news_client.get("/articles", params={"page": 99})
     assert over.status_code == 200
     assert "第 2 / 2 页" in over.text
+
+
+def test_first_page_grid_is_not_short_by_one(news_client, monkeypatch):
+    """第一页头条之外网格仍是满的（原来只取 page_size 条 → 网格少 1，4 列时空一格）。"""
+    monkeypatch.setattr(crud, "ARTICLES_PAGE_SIZE", 2)
+    page1 = news_client.get("/articles")
+    # 1 条头条 + 2 条网格 = 3 条，一页刚好装下（旧逻辑网格只有 1 条）
+    assert page1.text.count('class="article-card"') == 2
+    assert "article-feature" in page1.text
+    # 3 篇 = 1 头条 + 2 网格，正好一页（total_pages 算成 1，不渲染翻页控件）
+    assert "下一页" not in page1.text
 
 
 def test_adult_content_hidden_by_default(news_client, monkeypatch):

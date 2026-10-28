@@ -598,6 +598,9 @@ hr {
 /* 移动端搜索：汉堡旁常驻图标按钮 + 点击展开的搜索面板（<lg 生效，桌面端不出现）。
    图标按钮在 .navbar-top-actions d-lg-none 内，桌面隐藏；桌面搜索仍是 #content-nav 内胶囊。 */
 .navbar-top-actions { margin-left: auto; }
+/* 移动端搜索图标按钮：与汉堡按钮同构（38px 圆、深色描边 + 深色图标）。
+   原为白色图标 / 白色描边，在亮底 #66ccff 上对比仅约 1.6:1（远低于 AA 的 3:1），
+   几乎看不见；改深色后约 7.9:1，且与旁边的汉堡是一个组件组。 */
 .nav-search-toggle {
     display: inline-flex;
     align-items: center;
@@ -606,21 +609,27 @@ hr {
     height: 38px;
     padding: 0;
     border-radius: 999px;
-    border: 1px solid rgba(255, 255, 255, 0.28);
+    border: 1px solid var(--on-bright-line);
     background: transparent;
-    color: #fff;
+    color: var(--on-bright);
     cursor: pointer;
     transition: background-color 0.15s var(--ease), border-color 0.15s var(--ease);
 }
 .nav-search-toggle:hover,
 .nav-search-toggle:focus-visible {
-    background: rgba(255, 255, 255, 0.16);
-    border-color: rgba(255, 255, 255, 0.55);
+    background: rgba(10, 45, 66, 0.08);
+    border-color: rgba(10, 45, 66, 0.45);
     outline: none;
 }
 .nav-search-toggle .svg-ic {
     width: 1.05rem;
     height: 1.05rem;
+    /* 与汉堡三条横线（实心 2px）视觉等重：
+       .svg-ic 的 stroke-width 是 **viewBox 单位**（viewBox 24），而本图标渲染
+       尺寸 1.05rem≈16.8px，缩放比 0.7 —— 写 1.9 实际只有 1.33px，明显比 2px
+       实心横线细。取 2.6 → 实际约 1.82px，与汉堡等重（2.86 才是精确 2px，
+       但那样放大镜自身会显笨）。改动只作用于这只按钮，不动 .svg-ic 全局。 */
+    stroke-width: 2.6;
 }
 .nav-search-panel {
     background: #0a2d42;
@@ -646,18 +655,87 @@ hr {
 }
 @media (max-width: 380px) {
     .nav-search-toggle { width: 34px; height: 34px; }
-    .navbar-toggler { padding: 0.25rem; }
 }
 
-/* 亮底导航的移动端汉堡按钮：改用深色图标，避免白色图标在亮底上看不见 */
+/* 移动端汉堡按钮（.site-navbar / .admin-navbar 共用，两者同为亮底）
+   --------------------------------------------------------------------------
+   原先是 Bootstrap 默认的「圆角方盒 + 30px 背景图三条线」：56×40 的宽扁方盒与
+   左侧 38px 圆形搜索按钮并排，形状与尺寸都不成对；且 30 见方里只画三条细线，
+   四周留白过多、图标显小。这里改成与搜索按钮同构的 38px 圆形，三条线改用实体
+   span 绘制，展开时旋转成 X —— 开合状态一眼可辨，而不是永远三根线。
+
+   配色：亮底（#66ccff）上白色图标对比仅约 1.6:1（远低于 WCAG AA 要求的 3:1），
+   所以汉堡与左侧搜索按钮一律改用深品牌蓝 --on-bright（约 7.9:1）。 */
 .site-navbar .navbar-toggler,
 .admin-navbar .navbar-toggler {
-    border-color: var(--on-bright-line);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 38px;
+    height: 38px;
+    padding: 0;
+    border-radius: 999px;
+    border: 1px solid var(--on-bright-line);
+    background: transparent;
+    color: var(--on-bright);
+    transition: background-color 0.15s var(--ease), border-color 0.15s var(--ease);
 }
 
-.site-navbar .navbar-toggler-icon,
-.admin-navbar .navbar-toggler-icon {
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 30 30'%3E%3Cpath stroke='rgba(10,45,66,0.85)' stroke-linecap='round' stroke-miterlimit='10' stroke-width='2' d='M4 7h22M4 15h22M4 23h22'/%3E%3C/svg%3E");
+.site-navbar .navbar-toggler:hover,
+.site-navbar .navbar-toggler:focus-visible,
+.admin-navbar .navbar-toggler:hover,
+.admin-navbar .navbar-toggler:focus-visible {
+    background: rgba(10, 45, 66, 0.08);
+    border-color: rgba(10, 45, 66, 0.45);
+    outline: none;
+}
+
+/* 三条横线：18×2、间距 6，整体 18×14 居中于 38px 圆内 */
+.nav-burger-box {
+    position: relative;
+    display: block;
+    width: 18px;
+    height: 14px;
+}
+
+.nav-burger-bar {
+    position: absolute;
+    left: 0;
+    width: 18px;
+    height: 2px;
+    border-radius: 1px;
+    background: currentColor;
+    transition: transform 0.22s var(--ease), opacity 0.15s var(--ease);
+}
+
+.nav-burger-bar:nth-child(1) { top: 0; }
+.nav-burger-bar:nth-child(2) { top: 6px; }
+.nav-burger-bar:nth-child(3) { top: 12px; }
+
+/* 展开态：上下两条归中并旋转成 X，中间一条收起。
+   状态取 aria-expanded（由 Bootstrap 折叠组件维护），不额外加 JS 类名。 */
+.navbar-toggler[aria-expanded="true"] .nav-burger-bar:nth-child(1) {
+    transform: translateY(6px) rotate(45deg);
+}
+.navbar-toggler[aria-expanded="true"] .nav-burger-bar:nth-child(2) {
+    opacity: 0;
+    transform: scaleX(0.2);
+}
+.navbar-toggler[aria-expanded="true"] .nav-burger-bar:nth-child(3) {
+    transform: translateY(-6px) rotate(-45deg);
+}
+
+/* 尊重系统「减少动效」：直接切形状，不做旋转过渡 */
+@media (prefers-reduced-motion: reduce) {
+    .nav-burger-bar { transition: none; }
+}
+
+/* 极窄屏：汉堡与搜索按钮一起收到 34px，两者始终保持同尺寸。
+   注意顺序——这条必须写在上面的 .navbar-toggler 主规则**之后**，
+   否则同特异性下会被 38px 覆盖（360px 实测汉堡 38 / 搜索 34 不齐的坑）。 */
+@media (max-width: 380px) {
+    .site-navbar .navbar-toggler,
+    .admin-navbar .navbar-toggler { width: 34px; height: 34px; }
 }
 
 /* 站点字标（2026-10-19 改名 Otaku）：拉丁字母为主体 + 竖排片假名注音
@@ -938,6 +1016,272 @@ hr {
     background-color: var(--brand-50);
 }
 
+/* ==========================================================================
+   后台管理表格（.admin-panel / .admin-table）：多选与无刷新删除的共用骨架
+   --------------------------------------------------------------------------
+   桌面端与从前完全一致（表格就是表格），下面的卡片化只在窄屏生效：
+   窄屏下表格横向滚动最难用——一列挤成竖排、操作按钮要横向拖才够得着，
+   所以改成「一行 = 一张卡片」，标签由 td 的 data-label 经 ::before 输出，
+   操作按钮落到卡片底部整行排列，触摸目标 44px。
+   ========================================================================== */
+.admin-panel {
+    --admin-card-gap: var(--space-3);
+}
+
+/* 批量操作表单只装隐藏字段，不占任何版面 */
+.admin-bulkform {
+    margin: 0;
+}
+
+.admin-bulkbar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2) var(--space-3);
+    margin-top: var(--space-3);
+}
+
+.admin-bulkbar > nav {
+    margin-left: auto;
+}
+
+.admin-sel-info {
+    font-size: var(--text-sm);
+    color: var(--ink-500);
+}
+
+.admin-sel-info b {
+    color: var(--ink-900);
+}
+
+/* 批量驳回的说明输入：桌面端跟按钮并排，窄屏独占一行 */
+.admin-bulk-note {
+    width: 12rem;
+}
+
+/* 窄屏专用的「全选本页」：桌面用表头里的全选框，这个不占版面 */
+.admin-select-all-mobile {
+    display: none;
+}
+
+.admin-table td.cell-actions .submission-note {
+    width: 7rem;
+}
+
+/* 关联管理里跟着每条关联走的删除按钮：指尖点得到，但不撑爆 chip */
+.admin-table .chip-del {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 2rem;
+    min-height: 2rem;
+    font-size: 1.05rem;
+}
+
+@media (max-width: 767.98px) {
+    /* 关掉 .table-responsive 的横向滚动：卡片自己会换行，不需要横着拖 */
+    .admin-table {
+        overflow-x: visible;
+    }
+
+    .admin-table > .table {
+        display: block;
+    }
+
+    .admin-table thead {
+        display: none;
+    }
+
+    .admin-table tbody {
+        display: block;
+        padding: var(--space-2);
+    }
+
+    .admin-table tbody tr {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: flex-start;
+        gap: var(--space-1) var(--space-2);
+        padding: var(--space-3);
+        border: 1px solid var(--brand-100);
+        border-radius: var(--radius-md);
+        background-color: var(--card-bg);
+        margin-bottom: var(--space-3);
+    }
+
+    .admin-table tbody tr:last-child {
+        margin-bottom: 0;
+    }
+
+    /* 抬头：勾选框 + 标题同行，标题内部竖排（原名 / 原名外文 / 类型·标签） */
+    .admin-table tbody td.cell-check {
+        order: -2;
+        flex: 0 0 auto;
+        padding: 0;
+    }
+
+    .admin-table tbody td.cell-title {
+        order: -1;
+        flex: 1 1 60%;
+        display: block;
+        padding: 0;
+        font-weight: 700;
+        word-break: break-word;
+    }
+
+    /* 标题块下面的几行（原名 / 类型·标签 / 简介）回到常规字重，
+       否则整块都变粗，层级就没了 */
+    .admin-table tbody td.cell-title .small {
+        font-weight: 400;
+    }
+
+    /* 其余单元格：一行「标签 值」，值可换行 */
+    .admin-table tbody td {
+        flex: 1 1 100%;
+        display: flex;
+        align-items: baseline;
+        gap: 0 var(--space-2);
+        min-width: 0;
+        padding: 0.15rem 0;
+        border: 0;
+        text-align: left;
+    }
+
+    /* 标签固定宽度且不折行：最长的是「作者/公司关联」（6 个汉字），
+       宽度不够会把标签折成两行、把值挤下去 */
+    .admin-table tbody td::before {
+        content: attr(data-label);
+        flex: 0 0 5.5rem;
+        white-space: nowrap;
+        font-size: var(--text-xs);
+        color: var(--ink-500);
+    }
+
+    .admin-table tbody td > * {
+        flex: 1 1 auto;
+        min-width: 0;
+    }
+
+    /* 徽章是状态标记，不该跟着拉伸成整行色条：保持自身宽度并与文字基线对齐 */
+    .admin-table tbody td > .badge {
+        flex: 0 0 auto;
+        align-self: center;
+    }
+
+    .admin-table tbody td.cell-check::before,
+    .admin-table tbody td.cell-title::before,
+    .admin-table tbody td.cell-actions::before {
+        display: none;
+    }
+
+    /* 勾选框默认 16px，指尖点不准：放到 21px 左右（chip 里的也一样） */
+    .admin-table .form-check-input {
+        width: 1.3em;
+        height: 1.3em;
+    }
+
+    .admin-table .chip-del {
+        min-width: 2.25rem;
+        min-height: 2.25rem;
+    }
+
+    /* 操作区单独成块：按钮 44px 触摸目标，两三个并排占满一行 */
+    .admin-table tbody td.cell-actions {
+        flex-wrap: wrap;
+        gap: var(--space-2);
+        margin-top: var(--space-1);
+        padding-top: var(--space-2);
+        border-top: 1px dashed var(--brand-100);
+    }
+
+    .admin-table tbody td.cell-actions > * {
+        flex: 1 1 40%;
+        min-width: 0;
+    }
+
+    .admin-table tbody td.cell-actions .btn,
+    .admin-table tbody td.cell-actions a.btn {
+        width: 100%;
+        min-height: 44px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+    }
+
+    /* 关联管理的「添加关联 / 保存系列」两排表单各占整行，内部再分两列 */
+    .admin-table tbody td.cell-actions > .row {
+        flex: 1 1 100%;
+    }
+
+    .admin-table tbody td.cell-actions .row {
+        display: flex;
+        flex-wrap: wrap;
+        width: 100%;
+        margin: 0;
+        gap: var(--space-2);
+    }
+
+    .admin-table tbody td.cell-actions .row > .col-auto {
+        flex: 1 1 45%;
+        width: auto;
+        padding: 0;
+    }
+
+    .admin-table tbody td.cell-actions .row .form-control,
+    .admin-table tbody td.cell-actions .row .form-select {
+        width: 100%;
+    }
+
+    .admin-bulkbar > nav {
+        margin-left: 0;
+        width: 100%;
+    }
+
+    .admin-bulkbar .admin-sel-info {
+        flex: 1 1 auto;
+    }
+
+    /* 表头（连全选框）在窄屏被隐藏，全选改到批量栏：44px 触摸目标 */
+    .admin-bulkbar .admin-select-all-mobile {
+        display: inline-flex;
+        align-items: center;
+        gap: var(--space-2);
+        min-height: 44px;
+        padding: 0 var(--space-1);
+        font-size: var(--text-sm);
+        color: var(--ink-600);
+        white-space: nowrap;
+        cursor: pointer;
+    }
+
+    .admin-bulkbar .admin-select-all-mobile .form-check-input {
+        width: 20px;
+        height: 20px;
+        margin: 0;
+        flex: none;
+    }
+
+    .admin-bulkbar [data-bulk-submit] {
+        flex: 1 1 60%;
+        min-height: 44px;
+    }
+
+    .admin-bulkbar .admin-bulk-note {
+        flex: 1 1 100%;
+        width: 100%;
+    }
+
+    /* 审核页每行两个表单（通过 / 驳回）：驳回说明独占一行，按钮才放得下 */
+    .admin-table tbody td.cell-actions form {
+        flex: 1 1 100%;
+    }
+
+    .admin-table tbody td.cell-actions .submission-note {
+        width: 100%;
+        margin-bottom: var(--space-2);
+    }
+}
+
 /* 区块标题：渐变竖线引导 */
 .section-heading {
     display: flex;
@@ -1095,60 +1439,240 @@ hr {
     line-height: 1.1;
 }
 
-/* 右侧海报拼贴：三张竖版主视觉错落排布，缓慢浮动 */
+/* ---------- 右侧海报轮播（Coverflow）：三张构图 = 中央大图 + 两侧缩小倾斜预览。
+   位置 / 尺寸 / 角度 / 层级与本次改动前的拼贴（原 .home-poster-a/b/c）逐值一致，
+   只把「哪张在 C 位」改成状态类（is-active/is-prev/is-next/is-hidden）由 JS 驱动，
+   从而挂上服务端全站名单轮换；轮播 / 侧卡切换 / 作品跳转 / 管理员配置不受影响。
+   数据见 app/home_posters.py；无 JS 时只显示第一张（CSS 降级），点击即进详情。 ---------- */
 .home-hero-collage {
     position: relative;
+    min-width: 0;
     height: clamp(220px, 26vw, 320px);
+    /* C 位宽（原 poster-b）与侧位宽（原 poster-a/c）：vw 跟随视口，clamp 兜上下限 */
+    --cf-card-w: clamp(134px, 15vw, 194px);
+    --cf-side-w: clamp(118px, 13vw, 170px);
+    /* 标题位于 C 位海报正下方：100% 即海报高（slide 内容高），加一档间距 */
+    --cf-cap-top: calc(100% + 0.55rem);
 }
 
-.home-poster {
+.coverflow-stage {
+    position: relative;
+    height: 100%;
+    /* 纵向滚动放行给浏览器，横向手势才交给 JS（横滑切换 / 轻点跳转） */
+    touch-action: pan-y;
+}
+
+/* 键盘焦点环：容器 tabindex=0，聚焦时给整组海报一个可见轮廓 */
+.coverflow:focus-visible {
+    outline: 2px solid rgba(255, 255, 255, 0.85);
+    outline-offset: 6px;
+    border-radius: var(--radius-lg);
+}
+
+.coverflow-track {
     position: absolute;
-    width: clamp(118px, 13vw, 170px);
-    /* 必须显式 height:auto：浏览器会把 <img> 的 width/height HTML 属性映射成 CSS
-       width/height（Chrome 79+ 的 CLS 防止机制），若不覆盖，属性里的 442/589/597px
-       会以 UA 来源的高度胜出，与 width 同时写死后 aspect-ratio 失效，海报被拉成细长条。
-       auto 后由 aspect-ratio:2/3 按宽度推算高度（与手机端同一机制）。 */
+    inset: 0;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+/* 锚点统一为 left + margin-left（原 poster-c 的 right:1% 换算为 left 表达式），
+   四个状态之间才能平滑过渡；transition 覆盖全部几何量，换位即 500ms 滑动。 */
+.coverflow-slide {
+    position: absolute;
+    left: 50%;
+    top: 0;
+    width: var(--cf-card-w);
+    margin-left: calc(var(--cf-card-w) / -2);
+    transition: transform 0.5s var(--ease), opacity 0.5s var(--ease),
+                left 0.5s var(--ease), top 0.5s var(--ease),
+                width 0.5s var(--ease), margin-left 0.5s var(--ease),
+                visibility 0.5s var(--ease);
+}
+
+/* C 位（原 poster-b）：居中、最大一档、最上层；倾斜落在海报图上（见下方 .coverflow-img） */
+.coverflow-slide.is-active {
+    left: 50%;
+    top: 0;
+    width: var(--cf-card-w);
+    margin-left: calc(var(--cf-card-w) / -2);
+    z-index: 3;
+}
+
+/* 左侧预览（原 poster-a）：左 1%、top 8%、窄一档、压在 C 位下一层 */
+.coverflow-slide.is-prev {
+    left: 1%;
+    top: 8%;
+    width: var(--cf-side-w);
+    margin-left: 0;
+    z-index: 2;
+}
+
+/* 右侧预览（原 poster-c）：右 1%、top 12%、最底层（钻入 C 位下方形成重叠） */
+.coverflow-slide.is-next {
+    left: calc(99% - var(--cf-side-w));
+    top: 12%;
+    width: var(--cf-side-w);
+    margin-left: 0;
+    z-index: 1;
+}
+
+/* 第三张及以外：不可见、不可点（循环到近旁时自然归位） */
+.coverflow-slide.is-hidden {
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    z-index: 0;
+}
+
+/* 无 JS 降级：只留第一张，静态居中，点击进详情（与改造前行为一致） */
+.coverflow:not([data-enhanced]) .coverflow-slide {
+    position: relative;
+    left: auto;
+    margin: 0 auto;
+}
+
+.coverflow:not([data-enhanced]) .coverflow-slide:not(.is-active) {
+    display: none;
+}
+
+.coverflow:not([data-enhanced]) .coverflow-nav {
+    display: none;
+}
+
+.coverflow-card {
+    display: block;
+    border-radius: var(--radius-md);
+}
+
+.coverflow-img {
+    display: block;
+    width: 100%;
     height: auto;
     aspect-ratio: 2 / 3;
     object-fit: cover;
     border-radius: var(--radius-md);
     border: 3px solid rgba(255, 255, 255, 0.92);
     box-shadow: 0 18px 34px -12px rgba(8, 35, 56, 0.55);
-    transition: transform 0.35s var(--ease);
+    /* 图未到位时的占位底色，避免透明破版 */
+    background: rgba(255, 255, 255, 0.14);
+    transition: transform 0.5s var(--ease);
 }
 
-.home-poster-a {
-    left: 1%;
-    top: 8%;
-    transform: rotate(-7deg);
-    z-index: 2;
-}
+/* 倾斜与悬停浮动都落在海报图上（与原 .home-poster 的 transform 同口径），
+   slide 只做定位——标题因此保持水平、正居海报下方。 */
+.coverflow-slide.is-active .coverflow-img { transform: rotate(2.5deg); }
+.coverflow-slide.is-prev .coverflow-img { transform: rotate(-7deg); }
+.coverflow-slide.is-next .coverflow-img { transform: rotate(8deg); }
 
-.home-poster-b {
+/* 悬停浮动：与改动前拼贴一致——指针进入 hero（含左侧文案区）时三张各自上浮 */
+.home-hero:hover .coverflow-slide.is-prev .coverflow-img { transform: rotate(-7deg) translateY(-6px); }
+.home-hero:hover .coverflow-slide.is-active .coverflow-img { transform: rotate(2.5deg) translateY(-10px); }
+.home-hero:hover .coverflow-slide.is-next .coverflow-img { transform: rotate(8deg) translateY(-6px); }
+
+/* 作品标题 + 类型 / 评分：只属于 C 位那张（随 slide 一起出现，侧边淡出）。
+   位于 C 位海报正下方、保持水平（倾斜在海报图上，不带动文字）。 */
+.coverflow-caption {
+    position: absolute;
     left: 50%;
-    top: 0;
-    transform: rotate(2.5deg);
-    z-index: 3;
-    /* 居中靠 margin-left 而非 transform，避免 hover 的 translateY 把居中冲掉 */
-    width: clamp(134px, 15vw, 194px);
-    margin-left: calc(clamp(134px, 15vw, 194px) / -2);
+    top: var(--cf-cap-top);
+    transform: translateX(-50%);
+    width: max-content;
+    max-width: 148%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.12rem;
+    text-align: center;
+    opacity: 0;
+    transition: opacity 0.4s var(--ease);
+    pointer-events: none;
 }
 
-.home-poster-c {
-    right: 1%;
-    top: 12%;
-    transform: rotate(8deg);
-    z-index: 1;
+.coverflow-slide.is-active .coverflow-caption {
+    opacity: 1;
 }
 
-.home-hero:hover .home-poster-a { transform: rotate(-7deg) translateY(-6px); }
-.home-hero:hover .home-poster-b { transform: rotate(2.5deg) translateY(-10px); }
-.home-hero:hover .home-poster-c { transform: rotate(8deg) translateY(-6px); }
+.coverflow-title {
+    max-width: 100%;
+    font-size: 0.78rem;
+    font-weight: 500;
+    line-height: 1.3;
+    color: rgba(255, 255, 255, 0.7);
+    text-shadow: 0 1px 6px rgba(10, 45, 66, 0.4);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
 
-/* 窄屏：hero 回到单列，海报拼贴降级成文案下方一条「相册带」——
-   三张海报并排、完整露出（不再用负 margin 把下缘推出边框裁切），
-   与 PC 双列错落拼贴保持同一套素材与白色描边语言，只是换成横向一排。
-   全部规则都关在这个断点内，lg 及以上（PC 双列拼贴）完全不受影响。 */
+/* 切换按钮：默认隐藏（海报画面保持干净），PC 悬停 / 键盘聚焦时才淡入；
+   触摸设备（hover: none）根本不渲染，手机只靠滑动。 */
+.coverflow-nav {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: 40;
+    width: 2.2rem;
+    height: 2.2rem;
+    display: grid;
+    place-items: center;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    background: rgba(10, 45, 66, 0.42);
+    color: #fff;
+    cursor: pointer;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.25s var(--ease), background 0.25s var(--ease);
+}
+
+.coverflow-nav svg {
+    width: 1.05rem;
+    height: 1.05rem;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2.2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+.coverflow-nav-prev { left: 0.15rem; }
+.coverflow-nav-next { right: 0.15rem; }
+
+@media (hover: hover) and (pointer: fine) {
+    .coverflow:hover .coverflow-nav,
+    .coverflow:focus-within .coverflow-nav {
+        opacity: 0.88;
+        pointer-events: auto;
+    }
+
+    .coverflow-nav:hover {
+        opacity: 1;
+        background: rgba(10, 45, 66, 0.62);
+    }
+}
+
+/* 只有一张有效海报：切换控件整体隐藏 */
+.coverflow[data-single] .coverflow-nav {
+    display: none;
+}
+
+/* 系统「减少动态效果」：不自动播放（JS 同判），位移动画一并关闭 */
+@media (prefers-reduced-motion: reduce) {
+    .coverflow-slide,
+    .coverflow-slide .coverflow-img,
+    .coverflow-caption {
+        transition: none;
+    }
+}
+
+/* 手机：hero 单列；三张构图换成「相册带」——与改动前手机拼贴逐值一致：
+   29% / 33% / 29% 三张并排、±6° 外倾、2px 白边、轻投影；
+   舞台高 = C 位海报高（33% × 3/2 = 49.5% 宽，用 aspect-ratio 精确表达），
+   左右两张 top:50% + translateY(-50%) 落在 C 位高度带内垂直居中（原 flex 行为）。
+   同一份 DOM，只换断点参数，不判断 UA。 */
 @media (max-width: 767.98px) {
     .home-hero-inner {
         grid-template-columns: 1fr;
@@ -1156,58 +1680,99 @@ hr {
     }
 
     .home-hero-collage {
-        display: flex;
+        --cf-card-w: 33%;
+        --cf-side-w: 29%;
+        --cf-cap-top: calc(100% + 0.4rem);
         height: auto;
-        gap: 0.55rem;
-        justify-content: center;
-        align-items: center;
         margin-top: 0.15rem;
-        /* 不加负 margin：海报完整显示，由 hero 自身圆角 + 底部留白收口 */
     }
 
-    .home-poster {
-        position: static;
-        left: auto;
-        right: auto;
-        top: auto;
-        width: 29%;
-        /* 必须显式 height:auto，否则高度会取 <img> 标签上 width/height 属性的原图高（442/589/597px），
-           宽度却被压缩到 29%，海报被拉成细长条并把 hero 撑到近千像素高。auto 后由
-           基础规则里的 aspect-ratio:2/3 按宽度推算高度，三张并排才是正常的相册比例。 */
+    /* 舞台高 = C 位海报高（原 flex 行高），标题顺排到 hero 底部留白 */
+    .coverflow-stage {
         height: auto;
+        aspect-ratio: 200 / 99;
+    }
+
+    .coverflow-slide.is-prev {
+        left: 2%;
+        top: 50%;
+        transform: translateY(-50%);
+    }
+
+    .coverflow-slide.is-active {
+        top: 0;
+    }
+
+    .coverflow-slide.is-next {
+        left: calc(98% - var(--cf-side-w));
+        top: 50%;
+        transform: translateY(-50%);
+    }
+
+    /* 相册带外倾 ±6°（原手机拼贴角度），倾斜同样落在海报图上 */
+    .coverflow-slide.is-prev .coverflow-img { transform: rotate(-6deg); }
+    .coverflow-slide.is-active .coverflow-img { transform: rotate(0deg); }
+    .coverflow-slide.is-next .coverflow-img { transform: rotate(6deg); }
+
+    /* 原手机拼贴的细边与轻投影 */
+    .coverflow-img {
         border-width: 2px;
         box-shadow: 0 10px 22px -10px rgba(8, 35, 56, 0.65);
     }
 
-    .home-poster-a {
-        transform: rotate(-6deg);
-    }
+    /* 触屏 :hover 会粘住：锁回原始角度（与原实现一致） */
+    .home-hero:hover .coverflow-slide.is-prev .coverflow-img { transform: rotate(-6deg); }
+    .home-hero:hover .coverflow-slide.is-active .coverflow-img { transform: rotate(0deg); }
+    .home-hero:hover .coverflow-slide.is-next .coverflow-img { transform: rotate(6deg); }
 
-    .home-poster-b {
-        transform: rotate(0deg);
-        width: 33%;
-        margin-left: 0;
-        z-index: 3;
-    }
-
-    .home-poster-c {
-        transform: rotate(6deg);
-    }
-
-    /* 触屏上 :hover 会粘住，这里把浮动幅度锁回原始角度，避免海报「跳一下」 */
-    .home-hero:hover .home-poster-a { transform: rotate(-6deg); }
-    .home-hero:hover .home-poster-b { transform: rotate(0deg); }
-    .home-hero:hover .home-poster-c { transform: rotate(6deg); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-    .home-poster,
-    .home-hero:hover .home-poster-a,
-    .home-hero:hover .home-poster-b,
-    .home-hero:hover .home-poster-c {
-        transition: none;
+    .coverflow-title {
+        font-size: 0.72rem;
     }
 }
+
+/* ---------- 海报管理页（/manage/posters）：名单预览与候选勾选 ---------- */
+.poster-admin-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem;
+}
+
+.poster-admin-item {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    min-width: 0;
+    padding: 0.4rem 0.65rem 0.4rem 0.5rem;
+    border: 1px solid #dfe9f4;
+    border-radius: var(--radius-md);
+    background: var(--card-bg);
+}
+
+.poster-admin-index {
+    width: 1.3rem;
+    text-align: center;
+    font-size: 0.78rem;
+    font-weight: 700;
+    color: var(--ink-500);
+    font-variant-numeric: tabular-nums;
+}
+
+.poster-admin-cover {
+    width: 45px;
+    height: auto;
+    aspect-ratio: 2 / 3;
+    object-fit: cover;
+    border-radius: 6px;
+    background: var(--surface-2);
+}
+
+.poster-admin-meta {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    line-height: 1.35;
+}
+
 
 /* 分类浏览 · 类型条 chip（2026-10-20 从侧栏 2×2 磁贴改为 hero 下方横向一条）：
    横向排布 = 图标在左、名称/数量两行在右，一条读下来不再占 330px 竖向空间。
@@ -1498,8 +2063,8 @@ hr {
     color: var(--brand-700);
 }
 
-/* 首屏栅格。手机：封面 | 信息两列，简介跟信息同列，操作行整宽。
-   PC（≥992）：封面 | 信息 | 简介 三列，简介独占右栏、吃满右半宽度。 */
+/* 首屏栅格。手机 / 平板：第一行「封面 | 标题·评分·年份」，简介整行跨在下面，
+   操作行再跨一整行。PC（≥992）：封面 | 信息 | 简介 三列，简介独占右栏。 */
 .detail-hero-grid {
     display: grid;
     gap: var(--space-5);
@@ -1507,11 +2072,12 @@ hr {
     align-items: start;
 }
 
-/* 手机：简介在右列（跟评分行同列），操作行跨满整行 */
+/* 手机 / 平板：简介吃满卡片可用宽度，排在封面行下方。
+   旧版把它钉在右列（218px 宽），长段落被挤成一条窄缝，卡片宽度白浪费。 */
 .detail-summary-block {
-    grid-column: 2;
-    max-width: 68ch;
-    margin-top: var(--space-2);
+    grid-column: 1 / -1;
+    max-width: none;
+    margin-top: var(--space-4);
 }
 
 .detail-actions {
@@ -2802,11 +3368,10 @@ a.detail-credit-v:hover {
 
 /* ---------- 首屏简介：限宽 + 折叠 ---------- */
 
-/* 简介：默认裁 4 行，超出才出「展开」；短文案自然结束，不拉高容器 */
-.detail-summary-block {
-    max-width: 68ch;
-    margin-top: var(--space-3);
-}
+/* 简介：默认裁 4 行，超出才出「展开」；短文案自然结束，不拉高容器。
+   宽度 / 跨列已在 .detail-summary-block 的基础规则里定义（手机跨满整行、
+   PC 由右栏列宽决定），这里不再重复压 68ch —— 平板 768~991 时 68ch 比卡片
+   还窄，会在右边留一条没用的空隙。 */
 
 /* PC（≥992）：封面 | 信息 | 简介 三栏。
    .detail-hero-main 保持普通块（不用 display: contents 拆成两个栅格行）：
@@ -3315,33 +3880,13 @@ a.detail-credit-v:hover {
     }
 }
 
-/* 手机：角色保持横滑（卡片宽度固定、字号不压缩）；
-   Staff 换成紧凑纵向条目，姓名与职务分层，不用 PC 的多列卡片。 */
+/* 手机：角色与 Staff 走同一套逻辑——都是横滑轨道（卡片宽度固定、字号不压缩），
+   点「查看全部」才在下面展开完整名单。
+   Staff 曾经在手机上退成纵向列表（每条一行），但主创动辄 19~26 条，
+   一屏能滚出好几屏，和角色区的交互也不一致；现在两个区在手机上完全同构。 */
 @media (max-width: 991.98px) {
-    .detail-people--staff .detail-people-rail {
-        display: grid;
-        grid-template-columns: minmax(0, 1fr);
-        gap: 0;
-        overflow: visible;
-    }
-
     .detail-people--staff .detail-person-card {
-        flex-direction: row;
-        flex-wrap: wrap;
-        align-items: baseline;
-        justify-content: space-between;
-        gap: 0 var(--space-3);
-        width: auto;
-        min-height: 0;
-        padding: 0.4rem 0;
-        border: 0;
-        border-bottom: 1px solid #eef4fb;
-        border-radius: 0;
-        background: none;
-    }
-
-    .detail-people--staff .detail-person-card:last-child {
-        border-bottom: 0;
+        width: 7.6rem;
     }
 }
 
@@ -3649,6 +4194,78 @@ a.detail-credit-v:hover {
     overflow-wrap: anywhere;
 }
 
+/* Staff 表里的人名同时是标签入口（/creators/{name}）：样式跟普通名字一致，
+   只在 hover 时给个可点的反馈，避免整张卡变成一片蓝链接。 */
+.detail-person-link {
+    color: inherit;
+    text-decoration: none;
+}
+
+.detail-person-link:hover {
+    color: var(--brand-700);
+    text-decoration: underline;
+}
+
+/* 角色重要度（主角 / 配角 / 旁白）：牌面太小，做成脚注式小标，
+   放在名字与 CV 之间的那一行，不抢名字的字重。 */
+.detail-person-tag {
+    align-self: flex-start;
+    padding: 0 0.3rem;
+    border-radius: 3px;
+    background-color: #eef4fb;
+    font-size: 10px;
+    line-height: 1.6;
+    color: var(--ink-500);
+}
+
+/* 展开区（全部角色）里的重要度：跟在角色名后面，同一行 */
+.detail-cast-tag {
+    padding: 0 0.25rem;
+    border-radius: 3px;
+    background-color: #eef4fb;
+    font-size: 10px;
+    color: var(--ink-500);
+    white-space: nowrap;
+}
+
+/* Staff 展开区：与角色区同一套网格（每格「姓名 / 职位」两行），
+   一行铺多列，短名单不撑高、长名单也不至于变成一条走不完的竖列。
+   列宽与角色格一致（7.6rem），两个区展开后看起来是同一族的排布。 */
+.detail-staff-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(7.6rem, 1fr));
+    gap: 0.35rem 1rem;
+}
+
+.detail-staff-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    min-width: 0;
+}
+
+.detail-staff-name {
+    font-size: var(--text-xs);
+    color: var(--ink-900);
+    overflow-wrap: anywhere;
+}
+
+.detail-staff-name a {
+    color: inherit;
+    text-decoration: none;
+}
+
+.detail-staff-name a:hover {
+    color: var(--brand-700);
+    text-decoration: underline;
+}
+
+.detail-staff-role {
+    font-size: 11px;
+    color: var(--ink-500);
+    overflow-wrap: anywhere;
+}
+
 .detail-person-role {
     font-size: var(--text-xs);
     color: var(--ink-500);
@@ -3848,7 +4465,8 @@ img.detail-cover,
     height: 100%;
     background-color: #fff;
     border: 1px solid #dfe9f4;
-    border-radius: var(--radius-lg);
+    /* 全站作品卡统一 12px 圆角（网格瓦片 / 卡片 / 收藏 / 排期同一值） */
+    border-radius: var(--radius-md);
     color: inherit;
     text-decoration: none;
     box-shadow: var(--shadow-sm);
@@ -3887,6 +4505,7 @@ img.detail-cover,
     display: block;
     aspect-ratio: 2 / 3;
     overflow: hidden;
+    border-radius: var(--radius-md);
     background: linear-gradient(155deg, var(--brand-100) 0%, var(--brand-300) 58%, var(--accent-200) 100%);
 }
 .work-cover-box > .work-cover {
@@ -3959,10 +4578,27 @@ img.work-cover {
     .home-top-grid { grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); }
     .home-top-grid .work-cover { font-size: 2.2rem; }
 }
-/* 首页推荐模块：超出初始条数（business_pages.HOME_RECOMMEND_INITIAL=60，
-   与网格列数整除契约同源）的卡片默认收起；点「展开更多推荐」由内联脚本
-   移除本类即整批铺开，无 JS 时前 60 部照常可见。 */
+/* 首页推荐模块：手机（<992，资讯栏下移）超出前 10 部的卡片默认收起
+   （home_rec_mobile_initial）；点「展开更多推荐」由内联脚本移除本类即整批铺开，
+   无 JS 时前 10 部照常可见。PC（≥992，资讯栏并排）不折叠——下方媒体查询把本类
+   还原成 .work-card 的 flex 等高布局（分界与 .home-side 的 lg 一致）。 */
 .home-top-grid .home-top-extra { display: none; }
+
+/* 底部两个入口：手机只给「展开更多推荐」，PC 只给「更多作品」。
+   默认（手机）：展开按钮可见、「更多作品」入口隐藏。 */
+.home-rec-more-wrap { display: none; }
+
+/* PC（≥992，资讯栏并排）：推荐作品不折叠——全部铺开、隐藏展开按钮、
+   改挂「更多作品」入口（与 .home-side 的 lg 断点一致）。 */
+@media (min-width: 992px) {
+    .home-top-grid .home-top-extra {
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+    }
+    .home-rec-expand-wrap { display: none; }
+    .home-rec-more-wrap { display: block; }
+}
 
 /* 侧栏：lg+ sticky 跟随滚动（top 让过 sticky 导航的高度） */
 @media (min-width: 992px) {
@@ -4033,28 +4669,6 @@ img.work-cover {
     color: var(--brand-700);
 }
 
-/* 元信息行：类型胶囊 + 星级 + 分数。类型放在正文里而不是压在封面上——
-   海报左上角常是作品标题 logo，压上去会挡住标题。 */
-.work-card-rating {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 0.35rem;
-    color: var(--ink-500);
-    font-size: var(--text-xs);
-}
-
-.work-card-rating .badge {
-    flex-shrink: 0;
-    padding: 0.12rem 0.45rem;
-    font-size: var(--text-xs);
-    font-weight: 600;
-}
-
-.work-card-rating .detail-stars {
-    font-size: 0.72rem;
-}
-
 /* 摘要最多两行，超出省略，保证卡片高度整齐 */
 .work-card-summary {
     display: -webkit-box;
@@ -4063,6 +4677,33 @@ img.work-cover {
     overflow: hidden;
     font-size: var(--text-xs);
     line-height: 1.5;
+}
+
+/* 人物关系行（声优页「配音 / 职责」、staff 作品页「职责」）：元信息行下方，
+   标签品牌色加粗 + 值正文色，条目间圆点分隔；最多两行省略，卡高仍整齐。
+   与摘要互斥出现（宏内判空），手机端不隐藏——它是人物页的核心信息。 */
+.work-card-persona {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+    color: var(--ink-600);
+    font-size: var(--text-xs);
+    line-height: 1.5;
+}
+
+.work-card-persona-label {
+    font-weight: 600;
+    color: var(--brand-700);
+}
+
+.work-card-persona-label::after {
+    content: "：";
+}
+
+.work-card-persona-sep {
+    margin: 0 0.35rem;
+    color: var(--ink-300);
 }
 
 /* 卡片题材 chip：标题下方、摘要上方，让题材在列表页可见（不必点进详情）。
@@ -4397,76 +5038,364 @@ img.spotlight-img {
     line-height: 1.6;
 }
 
-/* 资讯详情：标题 / 元信息层级（2026-10-21 阅读体验改版） */
-.article-kicker {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
+/* ==========================================================================
+   资讯详情：编辑型阅读版式（2026-10-22 改版）
+   --------------------------------------------------------------------------
+   三个层级，全部是「上限」而不是固定宽度，桌面 / 平板 / 手机共用同一套：
+     .article-page  100% / max 1180  —— 页面容器（居中）
+     .article-read  100% / max  820  —— 标题 + 正文 + 来源的阅读列（居中）
+   外层 main.container 的可用宽度（1320 - 内边距）始终大于 1180，所以这两层
+   都不会被父级挤窄；正文列上限 820 是「一行约 46 个汉字」的舒适行长，
+   再宽就需要读者摆头，再窄就会在 PC 两侧留下大片空白。
+   正文列之外不再套卡片：版面靠留白、分隔线与字号层级分区，不加阴影与厚边框。
+   ========================================================================== */
+
+.article-page {
+    width: 100%;
+    max-width: 1180px;
+    margin-inline: auto;
 }
 
-.article-title {
-    font-size: clamp(1.35rem, 1.15rem + 1.1vw, 1.8rem);
+.article-read {
+    width: 100%;
+    max-width: 820px;
+    margin-inline: auto;
+}
+
+/* 顶部返回：正文之前的轻量导航，不与标题抢注意力。
+   与 .article-read 同宽并居中——返回入口、标题、正文、页脚按钮对齐在同一条轴线上。 */
+.article-back {
+    display: block;
+    width: 100%;
+    max-width: 820px;
+    margin: 0 auto var(--space-4);
+    color: var(--ink-500);
+    font-size: var(--text-sm);
+    text-decoration: none;
+    transition: color 0.15s var(--ease);
+}
+
+.article-back:hover {
+    color: var(--brand-700);
+}
+
+/* ---------- 文章头部 ---------- */
+
+.article-header {
+    padding: 0;
+}
+
+.article-kicker {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-2);
+    margin-bottom: 10px;
+}
+
+/* 分类徽标：四种主体各一档柔和底色 + 深字（颜色只做辅助识别，
+   不为单篇文章配色；认不出的分类走中性色 is-general） */
+.article-cat {
+    display: inline-flex;
+    align-items: center;
+    padding: 3px 10px;
+    border: 1px solid transparent;
+    border-radius: 999px;
+    font-size: var(--text-xs);
     font-weight: 700;
-    line-height: 1.35;
+    letter-spacing: 0.02em;
+    line-height: 1.5;
+}
+
+.article-cat.is-anime {
+    border-color: var(--brand-100);
+    background-color: var(--brand-50);
+    color: var(--brand-800);
+}
+
+.article-cat.is-comic {
+    border-color: var(--accent-200);
+    background-color: var(--accent-50);
+    color: var(--accent-800);
+}
+
+.article-cat.is-novel {
+    border-color: #f2e0bc;
+    background-color: var(--warn-bg);
+    color: var(--warn-fg);
+}
+
+.article-cat.is-game {
+    border-color: #ddd6f5;
+    background-color: #f1eeff;
+    color: #4b3f8f;
+}
+
+.article-cat.is-general {
+    border-color: #dfe7f1;
+    background-color: #eef2f7;
+    color: var(--ink-700);
+}
+
+/* 标题：桌面基准 32px / 窄屏 24px，中间流式过渡；长标题自然换行 */
+.article-title {
+    margin: 0;
     color: var(--ink-900);
+    font-size: clamp(1.5rem, 1.06rem + 1.55vw, 2rem);
+    font-weight: 700;
+    line-height: 1.4;
+    letter-spacing: -0.005em;
     overflow-wrap: anywhere;
 }
 
-.article-meta {
+/* 元信息：来源 / 时间，13px 次要文字色 */
+.article-byline {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    column-gap: var(--space-5);
+    row-gap: 2px;
+    margin-top: var(--space-3);
     color: var(--ink-500);
-    padding-bottom: var(--space-3);
-    border-bottom: 1px solid var(--surface-2);
+    font-size: var(--text-sm);
+    line-height: 1.6;
 }
 
-.article-meta span::before {
-    content: "";
-    display: inline-block;
-    width: 4px;
-    height: 4px;
-    margin-right: 6px;
-    border-radius: 50%;
-    background: var(--brand-400);
-    vertical-align: 2px;
+/* 收藏操作行：与 byline 同一条基线，只是换了按钮（资讯详情页 2026-10-24） */
+.article-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    column-gap: var(--space-4);
+    row-gap: 2px;
+    margin-top: var(--space-3);
 }
 
-.article-meta span:first-child::before {
+/* 导语：左侧细线引导，不用整块底色——正文才是主体 */
+.article-lead {
+    margin: var(--space-4) 0 0;
+    padding-left: 14px;
+    border-left: 3px solid var(--brand-400);
+    color: var(--ink-700);
+    font-size: var(--text-md);
+    line-height: 1.75;
+}
+
+/* 识别标签 / 作品信息：移出文首、置于正文之后，与正文之间的分隔线。
+   整体用 <details> 实现——手机可折叠（点 summary 展开/收起），桌面常驻展开（summary 隐藏）。 */
+.article-taxonomy {
+    margin-top: 32px;
+    padding-top: var(--space-4);
+    border-top: 1px solid var(--surface-2);
+}
+
+/* 折叠控件：仅手机出现；桌面在媒体查询里隐藏，标签区直接常驻展开 */
+.article-tax-summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin: 0 0 10px;
+    padding: 2px 0;
+    color: var(--ink-700);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    cursor: pointer;
+    list-style: none;
+}
+
+.article-tax-summary::-webkit-details-marker {
     display: none;
 }
 
-/* 资讯详情：摘要引导块 */
-.article-lead {
-    color: var(--ink-700);
-    background-color: var(--brand-50);
-    border-left: 3px solid var(--brand-500);
-    padding: 0.85rem 1.15rem;
-    border-radius: 0 var(--radius-md) var(--radius-md) 0;
-    line-height: 1.75;
-    font-size: 1.02rem;
+.article-tax-summary-text {
+    flex: 1 1 auto;
+    min-width: 0;
 }
 
-/* 资讯详情：正文阅读排版（字号 / 行高 / 段距按长文阅读优化） */
+.article-tax-toggle {
+    flex: 0 0 auto;
+    color: var(--ink-500);
+    transition: transform 0.2s ease;
+}
+
+.article-taxonomy[open] > .article-tax-summary .article-tax-toggle {
+    transform: rotate(180deg);
+}
+
+.article-tax-body {
+    display: grid;
+    gap: 10px;
+}
+
+/* 桌面：标签区常驻展开，折叠控件与折叠态一律不生效 */
+@media (min-width: 768px) {
+    .article-tax-summary {
+        display: none;
+    }
+    .article-tax-body {
+        display: grid !important;
+    }
+}
+
+.article-tax-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 6px var(--space-3);
+}
+
+.article-tax-label {
+    flex: 0 0 auto;
+    padding-top: 3px;
+    color: var(--ink-500);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    letter-spacing: 0.04em;
+}
+
+.article-tax-items {
+    display: flex;
+    flex: 1 1 auto;
+    flex-wrap: wrap;
+    gap: 6px;
+    min-width: 0;
+}
+
+.article-tax-items .tag-chip {
+    padding: 0.22rem 0.62rem;
+    font-size: var(--text-sm);
+}
+
+/* ---------- 正文阅读区 ---------- */
+
+/* 标题区与正文区之间 28px */
 .article-body {
-    color: var(--ink-800, #2b3a46);
-    font-size: 1.05rem;
-    line-height: 1.85;
-    white-space: pre-wrap;
-    word-break: break-word;
-    padding-top: var(--space-2);
+    margin-top: 28px;
+    color: var(--ink-800);
+    /* PC 基准 17px（16~17 区间），1.8 行高；窄屏在媒体查询里回到 16px */
+    font-size: 1.0625rem;
+    line-height: 1.8;
+    /* 长链接 / 长单词不撑破阅读列，也不裁切内容 */
+    overflow-wrap: anywhere;
+}
+
+.article-body > :first-child {
+    margin-top: 0;
 }
 
 .article-body p {
-    margin-bottom: 0.95rem;
+    margin: 0 0 20px;
 }
 
-/* 正文内的 [图] 行与媒体行是独立段落，间距收紧 */
-.article-body p:has(+ .article-figure) {
-    margin-bottom: 0.4rem;
+.article-body > p:last-child {
+    margin-bottom: 0;
 }
 
-/* 资讯图片：头图与正文内嵌图——保比例、限高，避免大图挤压正文 */
-.article-hero,
+.article-h2,
+.article-h3 {
+    margin: 32px 0 16px;
+    color: var(--ink-900);
+    font-weight: 600;
+    line-height: 1.5;
+}
+
+.article-h2 {
+    font-size: 1.375rem;
+}
+
+.article-h3 {
+    font-size: 1.125rem;
+}
+
+.article-list {
+    margin: 0 0 20px;
+    padding-left: 1.35rem;
+}
+
+.article-list li {
+    margin-bottom: 8px;
+}
+
+.article-list li::marker {
+    color: var(--brand-500);
+}
+
+.article-quote {
+    margin: 24px 0;
+    padding: 2px 0 2px 16px;
+    border-left: 3px solid var(--brand-200);
+    color: var(--ink-700);
+}
+
+.article-quote p {
+    margin-bottom: 12px;
+}
+
+.article-quote p:last-child {
+    margin-bottom: 0;
+}
+
+.article-link {
+    color: var(--brand-700);
+    text-decoration: underline;
+    text-decoration-color: var(--brand-300);
+    text-underline-offset: 2px;
+    transition: color 0.15s var(--ease), text-decoration-color 0.15s var(--ease);
+}
+
+.article-link:hover {
+    color: var(--brand-600);
+    text-decoration-color: currentColor;
+}
+
+.article-rule {
+    margin: 28px 0;
+    border: 0;
+    border-top: 1px solid var(--surface-2);
+}
+
+/* 表格：自身容器内横向滚动，宽表不撑破页面 */
+.article-table-wrap {
+    margin: 24px 0;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+}
+
+.article-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: var(--text-sm);
+    line-height: 1.7;
+}
+
+.article-table th,
+.article-table td {
+    padding: 8px 12px;
+    border: 1px solid var(--surface-2);
+    text-align: left;
+    vertical-align: top;
+    overflow-wrap: anywhere;
+}
+
+.article-table th {
+    background-color: var(--brand-50);
+    color: var(--ink-900);
+    font-weight: 600;
+}
+
+/* 图片：只在比例上适配，不裁切、不加底板、不做固定高度框。
+   规则是「宽高都跟着原图比例，上限用可读性控制」：
+   - 横版图 / 全宽宣传图：宽度直接铺到阅读列（820），这是本次放大的主要来源；
+   - 竖版 keyvisual：高度最多占 90vh，超过就等比缩，既不会被压成邮票，也不会一张图占两屏；
+   - 原图本身很窄（早期 313px 的封面）时用 min-width 抬到 520，避免同篇图里出现
+     「一张 313、一张 820」的拼凑感；窄屏 min() 取 100%，统一铺满。 */
+.article-hero {
+    margin: 0 0 28px;
+}
+
 .article-figure {
-    margin: 0.4rem 0 1.15rem;
+    margin: 24px 0;
 }
 
 .article-hero img,
@@ -4475,54 +5404,192 @@ img.spotlight-img {
     width: auto;
     max-width: 100%;
     height: auto;
-    max-height: min(56vw, 460px);
     margin-inline: auto;
-    object-fit: contain;
-    border-radius: var(--radius-md);
-    border: 1px solid #dfe9f4;
-    background-color: var(--brand-50);
+    border-radius: 6px;
+}
+
+.article-hero img {
+    max-height: min(90vh, 860px);
+    min-width: min(100%, 520px);
+}
+
+.article-figure img {
+    max-height: min(82vh, 780px);
+    min-width: min(100%, 520px);
+}
+
+/* 图片说明：13px / 行高 1.6 / 与图片间距 8px，紧跟对应图片 */
+.article-caption {
+    margin-top: 8px;
+    color: var(--ink-500);
+    font-size: var(--text-sm);
+    line-height: 1.6;
+    text-align: center;
 }
 
 .article-media-line {
-    font-size: 0.9rem;
+    margin: 0 0 20px;
+    color: var(--ink-500);
+    font-size: var(--text-sm);
     word-break: break-all;
 }
 
-/* 原文链接：正文读完的清晰出口（底部收尾位） */
-.article-source-link {
-    padding-top: var(--space-4);
-    border-top: 1px solid var(--surface-2);
+/* ---------- 来源与版权 ---------- */
+
+/* 正文与文章来源区之间 36px */
+/* 来源与版权：正文末尾右下角的一行小字，不做独立模块、不画通栏分隔线 */
+.article-source {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: flex-end;
+    gap: 2px 10px;
+    margin-top: 18px;
+    color: var(--ink-500);
+    font-size: var(--text-xs);
+    line-height: 1.6;
+    text-align: right;
 }
 
-.article-source-link a {
-    display: inline-flex;
-    flex-direction: column;
-    gap: 2px;
+.article-source-link {
+    color: var(--ink-500);
+    font-size: inherit;
+    font-weight: 500;
+    white-space: nowrap;
+    text-decoration: none;
+    transition: color 0.15s var(--ease);
+}
+
+.article-source-link:hover {
+    color: var(--brand-600);
+    text-decoration: underline;
+}
+
+.article-source-origin {
+    color: var(--ink-500);
+}
+
+/* ---------- 关联作品 ---------- */
+
+.article-related {
+    width: 100%;
+    max-width: 820px;
+    margin: 40px auto 0;
+}
+
+.article-section-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 6px var(--space-4);
+    margin-bottom: var(--space-4);
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--surface-2);
+}
+
+.article-section-title {
+    margin: 0;
+    color: var(--ink-900);
+    font-size: var(--text-lg);
+    font-weight: 700;
+}
+
+.article-section-more {
     color: var(--brand-700);
-    font-weight: 600;
+    font-size: var(--text-sm);
     text-decoration: none;
 }
 
-.article-source-link a:hover {
+.article-section-more:hover {
     color: var(--brand-500);
     text-decoration: underline;
 }
 
-.article-source-link .article-source-note {
-    font-size: var(--text-sm);
-    font-weight: 400;
-    color: var(--ink-500);
+/* 自适应列：够宽两栏、窄屏一栏，不写死栏数 */
+.article-related-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr));
+    gap: var(--space-3);
 }
 
+.article-related .detail-related-thumb {
+    flex: 0 0 60px;
+    width: 60px;
+}
+
+.article-related .detail-related-thumb img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+}
+
+.detail-related-body {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 0;
+}
+
+.detail-related-title {
+    color: var(--ink-900);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    line-height: 1.45;
+}
+
+.detail-related-meta {
+    color: var(--ink-500);
+    font-size: var(--text-xs);
+}
+
+.detail-related-summary {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+    color: var(--ink-500);
+    font-size: var(--text-xs);
+    line-height: 1.6;
+}
+
+.article-foot {
+    width: 100%;
+    max-width: 820px;
+    margin: var(--space-8) auto 0;
+}
+
+/* 窄屏：字号与排布按可用宽度调整，结构与桌面完全一致 */
 @media (max-width: 575.98px) {
+    .article-title {
+        line-height: 1.45;
+    }
+
     .article-body {
         font-size: 1rem;
         line-height: 1.8;
     }
 
+    /* 标签组在窄屏改为「标签名在上、chips 在下」，避免 4em 标签列挤压 chips */
+    .article-tax-row {
+        flex-direction: column;
+        gap: 6px;
+    }
+
+    .article-tax-label {
+        padding-top: 0;
+    }
+
+    .article-caption {
+        text-align: left;
+    }
+
+    /* 手机：min-width 已是 100%，宽度由阅读列决定，限高反而会压窄竖图 —— 直接放开 */
     .article-hero img,
     .article-figure img {
-        max-height: 52vw;
+        max-height: none;
     }
 }
 
@@ -4701,6 +5768,18 @@ img.spotlight-img {
     background-color: var(--brand-50);
     color: var(--brand-700);
     font-size: var(--text-xs);
+    font-weight: 600;
+}
+
+/* 日期分组组头的距今天数 pill：未来（还有 N 天）用品牌色，过去（N 天前）用中性色 */
+.schedule-day-countdown {
+    background-color: var(--accent-50);
+    color: var(--accent-700);
+}
+
+/* 内地票房（大陆引进剧场版卡片）：源站原文「内地总票房￥6.78亿」 */
+.schedule-box-office {
+    color: var(--accent-700);
     font-weight: 600;
 }
 
@@ -5239,6 +6318,327 @@ button.navbar-user {
 .auth-band h1 {
     font-weight: 800;
     letter-spacing: 0.02em;
+}
+
+/* ==========================================================================
+   认证页改版（方案 A）：左侧品牌面板 + 右侧表单
+   —— 注册 / 登录 / 找回密码三页共用。桌面 ≥992 左右分栏，<992 折叠成
+      「顶部品牌条 + 单列表单」。
+   本段全是新增 class：旧 .auth-card / .auth-band 仍被 403 / 404 / 500
+   （及其它沿用卡片头的页面）使用，一概不动，避免误伤。
+   注意：这里不属于作品网格，不受「列数整除 CONTENT_PAGE_SIZE」契约约束；
+   但仍遵守「最小列宽用固定 px、不用 vw」的习惯，免得列数倒挂。
+   ========================================================================== */
+
+.auth-shell {
+    max-width: 960px;
+    margin-inline: auto;
+    background: var(--card-bg);
+    border-radius: var(--radius-xl);
+    box-shadow: var(--shadow-lg);
+    overflow: hidden;
+}
+
+@media (min-width: 992px) {
+    .auth-shell {
+        display: grid;
+        grid-template-columns: 320px 1fr;
+        min-height: 620px;
+    }
+}
+
+/* ---- 左：品牌面板（渐变沿用 .auth-band 的天蓝 → 青绿语言） ---- */
+.auth-aside {
+    position: relative;
+    overflow: hidden;
+    padding: 1.5rem 1.25rem;
+    text-align: center;
+    color: var(--on-bright);
+    background: linear-gradient(160deg, var(--brand-400) 0%, var(--brand-500) 48%, var(--accent-500) 100%);
+}
+
+/* 右下角柔光：与 .auth-band::after 同一套路（纯 CSS，零外部图片） */
+.auth-aside::after {
+    content: "";
+    position: absolute;
+    width: 18rem;
+    height: 18rem;
+    right: -7rem;
+    bottom: -8rem;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(255, 255, 255, 0.22), transparent 70%);
+}
+
+.auth-aside-inner {
+    position: relative;
+    z-index: 1;
+}
+
+@media (min-width: 992px) {
+    .auth-aside {
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        padding: 2.5rem 1.75rem;
+        text-align: left;
+    }
+}
+
+@media (max-width: 991.98px) {
+    /* 窄屏只是顶部窄条，柔光会占满可视区，取消 */
+    .auth-aside::after {
+        display: none;
+    }
+
+    .auth-aside .brand-lockup-lg .wm-latin {
+        font-size: 1.8rem;
+    }
+}
+
+.auth-aside .brand-lockup-lg {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.62rem;
+    margin-bottom: 0.85rem;
+}
+
+.auth-aside .brand-lockup-lg .wm-latin {
+    font-size: 2.2rem;
+}
+
+.auth-aside .brand-lockup-lg .wm-kana {
+    font-size: 0.95rem;
+    padding-left: 0.55rem;
+}
+
+.auth-aside-cat {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    justify-content: center;
+    margin: 0 0 1rem;
+    padding: 0;
+    list-style: none;
+}
+
+@media (min-width: 992px) {
+    .auth-aside-cat {
+        justify-content: flex-start;
+    }
+}
+
+.auth-aside-chip {
+    padding: 0.2rem 0.6rem;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.55);
+    color: var(--on-bright);
+    font-size: 0.8rem;
+    line-height: 1.6;
+}
+
+.auth-aside-note {
+    margin: 0;
+    font-size: 0.85rem;
+    line-height: 1.7;
+    color: var(--on-bright-soft);
+}
+
+/* ---- 右：表单面板 ---- */
+.auth-panel {
+    padding: 1.75rem 1.25rem 2rem;
+}
+
+@media (min-width: 992px) {
+    .auth-panel {
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        padding: 2.5rem 2.75rem;
+    }
+}
+
+.auth-title {
+    margin: 0 0 0.25rem;
+    font-size: 1.5rem;
+    font-weight: 800;
+    letter-spacing: 0.02em;
+}
+
+.auth-subtitle {
+    margin: 0 0 1.25rem;
+    font-size: 0.9rem;
+    color: var(--ink-500);
+}
+
+/* 表单内分组：「账号信息」与「邮箱验证」靠留白 + 细线分层，不套第二层卡片 */
+.auth-group {
+    margin: 0 0 1.25rem;
+}
+
+.auth-group + .auth-group {
+    margin-top: 1.25rem;
+    padding-top: 1.25rem;
+    border-top: 1px solid var(--surface-2);
+}
+
+.auth-group-label {
+    margin: 0 0 0.75rem;
+    font-size: 0.78rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    color: var(--ink-500);
+}
+
+.auth-panel .form-label {
+    font-size: 0.9rem;
+    font-weight: 500;
+}
+
+.auth-panel .form-control {
+    border-color: var(--surface-2);
+    border-radius: var(--radius-sm);
+    padding-inline: 0.85rem;
+}
+
+.auth-panel .form-control:focus {
+    border-color: var(--brand-500);
+    box-shadow: 0 0 0 3px var(--brand-100);
+}
+
+/* 密码框右侧「显示 / 隐藏」切换 */
+.auth-field {
+    position: relative;
+}
+
+.auth-field .form-control {
+    padding-right: 3.25rem;
+}
+
+.auth-reveal {
+    position: absolute;
+    top: 50%;
+    right: 0.4rem;
+    transform: translateY(-50%);
+    padding: 0.2rem 0.4rem;
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: transparent;
+    color: var(--ink-500);
+    font-size: 0.8rem;
+    line-height: 1;
+}
+
+.auth-reveal:hover {
+    background: var(--surface);
+}
+
+.auth-reveal:focus-visible {
+    outline: 2px solid var(--brand-600);
+    outline-offset: 2px;
+}
+
+/* 行内校验反馈：文案与服务端报错逐字一致，避免两处口径打架 */
+.auth-feedback {
+    display: none;
+    margin-top: 0.3rem;
+    font-size: 0.8rem;
+}
+
+.auth-feedback.is-shown {
+    display: block;
+}
+
+.auth-feedback.is-error {
+    color: var(--err-fg);
+}
+
+.auth-feedback.is-ok {
+    color: var(--ok-fg);
+}
+
+/* 走 .auth-panel 提权，压得住 Bootstrap 的 .form-control:focus 边框色 */
+.auth-panel .auth-control.is-error {
+    border-color: var(--err-fg);
+}
+
+.auth-panel .auth-control.is-ok {
+    border-color: var(--ok-fg);
+}
+
+/* 密码规则清单：随输入逐条变绿 */
+.auth-rules {
+    display: grid;
+    gap: 0.25rem;
+    margin: 0.5rem 0 0;
+    padding: 0;
+    list-style: none;
+    font-size: 0.8rem;
+    color: var(--ink-500);
+}
+
+.auth-rules li {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+}
+
+.auth-rules li::before {
+    content: "○";
+    font-size: 0.7rem;
+}
+
+.auth-rules li.is-met {
+    color: var(--ok-fg);
+}
+
+.auth-rules li.is-met::before {
+    content: "✓";
+}
+
+/* 邀请码折叠区：管理员注册需求不大，默认收起 */
+.auth-more {
+    margin: 0 0 1.25rem;
+    border: 1px dashed var(--surface-2);
+    border-radius: var(--radius-md);
+    background: var(--surface);
+}
+
+.auth-more > summary {
+    padding: 0.6rem 0.85rem;
+    cursor: pointer;
+    font-size: 0.85rem;
+    color: var(--ink-700);
+}
+
+.auth-more[open] > summary {
+    border-bottom: 1px solid var(--surface-2);
+}
+
+.auth-more-body {
+    padding: 0.85rem;
+}
+
+.auth-actions {
+    margin-top: 1.5rem;
+}
+
+.auth-submit {
+    padding-block: 0.55rem;
+    font-weight: 500;
+}
+
+.auth-footnote {
+    margin: 1.25rem 0 0;
+    font-size: 0.85rem;
+    color: var(--ink-500);
+}
+
+.auth-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1rem;
+    margin: 1rem 0 0;
+    font-size: 0.9rem;
 }
 
 /* 错误页大号渐变数字 */
@@ -6097,49 +7497,83 @@ button.navbar-user {
     color: var(--on-bright-soft);
 }
 
-/* ---------- B站式卡片视图（默认）：封面 + 标题 + 元数据行 ----------
-   与网格视图同源动态列（auto-fill），但最小列宽更大（≥768 抬到 196px），
-   一屏作品数约翻倍；无卡身无摘要，信息全在封面与标题两行里。
-   每页 60 条与 2/3/4/5/6 列都能整除，末行不缺格（见 .works-grid 注释）。 */
-.works-grid--bili {
-    grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+/* ---------- 作品海报卡：网格 / 卡片 / 首页推荐 / 作者页 / 收藏 共用 ----------
+   同一套骨架：封面（左上类型签）→ 作品名（两行截断）→ 元信息行。
+   差别只在密度与字段，不在结构：
+     .work-card--tile  作品库网格（默认）：无卡身、列多、一屏尽量多
+     .work-card--card  作品库卡片：列更少、卡身留白更大，另带题材 chips 与摘要
+     裸 .work-card     首页推荐 / 作者页 / 收藏：卡片形态，按场景给字段
+   元信息行只渲染有值的字段（评分 0、收藏 0、无年份都不出空位），
+   等宽数字 + 固定间距，纵向扫一列时评分/年份能对齐。
+   每页 60 条与 2~6 列都能整除，末行不缺格（见 .works-grid 注释）。 */
+
+.works-grid--card {
+    gap: 1.1rem;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
 }
 
-@media (min-width: 768px) {
-    .works-grid--bili {
-        grid-template-columns: repeat(auto-fill, minmax(196px, 1fr));
+@media (min-width: 576px) {
+    .works-grid--card {
+        grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
     }
 }
 
-.bili-card {
-    display: flex;
-    flex-direction: column;
-    color: inherit;
-    text-decoration: none;
-    transition: transform 0.2s var(--ease);
+@media (min-width: 768px) {
+    .works-grid--card {
+        grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    }
 }
 
-.bili-card:hover {
-    color: inherit;
-    transform: translateY(-3px);
+/* 320~359 的极窄屏：150px 最小列宽只排得下一列，海报会被放到 296px 宽。
+   这里锁两列（每列约 142px），保住「手机两列」的基本浏览方式。 */
+@media (max-width: 359.98px) {
+    .works-grid,
+    .works-grid--card {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
 }
 
-.bili-cover {
+/* 网格瓦片：去掉卡身底色 / 边框 / 阴影，海报自己带边界，紧凑但不局促 */
+.work-card--tile {
+    background: transparent;
+    border: 0;
+    box-shadow: none;
+    overflow: visible;
+}
+
+.work-card--tile .work-cover-box {
     border-radius: var(--radius-md);
     box-shadow: var(--shadow-sm);
     transition: box-shadow 0.25s var(--ease);
 }
 
-.bili-card:hover .bili-cover {
+.work-card--tile:hover {
+    transform: translateY(-3px);
+    border-color: transparent;
+    box-shadow: none;
+}
+
+.work-card--tile:hover .work-cover-box {
     box-shadow: var(--shadow-lg);
 }
 
-.bili-card:hover img.work-cover {
-    transform: scale(1.05);
+.work-card--tile .work-card-body {
+    gap: 0.22rem;
+    padding: 0.5rem 0.1rem 0;
 }
 
-/* 封面左上徽标列：四色类型签 + 「文学」细分角标竖排（都盖上封面可读性处理） */
-.bili-badges {
+/* 卡片形态：卡身留白比网格大一号，海报与文字之间留呼吸 */
+.work-card--card .work-card-body {
+    gap: 0.35rem;
+    padding: 0.8rem 0.85rem 0.9rem;
+}
+
+.work-card--card .work-card-title {
+    font-size: 0.9375rem;
+}
+
+/* 封面左上徽标列：四色类型签 + 轻小说「文学」细分标，竖排避开角色主体 */
+.work-badges {
     position: absolute;
     top: var(--space-2);
     left: var(--space-2);
@@ -6150,7 +7584,13 @@ button.navbar-user {
     gap: 0.25rem;
 }
 
-.bili-type {
+/* 首页推荐卡左上角已有名次角标：类型签顺次下移，两者不叠在一起 */
+.work-badges--offset {
+    top: calc(var(--space-2) + 1.85rem);
+}
+
+/* 全站唯一的分类签组件：颜色只用来区分类型，不按作品单独配色 */
+.work-type {
     padding: 0.1rem 0.5rem;
     border-radius: 999px;
     background: linear-gradient(135deg,
@@ -6160,17 +7600,25 @@ button.navbar-user {
     font-size: 0.68rem;
     font-weight: 700;
     line-height: 1.55;
-    box-shadow: 0 2px 8px -3px rgba(10, 45, 66, 0.5);
+    white-space: nowrap;
+    box-shadow: 0 2px 8px -3px rgba(10, 45, 66, 0.45);
 }
 
-.bili-type[data-type="anime"] { --type-a: var(--brand-300); --type-b: var(--brand-600); }
-.bili-type[data-type="comic"] { --type-a: #ffb3c7; --type-b: #e8557d; }
-.bili-type[data-type="game"] { --type-a: var(--accent-300); --type-b: var(--accent-600); }
-.bili-type[data-type="novel"] { --type-a: #cdb4f6; --type-b: #7c5cd6; }
+.work-type[data-type="anime"] { --type-a: var(--brand-300); --type-b: var(--brand-600); }
+.work-type[data-type="comic"] { --type-a: #ffb3c7; --type-b: #e8557d; }
+.work-type[data-type="game"] { --type-a: var(--accent-300); --type-b: var(--accent-600); }
+.work-type[data-type="novel"] { --type-a: #cdb4f6; --type-b: #7c5cd6; }
 
-/* 「文学」细分角标：与详情页/网格视图同一语义（detail-kind-badge），
-   但换成浅色实底 pill —— 封面题材多变，浅底 + 辅助色描边才压得住可读性。 */
-.bili-kind {
+/* 列表行里的同类签：同色同形，只是缩小（56px 封面上放不下封面签） */
+.work-type--sm {
+    padding: 0.02rem 0.4rem;
+    font-size: 0.66rem;
+    line-height: 1.5;
+    box-shadow: none;
+}
+
+/* 「文学」细分标：浅底 + 辅助色描边，封面千变万化也压得住可读性 */
+.work-kind {
     padding: 0.08rem 0.5rem;
     border-radius: 999px;
     background: rgba(255, 255, 255, 0.94);
@@ -6181,86 +7629,60 @@ button.navbar-user {
     line-height: 1.55;
 }
 
-/* 当年新作角标（红，中文语境「新」用色）；年份来自作品信息，不依赖排序 */
-.bili-new {
-    position: absolute;
-    top: var(--space-2);
-    right: var(--space-2);
-    z-index: 2;
-    display: grid;
-    place-items: center;
-    width: 1.35rem;
-    height: 1.35rem;
-    border-radius: 0.5rem;
-    background: linear-gradient(135deg, #ff6b6b, #ee2a4d);
-    color: #fff;
-    font-size: 0.72rem;
-    font-weight: 800;
-    line-height: 1;
-    box-shadow: 0 3px 9px -3px rgba(238, 42, 77, 0.75);
-}
-
-.bili-body {
-    padding: 0.5rem 0.15rem 0;
-}
-
-/* 标题两行截断：min-height 占满两行，网格行高对齐（B站索引页口径） */
-.bili-title {
-    display: -webkit-box;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
-    line-clamp: 2;
-    overflow: hidden;
-    min-height: 2.9em;
-    color: var(--ink-900);
-    font-size: 0.85rem;
-    font-weight: 600;
-    line-height: 1.45;
-    word-break: break-word;
-}
-
-/* 元数据行：随排序自适应——评分/收藏/年份哪个排序哪个前置加粗，
-   「点了排序看得出变化」做进每一张卡。 */
-.bili-meta {
+/* 元信息行：字号/间距/颜色一处定义，网格、卡片、收藏、列表都走这套 */
+.work-card-meta {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
-    gap: 0.55rem;
-    margin-top: 0.3rem;
+    gap: 0.2rem 0.5rem;
     color: var(--ink-500);
-    font-size: 0.78rem;
+    font-size: var(--text-xs);
+    font-variant-numeric: tabular-nums;
     line-height: 1.4;
-    white-space: nowrap;
 }
 
-.bili-meta .bili-strong {
+.work-meta-rating {
+    color: #d98000;
+    font-weight: 600;
+}
+
+/* 评分人数太少（不是没有评分，是样本不够不足采信）：和源站一样显示「--」，
+   颜色弱化，一眼区分于正常分数。口径见 app/rating.py */
+.work-meta-rating--unknown {
+    color: var(--text-muted, #9aa0a6);
+    font-weight: 500;
+}
+
+.work-meta-fav {
+    color: #e8557d;
+}
+
+.work-meta-year {
+    color: var(--ink-400);
+}
+
+/* 当前排序字段前置并加粗：点了排序，每张卡都看得出变化 */
+.work-meta-rating.is-strong {
+    color: #c26a00;
     font-weight: 800;
 }
 
-.bili-rating {
-    color: #d98000;
-    font-variant-numeric: tabular-nums;
-}
-
-.bili-rating.bili-strong {
-    color: #c26a00;
-}
-
-.bili-fav {
-    color: #e8557d;
-    font-variant-numeric: tabular-nums;
-}
-
-.bili-fav.bili-strong {
+.work-meta-fav.is-strong {
     color: #d6366b;
+    font-weight: 800;
 }
 
-.bili-year {
-    color: var(--ink-400);
-    font-variant-numeric: tabular-nums;
-}
-
-.bili-year.bili-strong {
+.work-meta-year.is-strong {
     color: var(--ink-900);
+    font-weight: 700;
+}
+
+/* 手机：卡片视图两列后每格只有 ~160px，摘要挤成碎字反而更难读，先收起；
+   题材 chips 是短词（两三个字），留着仍可读，也是卡片与网格在窄屏的差别。 */
+@media (max-width: 575.98px) {
+    .work-card--card .work-card-summary {
+        display: none;
+    }
 }
 
 /* 窄屏：hero 数据行与动作按钮收紧，吸顶条只留 Tab 横滑 */
@@ -6518,7 +7940,7 @@ button.navbar-user {
     width: 56px;
     aspect-ratio: 2 / 3;
     overflow: hidden;
-    border-radius: 6px;
+    border-radius: var(--radius-sm);
     background: linear-gradient(155deg, var(--brand-100) 0%, var(--brand-300) 58%, var(--accent-200) 100%);
 }
 
@@ -6534,38 +7956,44 @@ button.navbar-user {
     font-size: 0.95rem;
     font-weight: 600;
     line-height: 1.4;
+    overflow-wrap: anywhere;
 }
 
 .work-row:hover .work-row-title {
     color: var(--brand-700);
 }
 
+/* 摘要：次要文字色 + 最多两行，长标题长简介都不会把行撑变形 */
 .work-row-summary {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    overflow: hidden;
+    color: var(--ink-500);
     font-size: 0.8rem;
-    line-height: 1.5;
+    line-height: 1.55;
 }
 
+/* 右侧元信息：竖排居中会随内容长短漂移，改为贴右对齐 + 等宽数字，
+   一列扫下来评分、收藏、年份都落在同一条基准线上。 */
 .work-row-meta {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
-    gap: 0.4rem;
-    font-size: 0.8rem;
+    justify-content: flex-end;
+    gap: 0.35rem 0.55rem;
+    font-size: var(--text-xs);
     color: var(--ink-500);
+    font-variant-numeric: tabular-nums;
 }
 
-.work-row-year,
 .work-row-media {
-    padding: 0.1rem 0.45rem;
+    padding: 0.06rem 0.4rem;
     border-radius: 999px;
     background: var(--surface);
-    font-size: 0.75rem;
-}
-
-.work-row-rating {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.3rem;
+    font-size: 0.72rem;
+    line-height: 1.5;
 }
 
 /* 窄屏：元信息换到第二行，避免把标题挤成两三个字 */
@@ -6577,21 +8005,6 @@ button.navbar-user {
     .work-row-meta {
         grid-column: 1 / -1;
     }
-}
-
-/* ===== 网格卡片封面年份角标：不点进详情也知道是哪一年的 ===== */
-.work-card-year {
-    position: absolute;
-    right: var(--space-2);
-    bottom: var(--space-2);
-    z-index: 2;
-    padding: 0.1rem 0.45rem;
-    border-radius: 999px;
-    background: rgba(10, 45, 66, 0.68);
-    color: #fff;
-    font-size: 0.72rem;
-    font-weight: 600;
-    line-height: 1.4;
 }
 
 /* ==========================================================================

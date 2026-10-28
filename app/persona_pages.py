@@ -19,8 +19,8 @@ from datetime import datetime
 from types import SimpleNamespace
 from urllib.parse import quote, urlencode
 
-from fastapi import APIRouter, Depends, Form, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 
 from app import bilibili, crud, persona, security
 from app.auth import LoginRequired, require_login_page
@@ -54,6 +54,54 @@ GUEST_WINDOW_SECONDS = 24 * 3600
 GUEST_DEVICE_COOKIE = "guest_trial"
 # 设备 Cookie 本身留一年：额度按 24 小时窗口滚动，Cookie 没必要跟着过期。
 GUEST_DEVICE_COOKIE_MAX_AGE = 365 * 24 * 3600
+# 游客结果的认领凭据：签名里带结果行 id，注册后凭它把结果搬进账号。
+RESULT_COOKIE = "persona_result"
+RESULT_COOKIE_MAX_AGE = crud.ANONYMOUS_RESULT_TTL_DAYS * 24 * 3600
+
+
+def _attach_result_cookie(response, result_id: int | None) -> None:
+    """把结果 id 签进 Cookie：注册后凭它把游客结果领回来（签名防伪造）。"""
+    if not result_id:
+        return
+    response.set_cookie(
+        RESULT_COOKIE,
+        security.create_result_token(int(result_id), settings.auth_secret_key),
+        max_age=RESULT_COOKIE_MAX_AGE,
+        httponly=True,
+        samesite="lax",
+    )
+
+
+def _pending_result_id(request: Request) -> int | None:
+    """Cookie 里未认领的结果 id；没有 / 签名不符返回 None。"""
+    token = request.cookies.get(RESULT_COOKIE) or ""
+    if not token:
+        return None
+    return security.read_result_token(token, settings.auth_secret_key)
+
+
+def _try_claim_pending_result(db: DbSession, user_id: int, result_id: int) -> bool:
+    """把游客快照搬成正式报告，成功返回 True。
+
+    已经有报告就不覆盖——用户登录后自己攒的数据比一份游客试算更值钱。
+    """
+    if crud.get_persona_report(db, user_id) is not None:
+        return False
+    payload = crud.claim_anonymous_persona_result(db, result_id, user_id)
+    if not payload or not payload.get("profile"):
+        return False
+    crud.save_persona_report(
+        db,
+        user_id,
+        bangumi_username=None,
+        tone="sharp",
+        payload=payload,
+        narrative=None,
+        source="template",
+    )
+    return True
+
+
 _guest_hits: dict[str, float] = {}
 _guest_device_hits: dict[str, list[float]] = {}
 _guest_ip_hits: dict[str, list[float]] = {}
@@ -191,9 +239,10 @@ def _regenerate_report(
     )
     exclude_ids = {int(row.subject_id) for row in bangumi_rows}
     recommendations = persona.recommend_from_site(db, profile, exclude_ids)
+    _rarity = persona.attach_rarity(db, profile)
     payload = {
         "profile": profile,
-        "report": persona.build_template_report(profile),
+        "report": persona.build_template_report(profile, _rarity),
         "prompt": persona.build_llm_prompt(
             profile,
             use_tone,
@@ -203,6 +252,7 @@ def _regenerate_report(
         ),
         "radar": persona.build_radar(profile["dimensions"]),
         "recommendations": recommendations,
+        "rarity": _rarity,
     }
     crud.save_persona_report(
         db,
@@ -272,6 +322,17 @@ def _site_works(db: DbSession, user_id: int) -> tuple[list[dict], dict]:
     return works, {"favorites": favorites, "statuses": statuses}
 
 
+def _site_taste_summary(db: DbSession, user_id: int) -> tuple[dict, int]:
+    """站内口味的「只要数字」版：(统计字典, 总条数)。
+
+    主页只展示计数，不需要作品实体——用聚合查询替代 _site_works，省掉 Content
+    实例化与标签批量查询两份开销；真正要把作品喂给 build_profile 的场景才用前者
+    （2026-10-28 改）。
+    """
+    total, favorites, statuses = crud.count_user_taste_rows(db, user_id)
+    return {"favorites": favorites, "statuses": statuses}, total
+
+
 def _sync_limit(request: Request) -> int:
     """同步到本站的单次上限：staff 用更大的额度。"""
     current_user = getattr(request.state, "current_user", None)
@@ -297,10 +358,36 @@ def _site_sync_stats(db: DbSession, collections: list, limit: int) -> dict:
     }
 
 
+def _backfill_template_report(payload: dict | None) -> dict | None:
+    """历史报告可能缺 trait_blurbs（旧代码未生成该键），在此回填，避免模板 500
+    并让老用户也能看到人格标签的毒舌短评。"""
+    if not payload:
+        return None
+    report = payload.get("report")
+    if not isinstance(report, dict):
+        return report
+    if "trait_blurbs" in report:
+        return report
+    tags = (
+        report.get("persona_tags")
+        or (payload.get("profile") or {}).get("persona_tags")
+        or []
+    )
+    report = dict(report)
+    report["trait_blurbs"] = {t: persona.TRAIT_BLURBS.get(t, "") for t in tags}
+    return report
+
+
 @router.get("/me/persona", response_class=HTMLResponse)
 def persona_page(request: Request, db: DbSession):
     """画像主页：绑定 / 同步 / 生成 / 报告 / 提示词与贴回。"""
     uid = _uid(request)
+    # 游客结果领回：注册后第一次进画像页，把未认领的快照搬成正式报告，再重定向刷新
+    pending_id = _pending_result_id(request)
+    if pending_id is not None and _try_claim_pending_result(db, uid, pending_id):
+        response = RedirectResponse(PAGE, status_code=303)
+        response.delete_cookie(RESULT_COOKIE)
+        return response
     account = crud.get_user(db, uid)
     collections = crud.list_bangumi_collections(db, uid)
     report = crud.get_persona_report(db, uid)
@@ -328,7 +415,8 @@ def persona_page(request: Request, db: DbSession):
         )
 
     llm = _llm_config(request, db)
-    site_works, site_counts = _site_works(db, uid)
+    # 主页只用计数，不拉作品实体（真正要用作品的是 _regenerate_report）
+    site_counts, site_work_count = _site_taste_summary(db, uid)
     return templates.TemplateResponse(
         request=request,
         name="persona.html",
@@ -337,7 +425,7 @@ def persona_page(request: Request, db: DbSession):
             "guest_mode": False,
             "collections_count": len(collections),
             "site_counts": site_counts,
-            "site_work_count": len(site_works),
+            "site_work_count": site_work_count,
             "status_counts": status_counts,
             "type_counts": type_counts,
             "type_labels": persona.SITE_TYPE_LABELS,
@@ -345,7 +433,13 @@ def persona_page(request: Request, db: DbSession):
             "report": report,
             "payload": payload,
             "profile": payload.get("profile") if payload else None,
-            "template_report": payload.get("report") if payload else None,
+            # 分享卡参数：由画像现算，不落库（卡片内容只依赖人格标签与维度）
+            "share_card_token": (
+                persona.encode_card(payload.get("profile") or {}, payload.get("rarity"))
+                if payload
+                else ""
+            ),
+            "template_report": _backfill_template_report(payload),
             "radar": payload.get("radar") if payload else None,
             "prompt": payload.get("prompt") if payload else "",
             "narrative": report.narrative if report else None,
@@ -361,7 +455,7 @@ def persona_page(request: Request, db: DbSession):
             "bound_bilibili_mid": report.bilibili_mid if report else "",
             "freshness_hint": _freshness_hint(
                 report,
-                len(site_works),
+                site_work_count,
                 len(collections),
                 len(bilibili_rows),
             ),
@@ -810,14 +904,16 @@ def persona_preview(
         int(work["subject_id"]) for work in works if work.get("subject_id")
     }
     recommendations = persona.recommend_from_site(db, profile, exclude_ids)
+    _rarity = persona.attach_rarity(db, profile)
     payload = {
         "profile": profile,
-        "report": persona.build_template_report(profile),
+        "report": persona.build_template_report(profile, _rarity),
         "prompt": persona.build_llm_prompt(
             profile, "sharp", recommendations=recommendations
         ),
         "radar": persona.build_radar(profile["dimensions"]),
         "recommendations": recommendations,
+        "rarity": _rarity,
     }
     status_counts, type_counts = _guest_counts(bangumi_items)
     stub_report = SimpleNamespace(
@@ -839,6 +935,7 @@ def persona_preview(
     if bilibili_items:
         sources.append(f"B站追番 {len(bilibili_items)} 条")
 
+    result_id = crud.save_anonymous_persona_result(db, payload, source="preview")
     response = templates.TemplateResponse(
         request=request,
         name="persona.html",
@@ -856,6 +953,7 @@ def persona_preview(
             "template_report": payload["report"],
             "radar": payload["radar"],
             "prompt": payload["prompt"],
+            "share_card_token": persona.encode_card(profile, payload.get("rarity")),
             "narrative": None,
             "narrative_source": "template",
             "bound_username": name,
@@ -891,8 +989,10 @@ def persona_preview(
             "tone": "sharp",
             "guest_max_items": settings.persona_guest_max_items,
             "guest_bili_max_items": settings.persona_guest_bilibili_max_items,
+            "result_kept_days": crud.ANONYMOUS_RESULT_TTL_DAYS,
         },
     )
+    _attach_result_cookie(response, result_id)
     if new_device_token:
         response.set_cookie(
             GUEST_DEVICE_COOKIE,
@@ -902,3 +1002,266 @@ def persona_preview(
             samesite="lax",
         )
     return response
+
+
+# ---------- 选题式成分测试（引流主入口：不需要任何外部账号） ----------
+#
+# 「填 Bangumi 用户名」这条路人根本进不来——得先有一个 Bangumi 账号，还得知道它的
+# 公开收藏页能匿名读。所以引流漏斗的断点一就卡在填用户名这一步。
+# 这里改成用站内作品库出题：点选「看过 / 想看 / 无感」就能出画像，全程不联网、
+# 不建账号、不写任何外部数据源，天然也不可能被当代理刷。
+# 因此**不走上面的三层游客限流**（那是为「对外拉取」设计的闸门），只保留 20 秒
+# 防抖挡住连点。
+QUIZ_ROUTE = "/persona/quiz"
+QUIZ_SIZES = (20, 100)
+QUIZ_PAGE_SIZE = 20
+# 最少要有几部正向作品才出结果：再少画像基本是噪音，不如直说
+QUIZ_MIN_POSITIVE = 3
+# 「换一批」的随机种子上限——只是抽题，不需要密码学强度
+QUIZ_SEED_MAX = 1000000
+
+
+def _quiz_size(value: object) -> int:
+    """题量只认两档：其余值一律回落到默认档，避免被拼 URL 放大成全表查询。"""
+    try:
+        size = int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return QUIZ_PAGE_SIZE
+    return size if size in QUIZ_SIZES else QUIZ_PAGE_SIZE
+
+
+def _quiz_seed(value: object) -> int:
+    """抽题种子归一到 [0, QUIZ_SEED_MAX)：非数字一律当 0。"""
+    try:
+        return abs(int(value)) % QUIZ_SEED_MAX  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return 0
+
+
+@public_router.get(QUIZ_ROUTE, response_class=HTMLResponse)
+def persona_quiz(request: Request, db: DbSession, size: str = "", seed: str = "0"):
+    """选题式成分测试：按类目配额出题，点选后即可出画像。
+
+    seed 同样收裸值后自行归一（并在下面把「下一批」的 seed 一起算好），
+    不然 ?seed=abc 也会被 FastAPI 挡在门外。
+
+    seed 与 size 决定这一批题面，同参数刷新不换题——选到一半刷新不该重来。
+    """
+    picked_size = _quiz_size(size)
+    seed_value = _quiz_seed(seed)
+    works = crud.sample_quiz_contents(db, size=picked_size, seed=seed_value)
+    current_user = getattr(request.state, "current_user", None)
+    return templates.TemplateResponse(
+        request=request,
+        name="persona_quiz.html",
+        context={
+            "works": works,
+            "size": picked_size,
+            "seed": seed_value,
+            "next_seed": (seed_value + 1) % QUIZ_SEED_MAX,
+            "sizes": QUIZ_SIZES,
+            "min_positive": QUIZ_MIN_POSITIVE,
+            "logged_in": current_user is not None,
+            "type_labels": persona.SITE_TYPE_LABELS,
+        },
+    )
+
+
+def _render_quiz_form(
+    request: Request, db: DbSession, *, size: int, seed: int, error: str = ""
+) -> HTMLResponse:
+    """重画选题页：回到同一批题面，带上提示语（提交失败 / 样本不足时都能复用）。"""
+    return templates.TemplateResponse(
+        request=request,
+        name="persona_quiz.html",
+        context={
+            "works": crud.sample_quiz_contents(db, size=size, seed=seed),
+            "size": size,
+            "seed": seed,
+            "next_seed": (seed + 1) % QUIZ_SEED_MAX,
+            "sizes": QUIZ_SIZES,
+            "min_positive": QUIZ_MIN_POSITIVE,
+            "logged_in": getattr(request.state, "current_user", None) is not None,
+            "type_labels": persona.SITE_TYPE_LABELS,
+            "error": error,
+        },
+    )
+
+
+@public_router.post(QUIZ_ROUTE, response_class=HTMLResponse)
+def persona_quiz_result(
+    request: Request,
+    db: DbSession,
+    picks: list[str] = Form([]),
+    seen: list[str] = Form([]),
+    want: list[str] = Form([]),
+    size: str = Form(""),
+    seed: str = Form("0"),
+):
+    """按点选结果算画像并渲染结果页（复用游客试算那一套渲染）。
+
+    seen / want 两组 checkbox 分别提交 id 列表（同一作品同时勾上时以 seen 为准——
+    先看过的更可信）。**「无感」不进 works**：它只是没看过，不是负向信号；塞进
+    interest 会把没看过的作品也算成口味，画像直接失真。
+    """
+    picked_size = _quiz_size(size)
+    seed_value = _quiz_seed(seed)
+    host = request.client.host if request.client else "unknown"
+    wait = _guest_cooldown_left(host)
+    if wait:
+        return _render_quiz_form(
+            request,
+            db,
+            size=picked_size,
+            seed=seed_value,
+            error=f"点太快了，请 {wait} 秒后再提交。",
+        )
+
+    chosen: dict[int, str] = {}
+    # seen 在前：同一 id 两组都勾上时以 seen 为准
+    for group, status in ((seen, "seen"), (want, "want")):
+        for raw in group or []:
+            if str(raw).strip().isdigit():
+                chosen.setdefault(int(str(raw).strip()), status)
+    # 上限兜底：提交条数不该超过这一批的题面数量
+    if len(chosen) > picked_size:
+        chosen = dict(list(chosen.items())[:picked_size])
+
+    if len(chosen) < QUIZ_MIN_POSITIVE:
+        return _render_quiz_form(
+            request,
+            db,
+            size=picked_size,
+            seed=seed_value,
+            error=f"至少标记 {QUIZ_MIN_POSITIVE} 部看过或想看的，才够算出画像。",
+        )
+
+    contents = crud.list_contents_by_ids(db, list(chosen))
+    tags_map = crud.list_content_tags_map(db, [row.id for row in contents])
+    works = [
+        persona.work_from_site(row, chosen[row.id], tags_map.get(row.id, []))
+        for row in contents
+    ]
+    if not works:
+        return _render_quiz_form(
+            request,
+            db,
+            size=picked_size,
+            seed=seed_value,
+            error="这批作品读不到了，换个种子再来一次。",
+        )
+
+    _guest_hits[host] = time.monotonic()
+    notes = [f"依据你在当日选题里标记的 {len(works)} 部作品"]
+    profile = persona.build_profile(
+        works,
+        site_counts={"favorites": 0, "statuses": len(works)},
+        notes=notes,
+    )
+    # 排除已标记过的：推荐要避开这批题面里的作品，否则等于把自己选过的推回来
+    exclude_ids = {int(row.bangumi_id) for row in contents if row.bangumi_id is not None}
+    recommendations = persona.recommend_from_site(db, profile, exclude_ids)
+    _rarity = persona.attach_rarity(db, profile)
+    payload = {
+        "profile": profile,
+        "report": persona.build_template_report(profile, _rarity),
+        "prompt": persona.build_llm_prompt(
+            profile, "sharp", recommendations=recommendations
+        ),
+        "radar": persona.build_radar(profile["dimensions"]),
+        "recommendations": recommendations,
+        "rarity": _rarity,
+    }
+    status_counts: dict[str, int] = {}
+    type_counts: dict[str, int] = {}
+    for row in contents:
+        status_counts[chosen[row.id]] = status_counts.get(chosen[row.id], 0) + 1
+        type_counts[row.type] = type_counts.get(row.type, 0) + 1
+
+    # 结果留一份快照：注册后凭 Cookie 领回（游客自己刷新也能再打开这张卡）
+    result_id = crud.save_anonymous_persona_result(db, payload, source="quiz")
+    response = templates.TemplateResponse(
+        request=request,
+        name="persona.html",
+        context={
+            "guest_mode": True,
+            "account": None,
+            "collections_count": len(works),
+            "status_counts": status_counts,
+            "type_counts": type_counts,
+            "type_labels": persona.SITE_TYPE_LABELS,
+            "status_labels": persona.STATUS_LABELS,
+            "report": SimpleNamespace(
+                generated_at=datetime.now(),
+                narrative=None,
+                narrative_source="template",
+                bangumi_username="",
+                tone="sharp",
+            ),
+            "payload": payload,
+            "profile": profile,
+            "template_report": payload["report"],
+            "radar": payload["radar"],
+            "prompt": payload["prompt"],
+            "share_card_token": persona.encode_card(profile, payload.get("rarity")),
+            "narrative": None,
+            "narrative_source": "template",
+            "bound_username": "",
+            "llm": persona.resolve_llm_config(
+                settings.persona_llm_provider,
+                settings.persona_llm_base_url,
+                settings.persona_llm_api_key,
+                settings.persona_llm_model,
+                settings.persona_llm_max_tokens,
+            ),
+            "llm_enabled": False,
+            "llm_source": "none",
+            "llm_key_masked": "",
+            "llm_providers": persona.LLM_PROVIDERS,
+            "bilibili_count": 0,
+            "bilibili_status_counts": {},
+            "bound_bilibili_mid": "",
+            "guest_targets": "当日选题",
+            "guest_sources": f"站内选题 {len(works)} 条",
+            "guest_total": len(works),
+            "freshness_hint": "",
+            "site_sync": {
+                "total": len(works),
+                "existing": 0,
+                "pending": 0,
+                "limit": settings.persona_site_sync_limit,
+            },
+            "site_imports_total": 0,
+            "site_imports": [],
+            "tone_labels": persona.TONE_LABELS,
+            "tone": "sharp",
+            "guest_max_items": settings.persona_guest_max_items,
+            "guest_bili_max_items": settings.persona_guest_bilibili_max_items,
+            "quiz_back_url": f"{QUIZ_ROUTE}?{urlencode({'size': picked_size, 'seed': seed})}",
+            "result_kept_days": crud.ANONYMOUS_RESULT_TTL_DAYS,
+        },
+    )
+    _attach_result_cookie(response, result_id)
+    return response
+
+
+# 分享卡：结果页唯一的「可晒物」。参数全部由结果页编码进 URL，服务端不查库、
+# 不落库——分享出去的那张卡不该绑定谁算出来的（也省掉一张表）。
+SHARE_CARD_ROUTE = "/persona/card"
+
+
+@public_router.get(SHARE_CARD_ROUTE)
+def persona_share_card(d: str = ""):
+    """竖版分享卡（image/svg+xml）：浏览器可直接预览，也可另存为图片。"""
+    data = persona.decode_card(d)
+    if data is None:
+        raise HTTPException(status_code=404, detail="分享卡参数无效")
+    return Response(
+        content=persona.build_share_card(data),
+        media_type="image/svg+xml",
+        headers={
+            "Content-Disposition": 'inline; filename="otaku-persona.svg"',
+            # 卡片内容完全由 URL 决定，可以放心让浏览器和 CDN 缓存
+            "Cache-Control": "public, max-age=600",
+        },
+    )

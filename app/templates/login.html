@@ -2,51 +2,77 @@
 {% from "_brand.html" import wordmark %}
 {% block title %}登录{% endblock %}
 {% block content %}
-<div class="row justify-content-center">
-    <div class="col-12 col-md-8 col-lg-5">
-        <div class="card app-card auth-card mt-4">
-            <div class="card-body p-4">
-                <div class="auth-band mb-4">
-                    {{ wordmark("brand-lockup-lg") }}
-                    <h1 class="h4 mb-1">{{ site_tagline }}</h1>
-                    <p class="small mb-0" style="color: rgba(255,255,255,.85);">登录后可作为管理员进入测试管理平台</p>
-                </div>
-
-                {% if error %}<div class="alert alert-danger py-2 mb-3">{{ error }}</div>{% endif %}
-                {% if notice %}<div class="alert alert-success py-2 mb-3">{{ notice }}</div>{% endif %}
-
-                <form method="post" action="/login">
-                    <input type="hidden" name="next" value="{{ next }}">
-                    <div class="mb-3">
-                        <label class="form-label" for="login-username">用户名</label>
-                        <input class="form-control" id="login-username" name="username"
-                               value="{{ username }}" required autofocus autocomplete="username">
-                    </div>
-                    <div class="mb-3">
-                        <label class="form-label" for="login-password">密码</label>
-                        <input class="form-control" id="login-password" name="password"
-                               type="password" required autocomplete="current-password">
-                    </div>
-                    <div class="d-grid">
-                        <button class="btn btn-primary" type="submit">登录</button>
-                    </div>
-                </form>
-
-                <hr class="my-4">
-                <p class="small text-muted mb-0">
-                    普通用户登录后只能使用 ACGN 内容平台；管理员额外可进入测试管理平台。<br>
-                    未登录也可正常浏览内容平台（首页 / ACGN 资讯 / 新番档期）。
-                </p>
-                <p class="text-center mt-3 mb-0">
-                    <a class="small" href="/forgot-password">忘记密码？</a>
-                    &nbsp;·&nbsp;
-                    <a class="small" href="/register{% if next and next != '/' %}?next={{ next }}{% endif %}">还没有账号？注册普通用户</a>
-                </p>
-            </div>
+{# 与注册页同一套方案 A 外壳（左侧品牌面板 + 右侧表单），具体版式见 register.html 注释 #}
+<div class="auth-shell">
+    <aside class="auth-aside">
+        <div class="auth-aside-inner">
+            {{ wordmark("brand-lockup-lg") }}
+            <ul class="auth-aside-cat">
+                <li class="auth-aside-chip">动画</li>
+                <li class="auth-aside-chip">漫画</li>
+                <li class="auth-aside-chip">游戏</li>
+                <li class="auth-aside-chip">轻小说</li>
+            </ul>
+            <p class="auth-aside-note">未登录也可正常浏览内容平台（首页 / ACGN 资讯 / 新番档期）。</p>
         </div>
-        <div class="text-center mt-3 mb-4">
+    </aside>
+
+    <section class="auth-panel">
+        <h1 class="auth-title">登录</h1>
+        <p class="auth-subtitle">登录后可作为管理员进入测试管理平台</p>
+
+        {% if error %}<div class="alert alert-danger py-2 mb-3">{{ error }}</div>{% endif %}
+        {% if notice %}<div class="alert alert-success py-2 mb-3">{{ notice }}</div>{% endif %}
+
+        <form method="post" action="/login" id="login-form">
+            <input type="hidden" name="next" value="{{ next }}">
+            <div class="auth-group">
+                <p class="auth-group-label">账号信息</p>
+                <div class="mb-3">
+                    <label class="form-label" for="login-username">用户名</label>
+                    <input class="form-control auth-control" id="login-username" name="username"
+                           value="{{ username }}" required autofocus autocomplete="username">
+                </div>
+                <div class="mb-0">
+                    <label class="form-label" for="login-password">密码</label>
+                    <div class="auth-field">
+                        <input class="form-control auth-control" id="login-password" name="password"
+                               type="password" required autocomplete="current-password">
+                        <button class="auth-reveal" type="button" data-auth-reveal="login-password"
+                                aria-pressed="false">显示</button>
+                    </div>
+                </div>
+            </div>
+            <div class="d-grid auth-actions">
+                <button class="btn btn-primary auth-submit" type="submit">登录</button>
+            </div>
+        </form>
+
+        <p class="auth-footnote">
+            普通用户登录后只能使用 ACGN 内容平台；管理员额外可进入测试管理平台。
+        </p>
+        <div class="auth-links">
+            <a class="small" href="/forgot-password">忘记密码？</a>
+            <a class="small" href="/register{% if next and next != '/' %}?next={{ next }}{% endif %}">还没有账号？注册</a>
             <a class="small" href="/">&larr; 返回内容平台首页</a>
         </div>
-    </div>
+    </section>
 </div>
+<script>
+(function () {
+    "use strict";
+    var form = document.getElementById("login-form");
+    if (!form) return;
+    Array.prototype.forEach.call(form.querySelectorAll("[data-auth-reveal]"), function (btn) {
+        btn.addEventListener("click", function () {
+            var target = document.getElementById(btn.getAttribute("data-auth-reveal"));
+            if (!target) return;
+            var shown = target.type === "text";
+            target.type = shown ? "password" : "text";
+            btn.textContent = shown ? "显示" : "隐藏";
+            btn.setAttribute("aria-pressed", String(!shown));
+        });
+    });
+})();
+</script>
 {% endblock %}

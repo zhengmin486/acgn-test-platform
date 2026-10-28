@@ -14,21 +14,60 @@
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 from app import article_body, media
 from app.config import settings
 
-# 与 scripts/import_articles 的抓取 UA 保持一致：源站不带 UA 会 403。
+# 2026-10-25：旧 UA 是 `Mozilla/5.0 ... ACGNContentPlatform/1.0`，自曝脚本身份；
+# 统一成与抓取层（scripts.import_articles.DEFAULT_USER_AGENT）相同的主流浏览器
+# UA，并补 Accept-Language。实测各源图床两种 UA 都能下（防盗链不拦），但服务器
+# 出口与本地代理不是同一套风控，不留在文件里的自曝 UA 没有任何好处。
 DEFAULT_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ACGNContentPlatform/1.0"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
 )
+DEFAULT_HEADERS = {
+    "User-Agent": DEFAULT_USER_AGENT,
+    "Accept-Language": "ja,zh-CN;q=0.9,en;q=0.5",
+}
 DEFAULT_TIMEOUT = 20.0
 
 _EXT_BY_FORMAT = {"jpeg": ".jpg", "png": ".png", "webp": ".webp", "gif": ".gif"}
+
+# 原图增强白名单（2026-10-25，实测可拿原图后才收）：
+# - gcores 的图床在 URL 上带 OSS 处理参数（resize/m_fill/quality），feed 给的是
+#   626×292 缩图；去掉 query 即 1600×900 原图（实测 200）。
+# - lisani 是 WordPress，上传目录自动生成 `name-300x300.jpg` 缩略图；
+#   去掉 `-WxH` 后缀即原图（实测 200）。
+# 只对这两个域名生效：其它域的 URL 形态没实测过，不猜。
+_OSS_QUERY_HOSTS = ("image.gcores.com",)
+_WP_SIZE_HOSTS = ("www.lisani.jp", "lisani.jp")
+_WP_SIZE_SUFFIX_RE = re.compile(r"-\d{2,5}x\d{2,5}(?=\.[A-Za-z]{2,5}$)")
+
+
+def upgraded_image_variants(url: str) -> list[str]:
+    """返回「更可能是原图」的候选地址（可能为空）。
+
+    调用方先试变体、失败再回退原 URL——增强只提成功率，不改变失败时的行为。
+    """
+    text = (url or "").strip()
+    if not text.startswith(("http://", "https://")):
+        return []
+    parsed = urlsplit(text)
+    host = parsed.netloc.lower()
+    if host in _OSS_QUERY_HOSTS and parsed.query:
+        return [urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))]
+    if host in _WP_SIZE_HOSTS:
+        stripped = _WP_SIZE_SUFFIX_RE.sub("", parsed.path)
+        if stripped != parsed.path:
+            return [urlunsplit((parsed.scheme, parsed.netloc, stripped, "", ""))]
+    return []
 
 
 class ArticleImageError(RuntimeError):
@@ -97,9 +136,7 @@ def download_image(
     opener=None,
 ) -> str:
     """下载一张图并落盘，返回站内路径；任何失败抛 ArticleImageError。"""
-    request = urllib.request.Request(
-        url, headers={"User-Agent": DEFAULT_USER_AGENT}
-    )
+    request = urllib.request.Request(url, headers=DEFAULT_HEADERS)
     limit = settings.article_image_max_bytes
     try:
         if opener is not None:
@@ -132,6 +169,18 @@ def localize_media(
     download = downloader or (
         lambda url, key, index: download_image(url, key=key, index=index)
     )
+
+    def download_prefer_original(url: str, key: str, index: int) -> str:
+        """先试原图变体，失败回退 feed 给的地址（增强不改失败语义）。"""
+        variants = upgraded_image_variants(url)
+        last_error: Exception | None = None
+        for candidate in [*variants, url]:
+            try:
+                return download(candidate, key, index)
+            except Exception as exc:  # noqa: BLE001 - 逐个变体尝试，全失败抛最后一个
+                last_error = exc
+        raise last_error if last_error else ArticleImageError("下载失败")
+
     if not settings.article_image_download_enabled and downloader is None:
         # 全局关闭（测试环境 / 明确不想落盘）：原样返回，页面继续用源站外链
         return LocalizeResult(body=body, head_image=head_image)
@@ -147,7 +196,7 @@ def localize_media(
     saved = failed = 0
     for index, url in enumerate(urls, start=1):
         try:
-            mapping[url] = download(url, str(key), index)
+            mapping[url] = download_prefer_original(url, str(key), index)
             saved += 1
         except Exception:  # noqa: BLE001 —— 单张失败不阻塞，保留外链
             failed += 1

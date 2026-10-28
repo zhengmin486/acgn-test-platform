@@ -30,9 +30,15 @@
                 aria-expanded="false" aria-label="展开搜索">
             <svg class="svg-ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="16.5" y1="16.5" x2="21" y2="21"/></svg>
         </button>
-        <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#content-nav"
+        {# 汉堡：三条实体横线（非 Bootstrap 背景图），展开时旋转成 X，让开合状态一眼可辨。
+           形状/尺寸与左侧搜索按钮同构（38px 圆），两者并排才像一个组件组。 #}
+        <button class="navbar-toggler nav-burger" type="button" data-bs-toggle="collapse" data-bs-target="#content-nav"
                 aria-controls="content-nav" aria-expanded="false" aria-label="切换导航">
-            <span class="navbar-toggler-icon"></span>
+            <span class="nav-burger-box" aria-hidden="true">
+                <span class="nav-burger-bar"></span>
+                <span class="nav-burger-bar"></span>
+                <span class="nav-burger-bar"></span>
+            </span>
         </button>
     </div>
     <div class="collapse navbar-collapse" id="content-nav">

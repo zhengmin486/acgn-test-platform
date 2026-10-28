@@ -7,7 +7,7 @@
 <h1 class="h3 mb-1 section-heading">注册邀请码</h1>
 <p class="text-muted small mb-3">
     当前注册模式：<strong>{{ registration_mode }}</strong>
-    （{% if invite_required %}仅邀请码可注册{% else %}任何人可自助注册，邀请码不参与校验{% endif %}）。
+    （{% if registration_mode == 'open' %}注册页不展示邀请码，完全不校验{% elif invite_required %}必须填写有效邀请码才能注册{% else %}邀请码可选：留空也能注册，填了必须是有效邀请码{% endif %}）。
     邀请码一次性有效，注册成功即消费。
 </p>
 {% include "_settings_nav.html" %}
@@ -50,11 +50,18 @@
                 <input class="form-control form-control-sm" id="invite-note" name="note"
                        maxlength="200" placeholder="发给谁 / 用途，便于日后核对">
             </div>
+            <div class="col-6 col-md-3">
+                <label class="form-label small" for="invite-role">注册身份</label>
+                <select class="form-control form-control-sm" id="invite-role" name="role">
+                    <option value="user">普通用户</option>
+                    <option value="admin">管理员（仅站长可发）</option>
+                </select>
+            </div>
             <div class="col-12 col-md-3">
                 <button class="btn btn-sm btn-primary w-100" type="submit">生成</button>
             </div>
         </form>
-        <div class="form-text">一次最多 {{ max_batch }} 个；邀请码 8 位，已去掉 0/O、1/I 等易混淆字符。</div>
+        <div class="form-text">一次最多 {{ max_batch }} 个；邀请码 8 位，已去掉 0/O、1/I 等易混淆字符。选「管理员」生成的邀请码，对方注册后即拥有管理员权限（仅站长可选）。</div>
     </div>
 </div>
 
@@ -62,12 +69,24 @@
     <div class="card-body">
         <h2 class="h6 mb-3">全部邀请码（{{ codes|length }}）</h2>
         {% if codes %}
-        <div class="table-responsive">
+        <div class="admin-panel" data-admin-scope data-bulk-form="bulk-revoke">
+        {# 批量作废表单：勾选框与按钮用 form 属性归入本表单，避免表单嵌套 #}
+        <form id="bulk-revoke" method="post" action="/admin/invites/revoke"
+              class="admin-bulkform" data-ajax-revoke data-remove="mark"
+              data-id-field="invite_ids" data-count-param="revoked"
+              data-verb="作废" data-entity="邀请码" data-unit="个">
+        </form>
+        <div class="table-responsive admin-table">
             <table class="table table-sm align-middle mb-0">
                 <thead>
                     <tr>
+                        <th class="cell-check" scope="col">
+                            <input class="form-check-input" type="checkbox" data-select-all
+                                   aria-label="全选可作废的邀请码">
+                        </th>
                         <th scope="col">邀请码</th>
                         <th scope="col">状态</th>
+                        <th scope="col">注册身份</th>
                         <th scope="col">备注</th>
                         <th scope="col">签发人</th>
                         <th scope="col">生成时间</th>
@@ -78,28 +97,50 @@
                 </thead>
                 <tbody>
                     {% for code, status in codes %}
-                    <tr>
-                        <td><code class="user-select-all">{{ code.code }}</code></td>
-                        <td>
+                    <tr data-row-id="{{ code.id }}">
+                        <td class="cell-check">
+                            {% if status == 'available' %}
+                            <input class="form-check-input" type="checkbox" data-row-check
+                                   name="invite_ids" value="{{ code.id }}" form="bulk-revoke"
+                                   aria-label="选择邀请码 {{ code.code }}">
+                            {% endif %}
+                        </td>
+                        <td class="cell-code cell-title" data-label="邀请码">
+                            <code class="user-select-all">{{ code.code }}</code>
+                        </td>
+                        <td class="cell-status" data-label="状态" data-status-cell>
                             {% if status == 'available' %}<span class="badge bg-success">可用</span>
                             {% elif status == 'used' %}<span class="badge bg-secondary">已使用</span>
                             {% elif status == 'expired' %}<span class="badge bg-warning text-dark">已过期</span>
                             {% else %}<span class="badge bg-danger">已作废</span>
                             {% endif %}
                         </td>
-                        <td class="small text-muted">{{ code.note or '—' }}</td>
-                        <td class="small">{{ usernames.get(code.created_by, code.created_by) if code.created_by else '—' }}</td>
-                        <td class="small text-muted">{{ code.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
-                        <td class="small text-muted">
+                        <td class="cell-role small" data-label="注册身份">
+                            {% if code.role == 'admin' %}<span class="badge bg-info text-dark">管理员</span>
+                            {% else %}普通用户{% endif %}
+                        </td>
+                        <td class="cell-note small text-muted" data-label="备注">{{ code.note or '—' }}</td>
+                        <td class="cell-issuer small" data-label="签发人">
+                            {{ usernames.get(code.created_by, code.created_by) if code.created_by else '—' }}
+                        </td>
+                        <td class="cell-time small text-muted" data-label="生成时间">
+                            {{ code.created_at.strftime('%Y-%m-%d %H:%M') }}
+                        </td>
+                        <td class="cell-expire small text-muted" data-label="有效期至">
                             {{ code.expires_at.strftime('%Y-%m-%d %H:%M') if code.expires_at else '永不过期' }}
                         </td>
-                        <td class="small text-muted">
+                        <td class="cell-used small text-muted" data-label="使用者 / 时间">
                             {% if code.used_at %}{{ usernames.get(code.used_by, code.used_by) }} · {{ code.used_at.strftime('%Y-%m-%d %H:%M') }}
                             {% else %}—{% endif %}
                         </td>
-                        <td class="text-end">
+                        <td class="cell-actions text-end" data-label="操作">
                             {% if status == 'available' %}
-                            <form method="post" action="/admin/invites/{{ code.id }}/revoke">
+                            <form method="post" action="/admin/invites/{{ code.id }}/revoke"
+                                  data-ajax-revoke data-remove="mark" data-count-param="revoked"
+                                  data-verb="作废" data-entity="邀请码" data-unit="个"
+                                  data-ids="{{ code.id }}"
+                                  data-confirm="确定作废邀请码 {{ code.code }}？作废后该码不可用于注册。"
+                                  data-confirm-title="作废邀请码" data-confirm-ok="确认作废">
                                 <button class="btn btn-sm btn-outline-danger" type="submit">作废</button>
                             </form>
                             {% endif %}
@@ -108,6 +149,17 @@
                     {% endfor %}
                 </tbody>
             </table>
+        </div>
+        <div class="admin-bulkbar">
+            <span class="admin-sel-info">已选 <b data-sel-count>0</b> 个</span>
+            {# 窄屏表头整行隐藏，全选框移到批量栏里，手指才够得着 #}
+            <label class="admin-select-all-mobile">
+                <input class="form-check-input" type="checkbox" data-select-all aria-label="全选本页">
+                <span>全选本页</span>
+            </label>
+            <button class="btn btn-sm btn-danger" type="submit" form="bulk-revoke"
+                    data-bulk-submit>批量作废选中</button>
+        </div>
         </div>
         {% else %}
         <p class="text-muted small mb-0">还没有生成任何邀请码。用上面的表单生成后分发给需要注册的人。</p>

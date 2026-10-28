@@ -305,6 +305,94 @@ class TestAdminReview:
         )
         assert resp.status_code == 403
 
+    def test_bulk_approve_writes_multiple_contents(self, sub_env):
+        """批量通过：一次提交多个待审 id，全部写入内容库并回显真实条数。"""
+        login_as_user(sub_env.client)
+        for title in ("批量新增甲", "批量新增乙", "批量新增丙"):
+            _submit_create(sub_env.client, title=title)
+        ids = [row.id for row in _pending(sub_env.session_factory)]
+
+        login_as_admin(sub_env.client)
+        resp = sub_env.client.post(
+            "/manage/submissions/approve",
+            data={"ids": [str(i) for i in ids]},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        assert "status=approved" in resp.headers["location"]
+        assert "done=3" in resp.headers["location"]
+
+        db = sub_env.session_factory()
+        try:
+            for submission_id in ids:
+                sub = crud.get_content_submission(db, submission_id)
+                assert sub.status == crud.SUBMISSION_STATUS_APPROVED
+                assert sub.applied_content_id is not None
+        finally:
+            db.close()
+
+    def test_bulk_reject_records_notes(self, sub_env):
+        """批量驳回：附统一说明，全部记为已驳回且带说明。"""
+        login_as_user(sub_env.client)
+        for title in ("驳回甲", "驳回乙"):
+            _submit_create(sub_env.client, title=title)
+        ids = [row.id for row in _pending(sub_env.session_factory)]
+
+        login_as_admin(sub_env.client)
+        resp = sub_env.client.post(
+            "/manage/submissions/reject",
+            data={"ids": [str(i) for i in ids], "note": "题材不符"},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        assert "status=rejected" in resp.headers["location"]
+        assert "done=2" in resp.headers["location"]
+
+        db = sub_env.session_factory()
+        try:
+            for submission_id in ids:
+                sub = crud.get_content_submission(db, submission_id)
+                assert sub.status == crud.SUBMISSION_STATUS_REJECTED
+                assert sub.review_note == "题材不符"
+        finally:
+            db.close()
+
+    def test_bulk_approve_skips_already_processed(self, sub_env):
+        """批量通过里混入已处理的 id：只计真正新处理的条数。"""
+        login_as_user(sub_env.client)
+        for title in ("已处理甲", "新处理乙"):
+            _submit_create(sub_env.client, title=title)
+        pending = _pending(sub_env.session_factory)
+        done_one = pending[0]
+        fresh = pending[1]
+
+        login_as_admin(sub_env.client)
+        first = sub_env.client.post(
+            f"/manage/submissions/{done_one.id}/approve", follow_redirects=False
+        )
+        assert "decided=ok" in first.headers["location"]
+        resp = sub_env.client.post(
+            "/manage/submissions/approve",
+            data={"ids": [str(done_one.id), str(fresh.id)]},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+        assert "done=1" in resp.headers["location"]
+
+    def test_bulk_page_renders_pickable_and_confirmed(self, sub_env):
+        """审核页：待审行带勾选框与全选，批量通过 / 驳回两个按钮均要二次确认。"""
+        login_as_user(sub_env.client)
+        _submit_create(sub_env.client)
+        login_as_admin(sub_env.client)
+        body = sub_env.client.get("/manage/submissions?status=pending").text
+        assert "data-row-check" in body
+        assert "data-select-all" in body
+        assert 'form="bulk-approve"' in body
+        assert 'form="bulk-reject"' in body
+        assert 'id="bulk-approve"' in body
+        assert 'id="bulk-reject"' in body
+        assert 'data-label="标题 / 简介"' in body
+
 
 class TestObjectiveFields:
     """申请能覆盖详情页展示的客观信息，而不是只有标题 / 简介 / 评分。

@@ -8,6 +8,7 @@
 """
 
 import pytest
+from auth_helpers import create_accounts, login_as_admin
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -17,10 +18,22 @@ from app.database import Base, get_db
 from app.main import app
 from app.models import CASE_SOURCE_AUTO, CASE_SOURCE_MANUAL, TestCase
 from app.schemas import TestCaseCreate
-from auth_helpers import create_accounts, login_as_admin
 
 SAFE = ("GET", "HEAD")
 BLACKLIST = case_discovery.EXCLUDED_SEGMENTS
+
+# canary：这些路径必须出现在 discover_routes() 里。新增页面模块若漏进回归集
+# （2026-10-22 实战：poster_admin / persona_pages.public_router 漏过），这里就红。
+CANARY_PATHS = (
+    "/", "/contents", "/articles", "/schedule", "/me",
+    "/api/health", "/api/contents", "/api/tags",
+    "/testcases", "/runs", "/batches",
+    "/manage", "/manage/contents", "/manage/posters",
+    "/persona", "/creators", "/admin",
+)
+
+# case_discovery 允许 import 的 app 模块（main 仅限函数内延迟导入）。
+ALLOWED_APP_IMPORTS = {"app", "app.crud", "app.models", "app.schemas", "app.main"}
 
 
 @pytest.fixture
@@ -64,6 +77,43 @@ def test_discovery_returns_read_only_routes_without_params():
         assert not item["path"].startswith(case_discovery.EXCLUDED_PREFIXES)
         segments = {s.lower() for s in item["path"].split("/") if s}
         assert not (segments & BLACKLIST)
+
+
+def test_discovery_canary_paths_are_never_missed():
+    """canary：核心路由必须被发现——新页面模块漏进回归集时这条就红。"""
+    found = {item["path"] for item in case_discovery.discover_routes()}
+    missing = [path for path in CANARY_PATHS if path not in found]
+    assert not missing, f"这些路由没进回归集（新模块没挂载或被误排）：{missing}"
+
+
+def test_discovery_source_has_no_page_module_imports():
+    """AST 断言：case_discovery 不得 import 页面模块，防止又改回硬编码清单。"""
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "app" / "case_discovery.py").read_text(encoding="utf-8")
+
+    def is_app_module(name: str) -> bool:
+        """名字是否对应真实存在的 app 模块文件（过滤掉函数/类名）。"""
+        parts = name.split(".")
+        if parts[0] != "app":
+            return False
+        rel = "/".join(parts)
+        return ((root / f"{rel}.py").is_file()
+                or (root / rel / "__init__.py").is_file())
+
+    imported: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.ImportFrom):
+            if node.module:
+                imported.add(node.module)
+                imported.update(f"{node.module}.{alias.name}" for alias in node.names)
+        elif isinstance(node, ast.Import):
+            imported.update(alias.name for alias in node.names)
+    offenders = sorted(m for m in imported
+                       if is_app_module(m) and m not in ALLOWED_APP_IMPORTS)
+    assert not offenders, f"case_discovery 又 import 了页面模块（改回硬编码？）：{offenders}"
 
 
 def test_first_plan_lists_every_route_as_add(gen_env):

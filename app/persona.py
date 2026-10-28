@@ -10,6 +10,9 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
+import html
 import json
 import math
 import time
@@ -23,8 +26,9 @@ from app import crud
 from app.models import BangumiCollection, BilibiliFollow
 from app.tagging import (
     GENRE_TAGS,
-    STUDIO_ALIASES,
     TAG_CLUSTERS,
+    canonical_genre,
+    canonical_studio,
     is_genre_tag,
 )
 
@@ -56,10 +60,15 @@ STATUS_LABELS = {
 # 标签归一（题材 / 公司 / 年份）统一在 app/tagging.py，画像与入库共用一套口径。
 _is_genre_tag = is_genre_tag
 
+# 第 7 维 quality（高分率）= 看过作品里 Bangumi 评分 ≥7 的占比（0–100）。
+# 只走 Bangumi 评分（B站评分标准不同、不可混用）。样本不足时取中性 50，
+# 避免把「只看过 3 部且恰好都高分」误判成神作党。阈值经 20 个真实公开账号
+# 分布回调：口碑党 ≥65（≈中位），神作党 ≥82（≈前 15%）。
 DIMENSION_LABELS = [
     ("type_focus", "类型集中"),
     ("tag_focus", "题材垂直"),
     ("mainstream", "大众度"),
+    ("quality", "高分率"),
     ("exploration", "探索广度"),
     ("hype", "追更强度"),
     ("completion", "完成度"),
@@ -445,21 +454,260 @@ def _mainstream(avg_popularity: float | None) -> float:
     return _round((math.log10(avg_popularity) - 2) / 4 * 100)
 
 
+def _exploration(genre_counter: Counter) -> float:
+    """探索广度：题材分布的归一化香农熵（0–100）。
+
+    旧实现用 len(tag_counter)*4，对重度用户恒≥100，等于没测。
+    改用熵衡量「口味铺得有多开」：全压一个题材→接近 0；题材铺得越广、越均匀→越接近 100。
+    归一到题材词表总规模（GENRE_TAGS，约 168 个），而非用户自身题材数——否则
+    「少数题材但均匀」的轻度用户也会顶到 100，测的是均匀度而非广度。
+    """
+    total = sum(genre_counter.values())
+    if total <= 1 or len(genre_counter) <= 1:
+        return 0.0
+    entropy = -sum(
+        (count / total) * math.log2(count / total) for count in genre_counter.values()
+    )
+    ref = math.log2(max(2, len(GENRE_TAGS)))
+    if ref <= 0:
+        return 0.0
+    return _round(min(100.0, entropy / ref * 100))
+
+
 def _traits(
-    dimensions: dict, want: int, seen: int, avg_score: float | None
+    dimensions: dict, want: int, seen: int, quality: float | None
 ) -> list[str]:
     traits: list[str] = []
-    if seen and want / max(1, seen) >= 1.5:
-        traits.append("囤积型")
+    # 热度轴：冷门 vs 大热（互斥）
     if dimensions["mainstream"] < 40:
         traits.append("冷门挖掘机")
+    elif dimensions["mainstream"] >= 50:
+        traits.append("主流厨")
+    # 口碑轴：高分 vs 神作（互斥）。用户最关心的「只看高分 / 只看大热」两轴，优先保留
+    if quality is not None and quality >= 82:
+        traits.append("神作党")
+    elif quality is not None and quality >= 65:
+        traits.append("口碑党")
+    # 口味轴：偏食 vs 博爱
     if dimensions["tag_focus"] >= 60:
-        traits.append("专精型")
-    if dimensions["exploration"] >= 70:
-        traits.append("广撒网")
-    if avg_score and avg_score >= 8:
-        traits.append("高分党")
-    return traits[:2]
+        traits.append("偏食")
+    if dimensions["exploration"] >= 72:
+        traits.append("博爱")
+    # 行为：想看远多于看过
+    if seen and want / max(1, seen) >= 1.5:
+        traits.append("仓鼠")
+    # 上限 3：热度 / 口碑两主轴线优先（已排前两位），口味 / 行为次之
+    return traits[:3]
+
+
+# 称号解释：一个 badge 配一句 锐评风说明，页面直接展示在标签下方。
+# 只解释「成分标签」这一层（口碑轴 / 热度轴 / 口味轴 / 行为），簇与身份也各给一句。
+# 阈值口径见 _traits：口碑轴 quality（≥7 分占比）、热度轴 mainstream、口味轴 tag_focus / exploration。
+TRAIT_BLURBS = {
+    # 口碑轴：收藏里有评分作品的 Bangumi ≥7 分占比
+    "神作党": "有评分的收藏里，八成以上在 Bangumi 拿到 7 分；口碑这关，卡得很严。",
+    "口碑党": "有评分的收藏里，大半在 Bangumi 拿到 7 分；看口碑挑作品，是基本操作。",
+    # 热度轴：收藏作品的平均收藏人数
+    "主流厨": "收藏整体偏热门，人气高的作品在这里更有存在感。",
+    "冷门挖掘机": "收藏整体偏冷门，比起跟着大部队，更喜欢自己下矿挖宝。",
+    # 口味轴：题材集中度与题材分布广度
+    "偏食": "口味明显偏向几个固定题材，喜欢什么，一眼就能看出来。",
+    "博爱": "兴趣横跨不少题材，见一个类型爱一个类型，杂食但不设限。",
+    # 行为：想看数量 / 看过数量 ≥ 1.5
+    "仓鼠": "想看的比看过还多出一大截，收藏夹扩建得比消化快。",
+    # 主身份：单一媒介占比过半；均不过半则为杂食党
+    "番剧党": "动画占了收藏的一半以上，新番与补番列表才是主战场。",
+    "漫画党": "漫画占了收藏的一半以上，快乐主要靠一页一页翻出来。",
+    "游戏宅": "游戏占了收藏的一半以上，光看不够，得亲自上手。",
+    "轻小说党": "轻小说占了收藏的一半以上，比起等改编，更想直接读原作。",
+    "杂食党": "没有一种媒介独占收藏，动画、漫画、游戏、轻小说都愿意碰。",
+}
+
+
+# ==================== 专属称号 ====================
+# 五层命中：组合毒舌 → 极端值成就 → 簇×特征主表 → 身份兜底 → 回退拼接。
+# 每个称号 = (中文, 代号, 一句毒舌)。代号用于分享卡 / 短链。
+# 重点是效果：有梗、贴切、不冒犯，且每个称号命中率都要压得住、不烂大街。
+
+# 0. 组合毒舌：跨维度冲突，最有记忆点，优先级最高。条件签名 (profile, rarity) -> bool。
+TITLE_COMBO = [
+    (lambda p, r: p["dimensions"]["mainstream"] >= 50 and p["dimensions"]["quality"] < 50,
+     "流行厨", "HAYARI", "当季的霸权番，一部没落下。"),
+    (lambda p, r: p["dimensions"]["mainstream"] >= 50 and p["dimensions"]["quality"] >= 50,
+     "评价党", "HYOUKA", "收藏里部部神作，就是没一部自己挖的。"),
+    (lambda p, r: p["dimensions"]["mainstream"] <= 20 and bool(r) and r.get("tier") == "N",
+     "伪婆罗门", "NISE-BRAHMIN", "以为自己很婆，其实成分跟一百万人一样。"),
+    (lambda p, r: p["dimensions"]["mainstream"] <= 20 and p["dimensions"]["quality"] < 50,
+     "难民", "NANMIN", "季度末的难民，冷门烂片也照啃。"),
+]
+
+
+# 1. 极端值成就（按优先级，命中第一个即返回）
+TITLE_EXTREME = [
+    (lambda p: p.get("want", 0) >= p.get("seen", 0) * 3 and p.get("seen", 0) >= 3,
+     "赛博貔貅", "PIXIU", "只进不出，收藏夹就是貔貅窝。"),
+    (lambda p: p.get("drop", 0) >= p.get("seen", 0) * 0.5 and p.get("drop", 0) >= 5,
+     "三集弃之神", "DROP-GOD", "三集是别人的底线，是这里的终点。"),
+    (lambda p: p["dimensions"]["mainstream"] <= 10,
+     "婆罗门本尊", "BRAHMIN", "热榜当垃圾场，冷门榜才是首页。"),
+    (lambda p: p.get("drop", 0) == 0 and p.get("seen", 0) >= 20 and (p.get("avg_score") or 0) < 6.5,
+     "有始有终的异类", "FINISH-ALL", "大河内的烂尾，含泪也要看完。"),
+    (lambda p: p.get("drop", 0) > 0 and p.get("drop", 0) >= p.get("seen", 0) >= 3,
+     "开幕雷击受害者", "EP1-VICTIM", "第一集的高能，就是最后一集。"),
+    (lambda p: p["dimensions"]["tag_focus"] >= 99,
+     "一根筋原教旨", "ICHIGEN", "口味表上只有一个正统，别的都是异端。"),
+]
+
+
+# 2. 主表：簇 → 特征 → 称号。特征归一到「囤积/冷门/大热/专精/广撒网/高分」六个槽。
+def _feature_key(trait: str) -> str | None:
+    return {
+        "仓鼠": "囤积",
+        "冷门挖掘机": "冷门",
+        "主流厨": "大热",
+        "偏食": "专精",
+        "博爱": "广撒网",
+        "神作党": "高分",
+        "口碑党": "高分",
+    }.get(trait)
+
+
+TITLE_MAIN = {
+    "治愈": {
+        "囤积": ("被炉封印者", "KOTATSU", "空气系一入坑，就再也没出过被炉。"),
+        "冷门": ("空气系考古学家", "KUUKI", "别人嫌空气系无聊，这里当宝在挖。"),
+        "专精": ("芳文社漫游者", "KIRARA", "芳文社的萌，才是标准答案。"),
+        "广撒网": ("治愈避难所", "IYASHI", "刀吃多了，就躲进治愈系回血。"),
+        "高分": ("大魔王信徒", "DAIMAOU", "麻枝准的催泪弹，一颗没漏。"),
+    },
+    "热血": {
+        "囤积": ("燃番屯兵所", "BURN-CAMP", "「你以为我是谁啊」背得滚熟，正片一部没点开。"),
+        "冷门": ("冷门机战遗民", "MECHA-REF", "萝卜番快绝种了，遗民还在机库里守着。"),
+        "专精": ("王道原教旨", "OU-DO", "友情努力胜利，缺一样都不行。"),
+        "高分": ("死亡flag收集者", "SHIBOU-FLAG", "「会赢的」说出口，就已经输了。"),
+    },
+    "悬疑": {
+        "囤积": ("悬案囤积者", "CASE-HOARDER", "「真相只有一个」，可囤的推理番一集都没解。"),
+        "冷门": ("婆罗门侦探", "BRAHMIN-D", "冷门推理照单全收，热榜上的懒得点。"),
+        "专精": ("密室常驻居民", "LOCKED-ROOM", "本格密室是快乐老家。"),
+        "高分": ("爱的战士信徒", "AI-NO-SENSHI", "三话一掉头，早就见怪不怪。"),
+    },
+    "科幻": {
+        "囤积": ("设定囤积者", "LORE-HOARDER", "设定集翻得比正片还勤。"),
+        "冷门": ("硬 SF 遗老", "HARD-SF", "硬科幻的荣光，靠遗老撑着。"),
+        "专精": ("机设考据党", "MECHA-NERD", "钻机设到螺丝孔位，作豚本豚。"),
+        "高分": ("凤凰院凶真", "HOUOUIN", "「这一切都是命运石之门的选择」。"),
+    },
+    "恋爱": {
+        "囤积": ("心动仓库", "KOI", "狗粮囤了一仓库，自己一口没吃上。"),
+        "冷门": ("纯爱地下党", "PURE-LOVE", "纯爱战士，见不得一点 NTR。"),
+        "专精": ("单 CP 原教旨", "SHIP-MONO", "拆 CP 等于拆人。"),
+        "广撒网": ("全员 CP 股民", "SHIP-STOCK", "每个 CP 都买一股，哪个成都不亏。"),
+        "高分": ("白学家", "HAKUGAKU", "「明明是我先来的」记了十年。"),
+        "大热": ("冈妈药房", "OKA-YAKU", "胃药一颗没少吃。"),
+    },
+    "奇幻": {
+        "囤积": ("转生次数超限", "TENSEI", "转生番看得比转生次数还多。"),
+        "冷门": ("冷门异界遗孤", "DARK-FANT", "异世界番里，专挑没人看的那几部。"),
+        "专精": ("魔法体系考据", "MAGIC-NERD", "咒语怎么念、魔力怎么算，都考据得一清二楚。"),
+        "高分": ("背锅侠", "TOKIOMI", "「都是时臣的错」说顺口了。"),
+    },
+    "搞笑": {
+        "囤积": ("沙雕素材仓库", "SHITPOST", "沙雕番存一堆，随时甩表情包。"),
+        "冷门": ("冷梗收藏家", "COLD-JOKE", "别人接不住的冷梗，笑出声的只有自己。"),
+        "广撒网": ("弹幕比正片好看", "DANMAKU", "笑点最后都落在弹幕里。"),
+        "高分": ("梗警察", "MEME-POLICE", "弹幕还没笑，先挑梗的语病。"),
+    },
+    "音乐": {
+        "囤积": ("歌单坟场主", "PLAYLIST", "神曲存了一歌单，一首都没播到头。"),
+        "冷门": ("冷门 OST 猎手", "OST-HUNT", "冷门番的 OST，一张张考古出来。"),
+        "广撒网": ("全曲风 DD", "SONG-DD", "说好单推，结果全曲风 DD。"),
+        "高分": ("神曲猎人", "SONG-HUNT", "神曲才配进循环，别的听一耳朵就切。"),
+    },
+    "杂食": {
+        "广撒网": ("真·杂食", "TRUE-OMNI", "来者不拒，就是没有一个能当本命。"),
+        "囤积": ("什么都想要的人", "ALL-WANT", "收藏夹吃灰的，比看完的多。"),
+    },
+}
+
+
+# 2.5 圈内身份：细分标签 / 维度触发，原生身份词（有出处、有梗）。
+# 在主表之前命中——细分身份比「簇×特征」更精准、更圈内。
+def _has_genre(profile: dict, *names: str) -> bool:
+    """细分标签是否命中主要题材（top_genres top8，canonical 归一后）。"""
+    tops = {canonical_genre(g["name"]) or g["name"] for g in (profile.get("top_genres") or [])}
+    return any(n in tops for n in names)
+
+
+TITLE_FANDOM = [
+    (lambda p: _has_genre(p, "扭曲", "党争", "修罗场"),
+     "战吧吧友", "SENBA", "败犬哭着退场，才是本集精华。"),
+    (lambda p: _has_genre(p, "百合"),
+     "白河豚", "KAWABUTA", "官方发一点糖就膨胀成球。"),
+    (lambda p: _has_genre(p, "耽美", "乙女"),
+     "同人女", "FUJOSHI", "原作不够看，亲自下场写续篇。"),
+    (lambda p: _has_genre(p, "机战", "萝卜", "机甲", "机器人"),
+     "胶佬", "GUNPLA", "萝卜才是本体，驾驶员只是配件。"),
+    (lambda p: _has_genre(p, "乐队"),
+     "乐队男", "BAND-MAN", "现实不碰乐器，乐队番一场不落。"),
+    (lambda p: _has_genre(p, "偶像", "Live"),
+     "箱推人", "HAKO-OSHI", "说好单推，结果整箱搬回家。"),
+    (lambda p: _has_genre(p, "悬疑", "推理"),
+     "拉片爱好者", "FRAME-NERD", "一帧一帧看，弹幕都嫌慢。"),
+    (lambda p: _has_genre(p, "恋爱", "校园"),
+     "现充", "RIAJUU", "「现充爆炸吧」喊得最响的，往往是母单。"),
+    (lambda p: _has_genre(p, "治愈", "日常"),
+     "萌豚", "MOE-BUTA", "萌才是正片，剧情只是附赠。"),
+    (lambda p: p["dimensions"]["tag_focus"] >= 70,
+     "考据党", "KOUSHOU", "别人看热闹，专挑设定漏洞。"),
+    (lambda p: p["dimensions"]["quality"] >= 70,
+     "评分厨", "SCORE-CHU", "名作之壁以下，进不了收藏。"),
+    (lambda p: p["dimensions"]["mainstream"] <= 30,
+     "婆罗门", "BARAMON", "热榜上找不到的东西，这里都有。"),
+    (lambda p: p.get("seen", 0) > 0 and p.get("want", 0) / p["seen"] >= 2,
+     "自宅警备员", "JITAKU-KEI", "收藏夹扩建得比消化快。"),
+    (lambda p: (p.get("entry_year") or 9999) <= 2012 and p.get("total", 0) >= 80,
+     "老贼", "O-GAI", "富坚打麻将，评论区天天数格子。"),
+]
+
+
+# 3. 身份兜底：簇×特征都命中不了时，按主身份给一个。
+TITLE_IDENTITY = {
+    "番剧党": ("当季番剧挂机者", "SEASON-AFK", "每季都挂在追番列表上，一集不落。"),
+    "漫画党": ("原作党", "SRC-PARTY", "动画化之前，原作早被翻烂了。"),
+    "游戏宅": ("全成就猎人", "PLATINUM", "不白金不封盘，游戏必须玩到秃。"),
+    "轻小说党": ("文库本搬运工", "BUNKO", "文库本一车车搬，书架永远不够用。"),
+    "杂食党": ("类型不定型", "NO-TYPE", "动画漫画游戏轻小说，全都要。"),
+}
+
+
+def assign_title(profile: dict, rarity: dict | None = None) -> tuple[str, str, str]:
+    """六层命中返回专属称号 (称号, 代号, 毒舌句)，保证任何画像都有称号、不会空。"""
+    traits = profile.get("persona_tags", [])[2:]
+    # 0. 组合毒舌（跨维度冲突）
+    for cond, title, code, note in TITLE_COMBO:
+        if cond(profile, rarity):
+            return title, code, note
+    # 1. 极端值成就
+    for cond, title, code, note in TITLE_EXTREME:
+        if cond(profile):
+            return title, code, note
+    # 2. 圈内身份（细分标签 / 维度，原生身份词）
+    for cond, title, code, note in TITLE_FANDOM:
+        if cond(profile):
+            return title, code, note
+    # 3. 簇 × 特征主表：按 traits 顺序，取第一个能在该簇命中的特征槽
+    row = TITLE_MAIN.get(profile.get("cluster", ""), {})
+    for t in traits:
+        fk = _feature_key(t)
+        if fk and fk in row:
+            return row[fk]
+    # 4. 身份兜底
+    ident = profile.get("identity", "")
+    if ident in TITLE_IDENTITY:
+        return TITLE_IDENTITY[ident]
+    # 5. 回退：宅宅兜底（最本源的身份，永远有人可当）
+    return "宅宅", "OTAKU", "别人问爱好，憋半天说「看动漫」。"
 
 
 def _representative(works: list[dict]) -> list[dict]:
@@ -495,7 +743,7 @@ def build_profile(
     bilibili_total: int = 0,
     notes: list[str] | None = None,
 ) -> dict:
-    """由统一作品结构计算画像：类型、标签、避雷、时间线、六维分数、人格标签。"""
+    """由统一作品结构计算画像：类型、标签、避雷、时间线、维度分数、人格标签。"""
     site_counts = site_counts or {}
     interest = [w for w in works if w.get("status") in ("seen", "want", "interest")]
     seen = [w for w in interest if w["status"] == "seen"]
@@ -548,9 +796,11 @@ def build_profile(
     studio_counter: Counter = Counter()
     for work in interest:
         for tag in set(work.get("tags") or []):
-            for canonical, aliases in STUDIO_ALIASES.items():
-                if tag in aliases:
-                    studio_counter[canonical] += 1
+            # 一次查表，别再逐厂商遍历别名：STUDIO_ALIASES 三十余家 × 每部作品几十个
+            # 标签，原本是 O(N × T × 31)（2026-10-28 改，口径同 tagging.canonical_studio）。
+            canonical = canonical_studio(tag)
+            if canonical:
+                studio_counter[canonical] += 1
     top_studios = [
         {"name": name, "count": count}
         for name, count in studio_counter.most_common(5)
@@ -563,20 +813,29 @@ def build_profile(
     avg_popularity = _avg(
         [w.get("popularity") for w in interest if w.get("popularity")]
     )
-    avg_score = _avg([w.get("score") for w in interest if w.get("score")])
+    scored_works = [w.get("score") for w in interest if w.get("score")]
+    # 高分率：评分 ≥7 的作品占比。样本不足 8 部时取中性 50，避免误判。
+    high7 = [s for s in scored_works if s >= 7]
+    quality = (
+        _round(len(high7) / len(scored_works) * 100)
+        if len(scored_works) >= 8
+        else 50.0
+    )
+    avg_score = _avg(scored_works)
 
     dimensions = {
         "type_focus": _round(max(type_shares.values()) if type_shares else 0),
         "tag_focus": _tag_focus(genre_counter),
         "mainstream": _mainstream(avg_popularity),
-        "exploration": _round(min(100, len(tag_counter) * 4)),
+        "quality": quality,
+        "exploration": _exploration(genre_counter),
         "hype": _round(min(100, (len(want) / max(1, len(seen))) * 50)),
         "completion": _round(len(seen) / max(1, len(interest)) * 100),
     }
 
     identity = _identity(type_shares)
     cluster = _cluster(genre_counter)
-    traits = _traits(dimensions, len(want), len(seen), avg_score)
+    traits = _traits(dimensions, len(want), len(seen), quality)
 
     return {
         "total": total,
@@ -592,6 +851,7 @@ def build_profile(
         "type_shares": type_shares,
         "top_tags": top_tags,
         "top_genres": top_genres,
+        "genre_counts": dict(genre_counter),
         "avoided_tags": avoided_tags,
         "top_studios": top_studios,
         "entry_year": entry["year"] if entry else None,
@@ -609,7 +869,7 @@ def build_profile(
     }
 
 
-def build_template_report(profile: dict) -> dict:
+def build_template_report(profile: dict, rarity: dict | None = None) -> dict:
     """不依赖 LLM 的兜底报告：同样覆盖样例里的 11 个模块。"""
     top_names = [
         tag["name"] for tag in (profile.get("top_genres") or profile["top_tags"])
@@ -621,8 +881,11 @@ def build_template_report(profile: dict) -> dict:
     entry_work, latest_work = profile["entry_work"], profile["latest_work"]
     total, want, seen = profile["total"], profile["want"], profile["seen"]
 
-    title = f"「{profile['cluster']}系{profile['identity']}」" + (
-        f"兼「{traits[0]}」" if traits else ""
+    hero_title, hero_code, hero_note = assign_title(profile, rarity)
+
+    title = (
+        f"「{profile['cluster']}系{profile['identity']}」"
+        + (" · 兼「" + "」「".join(traits) + "」" if traits else "")
     )
     if entry_year and latest_year:
         entry_story = (
@@ -635,16 +898,19 @@ def build_template_report(profile: dict) -> dict:
         entry_story = "收藏里还没有足够的时间信息，暂时画不出时间线。"
 
     if want > seen * 1.5:
-        advice = "想看远多于看过，先把囤积清单消化一部分，别让收藏夹变成纪念碑。"
+        advice = "想看的比看过的多出一截，先把收藏夹里的存货消化一拨，别让它们只当纪念碑。"
     elif profile["dimensions"]["mainstream"] < 40:
-        advice = "你偏爱冷门作品，继续按自己的标签挖就好，不必强迫自己补所谓神作。"
+        advice = "你偏爱冷门，顺着自己的标签慢慢挖就好，不用勉强去补榜单上的所谓神作。"
     elif profile["dimensions"]["tag_focus"] >= 60:
-        advice = "口味很集中，按你的高频标签找同类型新作，命中率会很高。"
+        advice = "口味很集中，照着高频标签找同类型新作，命中率会很高。"
     else:
-        advice = "口味比较均衡，可以偶尔跳出舒适区，但不必勉强。"
+        advice = "口味比较均衡，偶尔跳一下舒适区也挺好，但不必勉强。"
 
     return {
         "title": title,
+        "hero_title": hero_title,
+        "hero_code": hero_code,
+        "hero_note": hero_note,
         "subtitle": f"基于 {total} 部作品的御宅成分",
         "entry_story": entry_story,
         "core_taste": (
@@ -655,6 +921,7 @@ def build_template_report(profile: dict) -> dict:
         "favorite_genres": top_names[:8],
         "avoided_genres": avoided_names[:6],
         "persona_tags": profile["persona_tags"],
+        "trait_blurbs": {t: TRAIT_BLURBS.get(t, "") for t in profile["persona_tags"]},
         "advice": advice,
         "final_quip": (
             f"看了 {total} 部，你的审美没有滑坡，只是越来越像你自己。"
@@ -666,6 +933,62 @@ def build_template_report(profile: dict) -> dict:
             f"想看 {want} / 抛弃 {profile['drop']}。Bangumi 不提供首次收藏时间，"
             "入坑年份用作品发行年近似；避雷标签来自抛弃 / 低分作品。"
         ),
+    }
+
+
+# 稀有度分级：按「这个成分桶在全部已测用户里的占比」划档（share 是百分数）。
+# 阈值先拍一版——样本过千后可以按真实分布重标；先把「结果有个等级」立起来。
+RARITY_TIERS = (
+    (2.0, "SSR", "万里挑一"),
+    (8.0, "SR", "小众口味"),
+    (25.0, "R", "有点特别"),
+    (100.0, "N", "大众脸"),
+)
+
+
+def label_key_of(profile: dict) -> str:
+    """成分桶的键：主身份 · 题材簇（persona_tags 的前两项）。
+
+    不拿全部标签做键：人格标签几乎每人一份，占比永远贴着 0.1%，没有区分度。
+    """
+    tags = [
+        str(tag).strip()
+        for tag in (profile.get("persona_tags") or [])
+        if str(tag).strip()
+    ]
+    if not tags:
+        return ""
+    return "·".join(tags[:2])[:60]
+
+
+def rarity_of(share: float) -> dict:
+    """占比 -> 分级。"""
+    for limit, tier, note in RARITY_TIERS:
+        if share <= limit:
+            return {"tier": tier, "note": note}
+    return {"tier": "N", "note": "大众脸"}
+
+
+def attach_rarity(db, profile: dict) -> dict:
+    """给画像挂上稀有度并记一次计数。
+
+    统计只是锦上添花：写库一旦失败就返回空 dict，绝不能让结果页因为一个
+    展示位 500。
+    """
+    key = label_key_of(profile)
+    if not key:
+        return {}
+    try:
+        count, total = crud.record_persona_label(db, key)
+    except Exception:  # noqa: BLE001 - 计数失败必须降级，不影响出报告
+        return {}
+    share = round(count / total * 100, 1) if total else 0.0
+    return {
+        "key": key,
+        "count": count,
+        "total": total,
+        "share": share,
+        **rarity_of(share),
     }
 
 
@@ -856,7 +1179,7 @@ def build_llm_prompt(
             "最近年份": profile["latest_year"],
             "最近作品": profile["latest_work"],
         },
-        "六维分数": profile["dimensions"],
+        "维度分数": profile["dimensions"],
         "人格标签": profile["persona_tags"],
         "代表作": profile["representative"],
         "站内收藏数": profile["site_counts"].get("favorites", 0),
@@ -871,7 +1194,9 @@ def build_llm_prompt(
         "你是一个懂 ACGN 的「御宅成分分析师」。请根据下面的事实清单，用中文写一份人格报告。\n\n"
         f"语气要求：{tone_text}\n\n"
         "必须包含这些部分，用「## 部分名」分段：\n"
-        "1. 称号（两个词组组合，例如「美少女动物园园长」兼「扭曲情感研究学者」）\n"
+        "1. 称号（请直接沿用事实清单里的「人格标签」成分词——神作党 / 口碑党 / 主流厨 / "
+        "冷门挖掘机 / 偏食 / 博爱 / 仓鼠——再叠加一个你写的俏皮称号；"
+        "例如「热血系番剧党」兼「神作党」兼「冷门挖掘机」）\n"
         "2. 入坑时间线 / 收藏跨度（按作品发行年近似，不要编造首次收藏时间）\n"
         "3. 核心 XP\n"
         "4. 类型 / 公司依赖\n"
@@ -1088,7 +1413,7 @@ def call_llm(
 
 
 def build_radar(dimensions: dict) -> dict:
-    """六维雷达图坐标（纯 SVG 用，不依赖图表库）。"""
+    """维度雷达图坐标（纯 SVG 用，不依赖图表库）。"""
     cx, cy, radius = 150, 118, 80
     count = len(DIMENSION_LABELS)
 
@@ -1134,3 +1459,131 @@ def build_radar(dimensions: dict) -> dict:
         "width": 300,
         "height": 240,
     }
+
+
+# ---------- 分享卡（竖版 SVG，直接下载，不引入图片库） ----------
+#
+# 结果页是「死胡同」：算完只能自己看，没有任何可以晒出去的东西。这里把画像压成
+# 一张竖版卡，纯字符串拼 SVG——卡片内容只有文字与多边形，不需要 Pillow / cairosvg
+# 这类图片依赖，浏览器与社交平台都能直接显示（2026-10-28）。
+#
+# 参数走 base64url 而不是存库：整份 payload 塞不进 URL，分享卡也不需要作品明细，
+# 只带「人格标签 + 维度值 + 稀有度」三项，URL 一百多字节。
+
+
+def encode_card(profile: dict, rarity: dict | None = None) -> str:
+    """把画像压成分享卡参数（base64url 编码）。"""
+    dims = profile.get("dimensions") or {}
+    data: dict = {
+        "t": [str(tag) for tag in (profile.get("persona_tags") or [])][:4],
+        "d": [
+            round(float(dims.get(key) or 0), 1) for key, _label in DIMENSION_LABELS
+        ],
+    }
+    if rarity and rarity.get("tier"):
+        data["r"] = [
+            str(rarity.get("tier")),
+            round(float(rarity.get("share") or 0), 1),
+            int(rarity.get("total") or 0),
+        ]
+    raw = json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def decode_card(token: str) -> dict | None:
+    """还原分享卡参数；畸形输入一律返回 None——这个 URL 是对公网开放的。"""
+    text = (token or "").strip()
+    if not text or len(text) > 2000:
+        return None
+    padded = text + "=" * (-len(text) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(padded.encode("ascii"))
+        data = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, UnicodeEncodeError, binascii.Error):
+        return None
+    if not isinstance(data, dict):
+        return None
+    tags, raw_dims = data.get("t"), data.get("d")
+    if not isinstance(tags, list) or not isinstance(raw_dims, list):
+        return None
+
+    clean_dims: list[float] = []
+    for value in raw_dims[: len(DIMENSION_LABELS)]:
+        try:
+            clean_dims.append(max(0.0, min(100.0, float(value))))
+        except (TypeError, ValueError):
+            clean_dims.append(0.0)
+    while len(clean_dims) < len(DIMENSION_LABELS):
+        clean_dims.append(0.0)
+
+    rarity = data.get("r")
+    return {
+        "tags": [str(tag)[:20] for tag in tags][:4],
+        "dims": clean_dims,
+        # 只接受合法形状，避免把任意 JSON 直接拼进 SVG
+        "rarity": rarity if isinstance(rarity, list) and len(rarity) == 3 else None,
+    }
+
+
+def build_share_card(data: dict) -> str:
+    """生成 600×800 竖版分享卡 SVG。"""
+    tags = data.get("tags") or []
+    dims = data.get("dims") or []
+    radar = build_radar(
+        {
+            key: (dims[index] if index < len(dims) else 0)
+            for index, (key, _label) in enumerate(DIMENSION_LABELS)
+        }
+    )
+    title = html.escape(tags[0]) if tags else "御宅成分"
+    subtitle = html.escape(" · ".join(tags[1:])) if len(tags) > 1 else "御宅成分检测"
+
+    grid = "".join(
+        f'<polygon points="{ring}" fill="none" stroke="#dbe4ee" stroke-width="1"/>'
+        for ring in radar["grid"]
+    )
+    axes = "".join(
+        f'<line x1="{axis["x1"]}" y1="{axis["y1"]}" '
+        f'x2="{axis["x2"]}" y2="{axis["y2"]}" stroke="#dbe4ee" stroke-width="1"/>'
+        for axis in radar["axes"]
+    )
+    labels = "".join(
+        f'<text x="{label["x"]}" y="{label["y"]}" text-anchor="{label["anchor"]}" '
+        f'dominant-baseline="middle" font-size="12" fill="#5b6b7a">{html.escape(label["text"])}</text>'
+        for label in radar["labels"]
+    )
+
+    rarity_text = ""
+    if data.get("rarity"):
+        tier, share, total = data["rarity"]
+        rarity_text = (
+            f'<text x="600" y="196" text-anchor="end" font-size="20" fill="#2b9ae0" '
+            f'font-weight="bold">{html.escape(str(tier))}</text>'
+            f'<text x="600" y="220" text-anchor="end" font-size="13" fill="#7b8896">'
+            f'同样成分占已测 {int(total or 0)} 人的 {float(share or 0)}%</text>'
+        )
+
+    scores = "".join(
+        f'<text x="{70 + (index % 3) * 170}" y="{626 + (index // 3) * 46}" '
+        f'font-size="14" fill="#3f4d5a">{html.escape(label)}</text>'
+        f'<text x="{70 + (index % 3) * 170 + 84}" y="{626 + (index // 3) * 46}" '
+        f'font-size="14" fill="#2b9ae0" font-weight="bold">'
+        f'{(dims[index] if index < len(dims) else 0):.0f}</text>'
+        for index, (_key, label) in enumerate(DIMENSION_LABELS)
+    )
+
+    return (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 800" width="600" height="800">'
+        '<rect width="600" height="800" fill="#ffffff"/>'
+        f'<text x="40" y="52" font-size="14" fill="#7b8896">御宅成分检测</text>'
+        f'<text x="40" y="112" font-size="42" font-weight="bold" fill="#1f2d3a">{title}</text>'
+        f'<text x="40" y="150" font-size="17" fill="#5b6b7a">{subtitle}</text>'
+        f"{rarity_text}"
+        f'<g transform="translate(70,250) scale(1.55)">{grid}{axes}'
+        f'<polygon points="{radar["polygon"]}" fill="rgba(43,154,224,0.28)" '
+        f'stroke="#2b9ae0" stroke-width="2"/>{labels}</g>'
+        f'<line x1="40" y1="586" x2="560" y2="586" stroke="#e8eef5" stroke-width="1"/>'
+        f"{scores}"
+        '<text x="40" y="762" font-size="12" fill="#9aa7b4">由站内收藏与标注算出 · 规则引擎，可追到具体作品</text>'
+        "</svg>"
+    )

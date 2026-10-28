@@ -1,0 +1,104 @@
+{% extends "base_content.html" %}
+{% block title %}选几部，测出你的御宅成分{% endblock %}
+{% block content %}
+<div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-3">
+    <div>
+        <h1 class="h3 mb-1 section-heading">选几部，测出你的御宅成分</h1>
+        <p class="text-muted small mb-0">不用 Bangumi 账号、不用授权。把下面这些作品里你看过或想看的标出来，就能算出维度口味与二次元人格。</p>
+    </div>
+    <a class="btn btn-outline-secondary btn-sm" href="/persona">我有账号，用收藏数据算</a>
+</div>
+
+{% if error %}
+<div class="alert alert-danger py-2">{{ error }}</div>
+{% endif %}
+
+<div class="card app-card mb-3">
+    <div class="card-body py-2">
+        <div class="d-flex flex-wrap gap-2 align-items-center">
+            <span class="small text-muted">题量</span>
+            {% for n in sizes %}
+            <a class="btn btn-sm {% if n == size %}btn-primary{% else %}btn-outline-secondary{% endif %}"
+               href="/persona/quiz?size={{ n }}">{{ n }} 题</a>
+            {% endfor %}
+            <a class="btn btn-sm btn-outline-secondary ms-auto" href="/persona/quiz?size={{ size }}&seed={{ next_seed }}">换一批</a>
+        </div>
+        <p class="small text-muted mt-2 mb-0">
+            已选 <span class="fw-semibold" id="quiz-count">0</span> 部，至少 {{ min_positive }} 部就能出结果。
+            选得越多越准——{{ sizes[0] }} 题是快速版，{{ sizes[-1] }} 题会把四类口味都问到。
+            「没看过」直接跳过就行，不会被当成不喜欢。
+        </p>
+    </div>
+</div>
+
+<form id="quiz-form" method="post" action="/persona/quiz">
+    <input type="hidden" name="size" value="{{ size }}">
+    <input type="hidden" name="seed" value="{{ seed }}">
+    <div class="row g-2 g-md-3">
+        {% for w in works %}
+        <div class="col-6 col-sm-4 col-md-3 col-lg-2">
+            <div class="card app-card h-100">
+                <img class="card-img-top" style="height:170px;object-fit:cover;background:#eef2f7"
+                     src="{{ thumb_src(w.image_url) }}" alt="{{ w.title }}封面"
+                     loading="lazy" decoding="async" referrerpolicy="no-referrer"
+                     onerror="this.style.display='none'">
+                <div class="card-body p-2">
+                    <div class="small fw-semibold text-truncate" title="{{ w.title }}">{{ w.title }}</div>
+                    <div class="small text-muted">{% if w.year %}{{ w.year }} · {% endif %}{{ type_labels.get(w.type, w.type) }}</div>
+                    <div class="btn-group btn-group-sm w-100 mt-1" role="group" aria-label="{{ w.title }} 操作">
+                        <input type="checkbox" class="btn-check" id="seen{{ w.id }}" name="seen" value="{{ w.id }}" autocomplete="off">
+                        <label class="btn btn-outline-success" for="seen{{ w.id }}">看过</label>
+                        <input type="checkbox" class="btn-check" id="want{{ w.id }}" name="want" value="{{ w.id }}" autocomplete="off">
+                        <label class="btn btn-outline-primary" for="want{{ w.id }}">想看</label>
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+
+    <div class="card app-card mt-3">
+        <div class="card-body d-flex flex-wrap align-items-center justify-content-between gap-2">
+            <div>
+                <div class="small fw-semibold">选好了就出结果</div>
+                <div class="small text-muted">全程不联网、不建账号；结果页可以再复制提示词让 LLM 帮你写文案。</div>
+            </div>
+            <button class="btn btn-primary" id="quiz-submit" type="submit" disabled>算出我的成分</button>
+        </div>
+    </div>
+</form>
+
+<script>
+(function () {
+    var form = document.getElementById('quiz-form');
+    if (!form) return;
+    var counter = document.getElementById('quiz-count');
+    var submit = document.getElementById('quiz-submit');
+    var minPositive = {{ min_positive }};
+
+    function refresh() {
+        var n = form.querySelectorAll('input[type=checkbox]:checked').length;
+        if (counter) counter.textContent = n;
+        if (submit) submit.disabled = n < minPositive;
+    }
+
+    // 互斥：「看过」与「想看」只能留一个，再点一次同一个按钮即取消
+    form.addEventListener('change', function (e) {
+        var el = e.target;
+        if (!el || el.type !== 'checkbox') return;
+        if (el.checked) {
+            var other = el.name === 'seen' ? 'want' : 'seen';
+            var rival = form.querySelector('input[name=' + other + '][value="' + el.value + '"]');
+            if (rival) rival.checked = false;
+        }
+        refresh();
+    });
+
+    form.addEventListener('submit', function () {
+        if (submit) { submit.disabled = true; submit.textContent = '正在算…'; }
+    });
+
+    refresh();
+})();
+</script>
+{% endblock %}

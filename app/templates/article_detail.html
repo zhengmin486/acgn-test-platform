@@ -2,110 +2,233 @@
 
 {% block title %}{{ article.title }}{% endblock %}
 
+{# 正文行内片段渲染：runs 来自 app/article_body 的解析结果（纯文本 + 样式标记），
+   文本一律交给 Jinja 转义输出——页面不存在拼接原始 HTML 的路径。 #}
+{% macro inline(runs) -%}
+{%- for run in runs -%}
+{%- if run.br -%}<br>
+{%- elif run.href -%}<a class="article-link" href="{{ run.href }}"{% if run.href.startswith('http') %} target="_blank" rel="noopener noreferrer"{% endif %}>{{ run.text }}</a>
+{%- elif run.strong -%}<strong>{{ run.text }}</strong>
+{%- elif run.em -%}<em>{{ run.text }}</em>
+{%- else -%}{{ run.text }}
+{%- endif -%}
+{%- endfor -%}
+{%- endmacro %}
+
 {% block content %}
-<p class="small mb-3"><a href="/articles">&larr; 返回资讯频道</a></p>
+{# 资讯详情：编辑型阅读版式。
+   页面容器 max-width 1200（.article-page），正文阅读列 max-width 760（.article-read）——
+   两者都是「上限」而非固定宽度，宽屏不拉长行长、窄屏自然占满可用宽度。
+   桌面 / 平板 / 手机共用这一份结构与样式，没有第二套模板。 #}
+<div class="article-page">
 
-<div class="card detail-hero">
-    <div class="card-body p-4">
-        {# 层级：分类徽标（眉题）→ 标题 → 来源/时间元信息行 → 导语 #}
-        <div class="article-kicker mb-2">
-            <span class="badge detail-type-badge-sm">{{ article.category }}</span>
-        </div>
-        <h1 class="article-title mb-2">{{ article.title }}</h1>
-        <div class="article-meta d-flex flex-wrap align-items-center gap-3 small">
-            <span>来源：{{ article.source }}</span>
-            <span>发布时间：{{ news_time(article.published_at) }}</span>
-        </div>
-        {% if lead %}
-        <p class="article-lead mt-3 mb-0">{{ lead }}</p>
-        {% endif %}
-        {# 识别标签（自动识别写入）：点击跳全部作品页按该标签筛选 #}
-        {% if article_tags %}
-        <div class="mt-3 d-flex flex-wrap align-items-center gap-2">
-            <span class="text-muted small">识别标签：</span>
-            {% for name in article_tags %}
-            <a class="tag-chip" href="/contents?tag={{ name|urlencode }}">{{ name }}</a>
-            {% endfor %}
-        </div>
-        {% endif %}
-        {# 作品信息（作者/公司/系列/译名，自动识别写入）：实体/系列进花名册页，译名进作品页 #}
-        {% if article_entity_chips %}
-        <div class="mt-3 d-flex flex-wrap align-items-center gap-2">
-            <span class="text-muted small">作品信息：</span>
-            {% for chip in article_entity_chips %}
-            <a class="tag-chip" href="{{ chip.url }}">{{ chip.name }}<span class="work-info-kind">{{ chip.label }}</span></a>
-            {% endfor %}
-        </div>
-        {% endif %}
-    </div>
-</div>
+    {# 收藏操作回显（POST + 303 PRG 后由查询参数带回结果） #}
+    {% if request.query_params.get('fav') == 'added' %}
+    <div class="alert alert-success py-2 mb-3">已加入收藏，可在<a href="/me?tab=articles">个人空间</a>查看。</div>
+    {% elif request.query_params.get('fav') == 'removed' %}
+    <div class="alert alert-info py-2 mb-3">已取消收藏。</div>
+    {% endif %}
 
-<div class="card detail-section mt-3">
-    <div class="card-body p-4">
-        {% if article.image_url %}
-        <figure class="article-hero">
-            <img src="{{ article.image_url }}" alt="{{ article.title }}" width="640" height="360" loading="lazy" decoding="async">
-        </figure>
-        {% endif %}
-        {# 正文按块渲染：文本段 / [图]（本地化后的站内路径或源站外链）/ [媒体] 链接 #}
+    <a class="article-back" href="/articles">&larr; 返回资讯频道</a>
+
+    <article class="article-read">
+
+        {# ---- 文章头部：分类眉题 → 标题 → 来源/时间 → 导语 → 识别标签/作品信息 ---- #}
+        <header class="article-header">
+            {% if article.category %}
+            {# 眉题：分类徽标，颜色只做辅助识别（动画/漫画/游戏/轻小说 + 综合中性色） #}
+            <div class="article-kicker">
+                <span class="article-cat {{ category_class }}">{{ article.category }}</span>
+            </div>
+            {% endif %}
+
+            <h1 class="article-title">{{ article.title }}</h1>
+
+            <div class="article-byline">
+                {% if article.source %}<span>来源：{{ article.source }}</span>{% endif %}
+                {% if article.published_at %}<span>发布时间：{{ news_time(article.published_at) }}</span>{% endif %}
+            </div>
+
+            {# 收藏：与作品详情页同一套按钮与无刷新逻辑（data-ajax-fav 由 base.html 统一接管，
+               靠响应 URL 里的 fav=added/removed 就地换文案，不刷新页面）。
+               游客不常驻登录提示条，点了按钮才弹登录窗（data-login-gate）。 #}
+            <div class="article-actions">
+                {% if current_user %}
+                <form method="post" action="/articles/{{ article.id }}/favorite" class="m-0"
+                      data-ajax-fav data-label-add="收藏资讯" data-label-remove="取消收藏"
+                      data-toast-add="已加入收藏" data-toast-remove="已取消收藏">
+                    <input type="hidden" name="next" value="/articles/{{ article.id }}">
+                    <button class="btn btn-sm {{ 'btn-outline-secondary' if is_article_favorited else 'btn-primary' }}"
+                            data-fav-btn type="submit">
+                        <svg class="svg-ic{{ ' d-none' if is_article_favorited }}" data-fav-heart viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20.5s-7.6-4.8-9.3-9.1A5.2 5.2 0 0 1 12 6.5a5.2 5.2 0 0 1 9.3 4.9c-1.7 4.3-9.3 9.1-9.3 9.1z"/></svg><span data-fav-label>{{ '取消收藏' if is_article_favorited else '收藏资讯' }}</span>
+                    </button>
+                </form>
+                <a class="small" href="/me?tab=articles">我的资讯收藏 &rarr;</a>
+                {% else %}
+                <button class="btn btn-sm btn-primary" type="button" data-login-gate="收藏">收藏资讯</button>
+                {% endif %}
+            </div>
+
+            {% if lead %}
+            <p class="article-lead">{{ lead }}</p>
+            {% endif %}
+        </header>
+
+        {# ---- 正文：按原始顺序渲染文本段 / 标题 / 列表 / 引用 / 表格 / 图片 / 媒体 ---- #}
         <div class="article-body">
+            {% if hero_image %}
+            <figure class="article-hero">
+                <img src="{{ hero_image }}" alt="{{ article.title }}" decoding="async">
+            </figure>
+            {% endif %}
+
             {% for block in body_blocks %}
             {% if block.kind == 'image' %}
             <figure class="article-figure">
-                <img src="{{ block.url }}" alt="" loading="lazy" decoding="async">
+                <img src="{{ block.url }}" alt="{{ block.caption or '' }}" loading="lazy" decoding="async">
+                {% if block.caption %}<figcaption class="article-caption">{{ block.caption }}</figcaption>{% endif %}
             </figure>
+            {% elif block.kind == 'heading' %}
+            {% if block.level == 2 %}
+            <h2 class="article-h2">{{ inline(block.runs) }}</h2>
+            {% else %}
+            <h3 class="article-h3">{{ inline(block.runs) }}</h3>
+            {% endif %}
+            {% elif block.kind == 'list' %}
+            {# 列表项用下标取：block.items 会被 Jinja 解析成 dict.items 方法 #}
+            {% if block.ordered %}
+            <ol class="article-list">{% for item in block['items'] %}<li>{{ inline(item) }}</li>{% endfor %}</ol>
+            {% else %}
+            <ul class="article-list">{% for item in block['items'] %}<li>{{ inline(item) }}</li>{% endfor %}</ul>
+            {% endif %}
+            {% elif block.kind == 'quote' %}
+            <blockquote class="article-quote">
+                {% for para in block.paras %}<p>{{ inline(para) }}</p>{% endfor %}
+            </blockquote>
+            {% elif block.kind == 'table' %}
+            {# 宽表格在自身容器内横向滚动，不撑破正文列 #}
+            <div class="article-table-wrap">
+                <table class="article-table">
+                    <tbody>
+                        {% for row in block.rows %}
+                        <tr>
+                            {% for cell in row %}
+                            {% if cell.head %}<th>{{ inline(cell.runs) }}</th>{% else %}<td>{{ inline(cell.runs) }}</td>{% endif %}
+                            {% endfor %}
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% elif block.kind == 'rule' %}
+            <hr class="article-rule">
             {% elif block.kind == 'media' %}
             <p class="article-media-line">[媒体] <a href="{{ block.url }}" target="_blank" rel="noopener noreferrer">{{ block.url }}</a></p>
+            {% elif block.kind == 'para' %}
+            <p>{{ inline(block.runs) }}</p>
             {% else %}
             <p>{{ block.text }}</p>
             {% endif %}
             {% endfor %}
         </div>
 
-        {# 原文链接：只留中性入口，不展示来源名称（original_url 多为发行商官网）；
-           底部收尾位放大成清晰出口（正文阅读完的自然下一步） #}
-        {% if article.original_url %}
-        <div class="article-source-link mt-4">
-            <a href="{{ article.original_url }}" target="_blank" rel="noopener noreferrer">
-                阅读原文 &nearr;<span class="article-source-note">在来源网站查看完整报道</span>
-            </a>
-        </div>
-        {% endif %}
-    </div>
-</div>
-
-<div class="card detail-section mt-3">
-    <div class="card-header bg-white fw-semibold d-flex justify-content-between align-items-center">
-        <span>关联作品</span>
-        <a class="small fw-normal" href="/contents">全部作品 &rarr;</a>
-    </div>
-    <div class="card-body">
-        {% if linked_contents %}
-        <div class="row g-3">
-            {% for work in linked_contents %}
-            <div class="col-12 col-md-6">
-                <a class="detail-related-item" href="/contents/{{ work.id }}">
-                    <div class="d-flex justify-content-between align-items-center gap-2">
-                        <span class="fw-semibold text-truncate">{{ work.title }}</span>
+        {# ---- 标签区：识别标签 / 作品信息，移出文首、置于正文之后。
+               用 <details> 实现：手机可折叠（点 summary 展开/收起），桌面常驻展开（summary 隐藏） ---- #}
+        {% if article_tags or article_entity_chips %}
+        <details class="article-taxonomy" open>
+            <summary class="article-tax-summary">
+                <span class="article-tax-summary-text">标签 · 作品信息</span>
+                <svg class="article-tax-toggle" viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M6 9l6 6 6-6" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </summary>
+            <div class="article-tax-body">
+                {% if article_tags %}
+                {# 识别标签（自动识别写入）：点击跳全部作品页按该标签筛选 #}
+                <div class="article-tax-row">
+                    <span class="article-tax-label">识别标签</span>
+                    <div class="article-tax-items">
+                        {% for name in article_tags %}
+                        <a class="tag-chip" href="/contents?tag={{ name|urlencode }}">{{ name }}</a>
+                        {% endfor %}
                     </div>
-                    <div class="small text-muted mt-1">{% if work.rating > 0 %}评分 {{ '%.1f' % work.rating }}{% else %}暂无评分{% endif %}</div>
-                    <p class="small text-secondary mb-0 mt-1">
-                        {{ work.summary[:40] }}{% if work.summary|length > 40 %}…{% endif %}
-                    </p>
-                </a>
+                </div>
+                {% endif %}
+                {% if article_entity_chips %}
+                {# 作品信息（作者/公司/系列/译名，自动识别写入）：实体进花名册页，译名进作品页 #}
+                <div class="article-tax-row">
+                    <span class="article-tax-label">作品信息</span>
+                    <div class="article-tax-items">
+                        {% for chip in article_entity_chips %}
+                        <a class="tag-chip" href="{{ chip.url }}">{{ chip.name }}<span class="work-info-kind">{{ chip.label }}</span></a>
+                        {% endfor %}
+                    </div>
+                </div>
+                {% endif %}
             </div>
+        </details>
+        {% endif %}
+
+        {# 桌面端（≥768px）标签区常驻展开；手机端（<768px）默认折叠、可点 summary 展开。
+            <details> 在缺 open 属性时由浏览器引擎隐藏内容，纯 CSS 覆盖 display 盖不住，
+            故桌面必须用 open 属性显形；这段脚本只在手机端把 open 摘掉恢复默认折叠。
+            JS 失效时优雅降级为「全部可见」（而非当前已知的「PC 全隐藏」）。 #}
+        <script>
+          (function () {
+            var d = document.querySelector('.article-taxonomy');
+            if (!d) return;
+            var mq = window.matchMedia('(min-width: 768px)');
+            function sync() { d.open = mq.matches; }
+            sync();
+            if (mq.addEventListener) mq.addEventListener('change', sync);
+            else if (mq.addListener) mq.addListener(sync);
+          })();
+        </script>
+        {% if article.original_url or article.source %}
+        <footer class="article-source">
+            {% if article.original_url %}
+            <a class="article-source-link" href="{{ article.original_url }}" target="_blank" rel="noopener noreferrer">阅读原文 &nearr;</a>
+            {% endif %}
+            {% if article.source %}<span class="article-source-origin">来源：{{ article.source }}</span>{% endif %}
+        </footer>
+        {% endif %}
+
+    </article>
+
+    {# ---- 关联作品：只在正文确实识别到作品时出现；无数据时整块不渲染（不留占位） ---- #}
+    {% if linked_contents %}
+    <section class="article-related">
+        <div class="article-section-head">
+            <h2 class="article-section-title">关联作品</h2>
+            <a class="article-section-more" href="/contents">全部作品 &rarr;</a>
+        </div>
+
+        <div class="article-related-grid">
+            {% for work in linked_contents %}
+            <a class="detail-related-item" href="/contents/{{ work.id }}">
+                <span class="detail-related-thumb">
+                    {% if work.image_url %}
+                    <img src="{{ thumb_src(work.image_url) }}" alt="" loading="lazy" decoding="async">
+                    {% else %}
+                    <span class="detail-related-ph" aria-hidden="true">{{ work.title[:1] }}</span>
+                    {% endif %}
+                </span>
+                <span class="detail-related-body">
+                    <span class="detail-related-title">{{ work.title }}</span>
+                    <span class="detail-related-meta">
+                        {{ type_labels.get(work.type, '作品') }}{% set _rd = rating_display(work.rating, work.rating_count) %}{% if _rd == '--' %} · 评分 --{% elif _rd %} · 评分 {{ _rd }}{% endif %}
+                    </span>
+                    {% if work.summary %}
+                    <span class="detail-related-summary">{{ work.summary[:48] }}{% if work.summary|length > 48 %}…{% endif %}</span>
+                    {% endif %}
+                </span>
+            </a>
             {% endfor %}
         </div>
-        {% else %}
-        <div class="detail-empty">
-            暂未关联到作品。<br>
-            <span class="small">识别依据是资讯文本中真实出现的作品标题、译名与作者/公司/系列等作品信息；作品库扩充后可重跑识别（见 README「资讯自动识别」）。</span>
-        </div>
-        {% endif %}
-    </div>
-</div>
+    </section>
+    {% endif %}
 
-<div class="mt-4">
-    <a class="btn btn-outline-secondary btn-sm" href="/articles">返回资讯频道</a>
+    <div class="article-foot">
+        <a class="btn btn-outline-secondary btn-sm" href="/articles">返回资讯频道</a>
+    </div>
+
 </div>
 {% endblock %}

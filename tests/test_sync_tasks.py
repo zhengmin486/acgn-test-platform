@@ -38,6 +38,7 @@ from auth_helpers import create_accounts, login_as_admin, login_as_user
 from scripts import import_articles
 from scripts.import_bangumi import BangumiAPIError
 from scripts.import_bangumi import run_import as real_run_import
+from scripts.sync_yuc_schedule import SyncSummary
 from scripts.sync_yuc_schedule import run_sync as real_run_sync
 from test_yuc_schedule import ATOM_URL, ATOM_XML, SEASON_HTML, SEASON_URL, make_stub_fetch
 
@@ -854,3 +855,98 @@ def test_unknown_task_key_is_rejected(sync_env):
     """未知数据源：抛 ScopeError（页面会回显原因，不会 500）。"""
     with pytest.raises(sync_tasks.ScopeError):
         sync_tasks.run_task("unknown_source", "x", apply=False)
+
+
+# ---------- 特殊档期分类：同步后自动关联作品库 ----------
+
+
+def _fake_special_run_sync(**overrides):
+    """构造 special 分类的假 run_sync：不走网络，返回可用的 SyncSummary。"""
+
+    def fake(season_code, *, session_factory, apply=False, **kwargs):
+        summary = SyncSummary(
+            mode="apply" if apply else "dry-run",
+            season_code=season_code,
+            season_title="未上线新番",
+            season_url=kwargs.get("season_url", ""),
+            added=2,
+            updated=1,
+            unchanged=0,
+        )
+        summary.preview = 3
+        return summary
+
+    return fake
+
+
+def _patch_special_pipeline(monkeypatch, link_impl):
+    """打桩特殊分类同步链路：Atom 定位 + run_sync + 作品关联三个注入点。"""
+    monkeypatch.setattr(
+        sync_tasks,
+        "_resolve_special_category",
+        lambda code: ("http://yuc.wiki/new/", "未上线新番"),
+    )
+    monkeypatch.setattr(sync_tasks, "run_sync", _fake_special_run_sync())
+    monkeypatch.setattr(sync_tasks, "link_schedules_to_contents", link_impl)
+
+
+def test_special_category_apply_links_works(sync_env, monkeypatch):
+    """特殊分类正式同步后自动关联作品库：link 带上分类码，结论写进运行记录。"""
+    calls: list[dict] = []
+
+    def fake_link(**kwargs):
+        calls.append(kwargs)
+        return SimpleNamespace(
+            linked=3, already=1, unmatched=5, failed=0, total=9, skipped=0, aborted=""
+        )
+
+    _patch_special_pipeline(monkeypatch, fake_link)
+
+    resp = sync_env.admin.post(
+        "/manage/sync/apply",
+        data={"task": "yuc_schedule", "scope": "unreleased"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert len(calls) == 1
+    assert calls[0]["season_code"] == "unreleased"
+    assert calls[0]["apply"] is True
+    # 手动触发（页面点击）不启用联网兜底；定时任务才逐条联网解析
+    assert calls[0]["use_network"] is False
+    run = _runs(sync_env)[-1]
+    assert run.task_key == sync_tasks.TASK_YUC
+    assert "关联作品 3 部" in (run.message or "")
+
+
+def test_special_category_preview_skips_link(sync_env, monkeypatch):
+    """预览模式只同步不关联：不写作品库，也不跑 link。"""
+    calls: list[dict] = []
+
+    def fake_link(**kwargs):
+        calls.append(kwargs)
+        raise AssertionError("预览模式不应调用作品关联")
+
+    _patch_special_pipeline(monkeypatch, fake_link)
+    resp = sync_env.admin.post(
+        "/manage/sync/preview", data={"task": "yuc_schedule", "scope": "unreleased"}
+    )
+    assert resp.status_code == 200
+    assert calls == []
+
+
+def test_special_link_failure_does_not_break_sync(sync_env, monkeypatch):
+    """关联失败（网络炸了等）不牵连分类同步本身：结果仍 ok，原因写进记录。"""
+
+    def boom(**kwargs):
+        raise RuntimeError("镜像站超时")
+
+    _patch_special_pipeline(monkeypatch, boom)
+    resp = sync_env.admin.post(
+        "/manage/sync/apply",
+        data={"task": "yuc_schedule", "scope": "unreleased"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    run = _runs(sync_env)[-1]
+    assert run.status == "ok"
+    assert "作品关联未执行" in (run.message or "")

@@ -23,6 +23,10 @@
            href="/manage/schedules">新番档期</a>
     </li>
     <li class="nav-item">
+        <a class="nav-link{% if admin_path.startswith('/manage/posters') %} active{% endif %}"
+           href="/manage/posters">首页海报</a>
+    </li>
+    <li class="nav-item">
         <a class="nav-link{% if admin_path == '/manage/sync' %} active{% endif %}"
            href="/manage/sync">数据同步</a>
     </li>

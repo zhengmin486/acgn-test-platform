@@ -338,7 +338,7 @@ def test_index_recommends_one_per_series(tmp_path):
 
 
 def test_index_recommend_module_initial_fill_and_expand(tmp_path):
-    """推荐模块适配网格：取满上限 100，初始 60 铺满各行，其余收起可展开。"""
+    """推荐模块适配网格：取满上限 100，手机初始铺前 10 部，其余 90 部收起可展开。"""
     client, factory = _client_with_works(
         tmp_path,
         [(f"日常贴贴番{i:03d}", 9.0 - i * 0.01, ["日常", "百合"]) for i in range(100)],
@@ -349,23 +349,25 @@ def test_index_recommend_module_initial_fill_and_expand(tmp_path):
         titles = re.findall(r'work-card-title">([^<]*)', html)
         assert len(titles) == 100                      # 模块上限 100
         assert titles[0] == "日常贴贴番000"             # 命中数优先、评分次之，顺序稳定
-        assert html.count('class="work-card home-top-extra"') == 40  # 100 - 60：收起态
+        # 卡片走 _work_card.html 的 poster_card 宏（mode='card'）：class 形状为
+        # "work-card work-card--card [home-top-extra]"，90 张收起态（100 - 初始 10）。
+        assert html.count('class="work-card work-card--card home-top-extra"') == 90
         assert 'id="home-rec-expand"' in html          # 展开按钮
-        assert "还有 40 部" in html
+        assert "还有 90 部" in html
     finally:
         app.dependency_overrides.pop(get_db, None)
 
 
 def test_index_recommend_module_no_expand_button_when_short(tmp_path):
-    """不足初始条数：不渲染展开按钮，也不留收起类。"""
+    """不足初始条数（≤ HOME_RECOMMEND_INITIAL_MOBILE=10）：不渲染展开按钮，也不留收起类。"""
     client, factory = _client_with_works(
         tmp_path,
-        [(f"贴贴番{i:02d}", 8.0 + i * 0.1, ["日常", "百合"]) for i in range(20)],
+        [(f"贴贴番{i:02d}", 8.0 + i * 0.1, ["日常", "百合"]) for i in range(8)],
         "short.db",
     )
     try:
         html = client.get("/").text
-        assert len(re.findall(r'work-card-title">([^<]*)', html)) == 20
+        assert len(re.findall(r'work-card-title">([^<]*)', html)) == 8
         assert "home-rec-expand" not in html
         assert "home-top-extra" not in html
     finally:

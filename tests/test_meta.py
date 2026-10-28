@@ -97,6 +97,61 @@ class TestBuildMeta:
         assert actors == {"緒方恵美", "林原めぐみ"}
         assert "刘海霞" not in actors
 
+    def test_staff_covers_core_creators(self):
+        """核心主创（导演 / 音乐 / 人物设定）必须进 Staff 表。
+
+        旧实现只把「副导演 / 脚本 / 美术监督 / 音响监督」写进 credits，
+        导演 / 音乐 / 人物设定 只进实体关系，详情页 Staff 常年为空。
+        """
+        credits = self._meta()["credits"]
+        main = {(item["role"], item["name"]) for item in credits if item["tier"] == "main"}
+        assert ("导演", "庵野秀明") in main
+        assert ("音乐", "鷺巣詩郎") in main
+        assert ("人物设定", "貞本義行") in main
+        roles = [item["role"] for item in credits]
+        assert roles.index("导演") < roles.index("脚本") < roles.index("音乐")
+
+    def test_staff_skips_facts_and_companies(self):
+        roles = {item["role"] for item in self._meta()["credits"]}
+        assert "动画制作" not in roles  # 公司归「制作」行与实体关系
+        assert "放送星期" not in roles
+        assert "别名" not in roles
+        # 「原作」填的是载体而不是人时不进 Staff
+        names = {item["name"] for item in self._meta()["credits"] if item["role"] == "原作"}
+        assert "漫画" not in names
+
+    def test_cast_sorted_by_relation(self):
+        """Bangumi characters 接口顺序不是重要度序：主角要排到最前。"""
+        characters = [
+            {"id": 1, "name": "ナレーション", "relation": "旁白",
+             "actors": [{"id": 10, "name": "A"}]},
+            {"id": 2, "name": "路人", "relation": "闲角",
+             "actors": [{"id": 11, "name": "B"}]},
+            {"id": 3, "name": "主角甲", "relation": "主角",
+             "actors": [{"id": 12, "name": "C"}]},
+            {"id": 4, "name": "配角乙", "relation": "配角",
+             "actors": [{"id": 13, "name": "D"}]},
+        ]
+        cast = bangumi_meta.build_cast_rows(characters)
+        assert [item["character"] for item in cast] == ["主角甲", "配角乙", "ナレーション", "路人"]
+        assert cast[0]["relation"] == "主角"
+        assert [item["sort_order"] for item in cast] == [0, 1, 2, 3]
+
+    def test_cast_keeps_more_than_first_screen(self):
+        """主角不总在接口前 12 条：保存上限要兜住整份角色表（最多 60）。"""
+        characters = [
+            {"id": index, "name": f"角色{index}", "relation": "闲角",
+             "actors": [{"id": 1000 + index, "name": f"CV{index}"}]}
+            for index in range(30)
+        ]
+        characters.append(
+            {"id": 999, "name": "主角", "relation": "主角",
+             "actors": [{"id": 2, "name": "CV主角"}]}
+        )
+        cast = bangumi_meta.build_cast_rows(characters)
+        assert len(cast) == 31
+        assert cast[0]["character"] == "主角"
+
     def test_facts_trimmed(self):
         facts = self._meta()["facts"]
         assert facts["放送星期"] == "星期三"
@@ -191,10 +246,22 @@ class TestSync:
         try:
             content = db.get(Content, meta_env["content_id"])
             bangumi_meta.sync_content_meta(db, content, payload=payload)
+            first = sorted(
+                (item.role, item.name, item.tier)
+                for item in crud.list_content_credits(db, content.id)
+            )
             bangumi_meta.sync_content_meta(db, content, payload=payload)
             assert len(crud.list_content_cast(db, content.id)) == 2
-            # 2 个脚本 + 2 个原画候选（候选也入库，只是不展示）
-            assert len(crud.list_content_credits(db, content.id)) == 4
+            # 幂等：替换式写入，重跑一遍不会堆行、也不会改变内容
+            assert sorted(
+                (item.role, item.name, item.tier)
+                for item in crud.list_content_credits(db, content.id)
+            ) == first
+            # infobox 的人事键（导演 / 脚本 / 音乐 / 人物设定）全进 Staff，
+            # 原画长尾仍是候选（候选也入库，只是不展示）
+            roles = {item.role for item in crud.list_content_credits(db, content.id)}
+            assert {"导演", "脚本", "音乐", "人物设定"} <= roles
+            assert "别名" not in roles
         finally:
             db.close()
 
@@ -248,6 +315,57 @@ class TestSync:
 
 
 class TestPages:
+    def test_detail_shows_staff_and_company_relations(self, meta_env):
+        """详情页：人进 Staff 表（可跳实体页），「关系」只留公司。"""
+        db = meta_env["factory"]()
+        try:
+            content = db.get(Content, meta_env["content_id"])
+            bangumi_meta.sync_content_meta(
+                db, content,
+                payload={"subject": SUBJECT, "characters": CHARACTERS, "persons": PERSONS},
+            )
+            crud.replace_content_entity_links(
+                db,
+                content.id,
+                [
+                    ("庵野秀明", "person", "导演"),
+                    ("king records", "company", "发行"),
+                ],
+            )
+        finally:
+            db.close()
+
+        page = meta_env["client"].get(f"/contents/{meta_env['content_id']}")
+        assert page.status_code == 200
+        text = page.text
+        # Staff 表里有导演，且人名是可点的实体页链接（标签反查保留）
+        assert "庵野秀明" in text
+        assert "/creators/%E5%BA%B5%E9%87%8E%E7%A7%80%E6%98%8E" in text
+        # 关系区只剩公司
+        assert "/creators/king%20records" in text
+
+    def test_detail_shows_cast_relation_badge(self, meta_env):
+        """角色卡带重要度小标（主角 / 配角）。"""
+        db = meta_env["factory"]()
+        try:
+            content = db.get(Content, meta_env["content_id"])
+            characters = [
+                {"id": 1, "name": "碇シンジ", "relation": "主角",
+                 "actors": [{"id": 10, "name": "緒方恵美"}]},
+                {"id": 2, "name": "綾波レイ", "relation": "配角",
+                 "actors": [{"id": 12, "name": "林原めぐみ"}]},
+            ]
+            bangumi_meta.sync_content_meta(
+                db, content,
+                payload={"subject": SUBJECT, "characters": characters, "persons": PERSONS},
+            )
+        finally:
+            db.close()
+
+        page = meta_env["client"].get(f"/contents/{meta_env['content_id']}")
+        assert page.status_code == 200
+        assert "主角" in page.text
+
     def test_detail_shows_cast_and_facts(self, meta_env):
         db = meta_env["factory"]()
         try:
@@ -316,6 +434,10 @@ class TestPages:
         assert page.status_code == 200
         assert "緒方恵美" in page.text
         assert "新世纪福音战士" in page.text
+        # 声优页与 staff 作品页同一套海报卡网格；配音角色走 persona 行
+        assert "work-card--card" in page.text
+        assert "work-card-persona" in page.text
+        assert "碇シンジ" in page.text
 
     def test_studio_page(self, meta_env):
         db = meta_env["factory"]()
@@ -331,6 +453,7 @@ class TestPages:
         page = meta_env["client"].get("/studios/GAINAX")
         assert page.status_code == 200
         assert "新世纪福音战士" in page.text
+        assert "work-card--card" in page.text
 
     def test_missing_person_404(self, meta_env):
         page = meta_env["client"].get("/cast/99999")
@@ -338,6 +461,24 @@ class TestPages:
 
 
 class TestLegacyColumns:
+    def test_ensure_adds_cast_relation_column(self, tmp_path):
+        """历史库 content_cast 没有 relation 列时幂等补列；已有则跳过。"""
+        engine = create_engine(f"sqlite:///{tmp_path / 'legacy_cast.db'}")
+        try:
+            with engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "CREATE TABLE content_cast (id INTEGER PRIMARY KEY,"
+                        " content_id INTEGER NOT NULL, character VARCHAR(100) NOT NULL,"
+                        " character_id INTEGER, person_id INTEGER,"
+                        " actor VARCHAR(100) NOT NULL, sort_order INTEGER NOT NULL DEFAULT 0)"
+                    )
+                )
+            assert crud.ensure_content_cast_relation_column(engine) == ["relation"]
+            assert crud.ensure_content_cast_relation_column(engine) == []
+        finally:
+            engine.dispose()
+
     def test_ensure_adds_meta_columns(self, tmp_path):
         engine = create_engine(f"sqlite:///{tmp_path / 'legacy_meta.db'}")
         try:

@@ -37,8 +37,9 @@
     # 走本机代理
     python scripts/sync_yuc_schedule.py --proxy http://127.0.0.1:9910
 
-本文件同时是可复用模块：parse_atom / split_entries / parse_entry_chunk /
-run_sync 等函数可被测试直接调用，见 tests/test_yuc_schedule.py。
+本文件同时是可复用模块：parse_atom / parse_special_categories / split_entries /
+parse_entry_chunk / split_special_entries / parse_special_entry /
+extract_air_date / run_sync 等函数可被测试直接调用，见 tests/test_yuc_schedule.py。
 """
 
 from __future__ import annotations
@@ -91,14 +92,16 @@ ATOM_NS = "{http://www.w3.org/2005/Atom}"
 SEASON_PATH_RE = re.compile(r"/(20\d{2})(0[1-9]|1[0-2])(?:/|$)")
 
 # 特殊档期分类：源站 Atom 条目标题/链接 → 本站分类码与展示名。
-# 站点原文（新番卫星观测站 / Movie-OVA-SP / 内地上映动画电影）只在抓取时用作
+# 站点原文（新番卫星观测站 / Movie-OVA-SP / 日本动画电影-内地院线档期）只在抓取时用作
 # 匹配键，入库即改写为本站点名；展示名与 app.crud.SCHEDULE_CATEGORY_LABELS 同源。
 # - path：Atom 条目链接里的路径片段（最稳，标题常被站点改写），命中即认定；
-# - title：标题包含的子串，path 缺失或拿不到链接时兜底（如内地上映动画电影）。
+# - title：标题包含的子串，path 缺失或拿不到链接时兜底。
+# 2026-10-24 实测：cn_movie 页链接为 /movie/，标题已从「内地上映动画电影」
+# 改名为「日本动画电影-内地院线档期」——两个匹配键都已同步更新。
 SPECIAL_CATEGORIES = (
     {"code": "unreleased", "label": "未上线新番", "path": "/new/"},
     {"code": "ova_sp", "label": "剧场版ova与特别篇", "path": "/sp/"},
-    {"code": "cn_movie", "label": "大陆引进剧场版", "title": "内地上映动画电影"},
+    {"code": "cn_movie", "label": "大陆引进剧场版", "path": "/movie/", "title": "内地院线"},
 )
 # 档期页详情条目以 HTML 注释 <!--#A01--> 等分块（站点模板约定）。
 ENTRY_MARKER_RE = re.compile(r"<!--\s*#\s*[A-Za-z]+\d+\s*-->")
@@ -179,6 +182,7 @@ class ParsedEntry:
     platforms: list[dict] = field(default_factory=list)
     work_type: str | None = None  # 作品类型，如 漫画改编动画 / 原创动画
     work_tags: str | None = None  # 题材标签，站点原文（斜杠/换行分隔）
+    box_office: str | None = None  # 内地票房（仅大陆引进剧场版页有），如「内地总票房￥6.78亿」
 
     @property
     def title_main(self) -> str | None:
@@ -282,6 +286,84 @@ def extract_broadcast_time(text: str | None) -> str | None:
         return None
     match = BROADCAST_TIME_RE.search(text)
     return match.group(1) if match else None
+
+
+# 特殊分类页播出/上映说明里的日期：2026/12/11上映、2025-11-14开始上映、
+# 2026年11月13日先行上映、原定2025/12/6上映。月/日不补零也认。
+AIR_DATE_RE = re.compile(r"(20\d{2})[/年\-.](\d{1,2})[/月\-.](\d{1,2})")
+# 源站手滑漏写年月分隔符的形态：20262/20放送（本意 2026/2/20）。主正则不命中时
+# 才回退匹配它，且必须通过真实日历校验（月 1-12、日 1-31）——校验不过就放弃，
+# 不把任意「4 位数字+数字/数字」硬掰成日期。
+AIR_DATE_TYPO_RE = re.compile(r"(20\d{2})(\d{1,2})[/月\-.](\d{1,2})")
+
+
+def extract_air_date(text: str | None) -> str | None:
+    """从播出说明中提取 ISO 日期 ``YYYY-MM-DD``；只有季度描述（如 2027冬）时返回 None。
+
+    季度描述保留在 broadcast_note 原文里，页面分组按原文归组，不猜具体日期。
+    对源站漏写年月分隔符的手滑形态（20262/20放送）容错：主正则不命中时回退
+    匹配，通过月/日合法性校验后同样提取；校验不过依旧返回 None。
+    """
+    if not text:
+        return None
+    match = AIR_DATE_RE.search(text) or AIR_DATE_TYPO_RE.search(text)
+    if not match:
+        return None
+    year, month, day = (int(part) for part in match.groups())
+    if not (1 <= month <= 12 and 1 <= day <= 31):
+        return None
+    return f"{year:04d}-{month:02d}-{day:02d}"
+
+
+# 播出说明展示文本里的同类手滑：只把漏掉的年月分隔符补回斜杠，数字一个不改。
+NOTE_DATE_TYPO_RE = re.compile(r"(20\d{2})(\d{1,2})([/月\-.])(\d{1,2})")
+
+
+def normalize_note_dates(text: str | None) -> str | None:
+    """把播出说明里漏写年月分隔符的日期补回斜杠（20262/20放送 → 2026/2/20放送）。
+
+    与 extract_air_date 同一套校验口径：月/日越界的片段原样保留，不修。
+    已合法的日期（2026/2/20、2026年11月13日）不含「年+数字紧邻」形态，不受影响。
+    """
+    if not text:
+        return text
+
+    def _fix(match: re.Match) -> str:
+        year, month, sep, day = match.groups()
+        if 1 <= int(month) <= 12 and 1 <= int(day) <= 31:
+            return f"{year}/{month}{sep}{day}"
+        return match.group(0)
+
+    return NOTE_DATE_TYPO_RE.sub(_fix, text)
+
+
+# ---------- 源站缺字段时的人工补丁 ----------
+# 只补源站没有的信息（年份、具体播出时间），不覆盖源站已有的内容；键与 source_key
+# 同口径（normalize_title_key 后的主标题），标题变了就失效而不是误命中别的作品。
+# 每条注明来源与核定日期，复审时按记录核对，不凭印象改数。
+MANUAL_PATCHES: dict[str, dict[str, object]] = {
+    # TVスペシャルアニメ『五等分の花嫁∽』（2023）：TBS 前后篇 9/2、9/9 各 16:30，
+    # BS11 9/10 22:00 两话连播（官方 X 与 TBS 节目页 2023-08-08 公布）。
+    # 源站只写「TV放送：9/2-9/9」——无年份（掉进原文组、归不进月份）、无时间
+    # （卡片不显示播出时间）。用户 2026-10-24 要求单独修这条。
+    "特别篇五等分的新娘∽": {
+        "broadcast_note": "TV放送：2023/9/2-9/9 16:30（TBS，前后篇）；9/10 22:00（BS11，两话连播）",
+        "broadcast_time": "16:30",
+        "air_date": "2023-09-02",
+        "weekday": 6,  # 2023-09-02 是周六
+    },
+}
+
+
+def apply_manual_patch(
+    key: str | None, note: str | None
+) -> tuple[str | None, dict[str, object]]:
+    """按 source_key 取人工补丁，返回 (补丁后的播出说明, 其余补丁字段)。
+
+    没有补丁时原样返回；播出说明的补丁与非说明字段分开返回，调用方各自落位。
+    """
+    patch = MANUAL_PATCHES.get(key or "", {})
+    return patch.get("broadcast_note", note), patch
 
 
 def platform_from_link(text: str | None, href: str) -> dict | None:
@@ -614,7 +696,8 @@ def parse_entry_chunk(
         part = clean_text(parser.texts["broadcast_ex"][0])
         if part:
             broadcast_parts.append(part)
-    broadcast_note = "；".join(broadcast_parts) or None
+    # 归一只补源站漏写的年月分隔符（20262/20 → 2026/2/20），不动其余文字
+    broadcast_note = normalize_note_dates("；".join(broadcast_parts)) or None
 
     platforms: list[dict] = []
     seen_urls: set[str] = set()
@@ -661,6 +744,171 @@ def parse_entry_chunk(
         platforms=platforms,
         work_type=work_type,
         work_tags=work_tags,
+    )
+
+
+# ---------- 特殊分类页解析（2026-10-24 源站改版后） ----------
+#
+# 三个特殊分类页 2026-10 改版，条目块不再是季度页的 <!--#A01--> 注释标记 +
+# title_main 锚点结构（split_entries / parse_entry_chunk 那套），而是：
+#   /new/（未上线新番）：<div class="future_div"> 块——future_type_[a-d] 类型、
+#     future_date(_) 档期（如「2027冬」）、future_title(_) 标题、块内 img 海报；
+#   /sp/（剧场版ova与特别篇）：<div class="div_sp"> 块——sp_title(_) 标题、
+#     type-m/s/o 类型、sp_release(_) 上映时间、块首 img 海报；
+#   /movie/（大陆引进剧场版）：同 div_sp 块——movie_title 标题、
+#     movie_release 上映信息、type-o 类型（延期等）。
+# 三类页共用一套「块起点正则 + 类名前缀分组」解析；标题 <br> 折行转空格。
+# 季度档期页（/YYYYMM/）仍是旧结构，不受影响。
+
+SPECIAL_BLOCK_RE = re.compile(
+    r'<div[^>]*class="[^"]*(?:future_div|div_sp)[^"]*"', re.I
+)
+# 类名前缀分组（normalize_class_token 只去尾部数字/_r，不影响这些名字）：
+# 标题 / 时间说明 / 作品类型各取块内第一个非空值。
+SPECIAL_TITLE_PREFIXES = ("future_title", "movie_title", "sp_title")
+SPECIAL_NOTE_PREFIXES = ("future_date", "movie_release", "sp_release")
+SPECIAL_TYPE_PREFIXES = ("future_type", "type-")
+# 内地票房（仅大陆引进剧场版页 /movie/ 有）：<td colspan="2" class="movie_box">
+SPECIAL_BOX_PREFIXES = ("movie_box",)
+
+# 图例说明块特征：源站在 /sp/ 与 /movie/ 页顶放了一个「示例条目」教读者读表，
+# data-src 字面量是「海报」而非真实地址。切块时按特征剔除，否则会作为
+# title=「标题」/note=「时间」的垃圾记录入库（2026-10-24 踩过）。
+LEGEND_POSTER_TOKENS = {"海报"}
+LEGEND_TEXT_TOKENS = {"标题", "类型", "时间", "上映时间", "内地总票房￥", ""}
+
+
+def _is_legend_block(block_html: str) -> bool:
+    """判断特殊分类页的一个块是否为页顶图例说明块（非真实条目）。"""
+    for match in re.finditer(r'data-src\s*=\s*["\']([^"\']*)["\']', block_html, re.I):
+        if match.group(1).strip() in LEGEND_POSTER_TOKENS:
+            return True
+    texts = [t.strip() for t in re.findall(r">([^<>]{1,20})<", block_html)]
+    texts = [t for t in texts if t]
+    return bool(texts) and all(t in LEGEND_TEXT_TOKENS for t in texts)
+
+
+def split_special_entries(html_text: str) -> list[str]:
+    """按新结构块起点（future_div / div_sp）切分特殊分类页，返回块 HTML 列表。
+
+    第一个匹配位置之前是页头（略去）；每块从块起点延伸到下一块起点，
+    尾部杂质（月度分组 details、页脚）落在块内，由解析器按类名忽略。
+    页顶图例说明块（data-src="海报" / 文字全是「标题/类型/时间」）在此剔除——
+    它不是真实条目，混进去会产出垃圾档期记录。
+    """
+    marks = list(SPECIAL_BLOCK_RE.finditer(html_text))
+    blocks = []
+    for index, mark in enumerate(marks):
+        end = marks[index + 1].start() if index + 1 < len(marks) else len(html_text)
+        block = html_text[mark.start():end]
+        if _is_legend_block(block):
+            continue
+        blocks.append(block)
+    return blocks
+
+
+class _SpecialEntryParser(html.parser.HTMLParser):
+    """特殊分类页单个条目块的字段提取器（future_div / div_sp 结构）。
+
+    收集目标：标题 / 时间说明 / 类型 / 内地票房（各取第一个非空）、块内第一个
+    img 的 data-src（海报）、全部 <a>（供 platform_from_link 判平台）。
+    """
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.title: str | None = None
+        self.note: str | None = None
+        self.work_type: str | None = None
+        self.box_office: str | None = None
+        self.poster: str | None = None
+        self.links: list[tuple[str, str]] = []  # (锚文本, href)
+        self._capture: str | None = None  # None | "title" | "note" | "work_type" | "box_office"
+        self._buf: list[str] = []
+        self._anchor: list | None = None  # [href, 文本缓冲]
+
+    def _starts_capture(self, classes: set[str], prefixes: tuple[str, ...]) -> bool:
+        return any(token.startswith(prefixes) for token in classes)
+
+    def handle_starttag(self, tag, attrs):
+        attr_dict = dict(attrs)
+        classes = class_tokens(attr_dict)
+
+        if tag == "img" and self.poster is None:
+            src = attr_dict.get("data-src") or attr_dict.get("src")
+            if src:
+                self.poster = src.strip()
+            return
+        if tag == "br" and self._capture is not None:
+            self._buf.append(" ")  # 多行标题折行转空格，避免文字粘连
+            return
+        if tag == "a" and self._anchor is None:
+            href = (attr_dict.get("href") or "").strip()
+            if href:
+                self._anchor = [href, []]
+            return
+        if self._capture is not None or not classes:
+            return
+
+        if self.title is None and self._starts_capture(classes, SPECIAL_TITLE_PREFIXES):
+            self._capture, self._buf = "title", []
+        elif self.note is None and self._starts_capture(classes, SPECIAL_NOTE_PREFIXES):
+            self._capture, self._buf = "note", []
+        elif self.work_type is None and self._starts_capture(classes, SPECIAL_TYPE_PREFIXES):
+            self._capture, self._buf = "work_type", []
+        elif self.box_office is None and self._starts_capture(classes, SPECIAL_BOX_PREFIXES):
+            self._capture, self._buf = "box_office", []
+
+    def handle_endtag(self, tag):
+        if self._anchor is not None and tag == "a":
+            href, buf = self._anchor
+            self.links.append(("".join(buf), href))  # (锚文本, href)，同旧解析器约定
+            self._anchor = None
+            return
+        if self._capture is not None and tag in {"p", "td", "div", "table"}:
+            text = clean_text("".join(self._buf))
+            if text:
+                setattr(self, self._capture, text)
+            self._capture, self._buf = None, []
+
+    def handle_data(self, data):
+        if self._capture is not None:
+            self._buf.append(data)
+        elif self._anchor is not None:
+            self._anchor[1].append(data)
+
+
+def parse_special_entry(block_html: str) -> ParsedEntry:
+    """解析特殊分类页单个条目块为 ParsedEntry；结构畸形时抛 YucFetchError。
+
+    字段缺失保留 None 不猜测：标题为空由调用方按「缺主标题」记 skipped。
+    """
+    parser = _SpecialEntryParser()
+    try:
+        parser.feed(block_html)
+        parser.close()
+    except Exception as exc:  # html.parser 对畸形输入宽容，这里兜底防御
+        raise YucFetchError(f"条目 HTML 解析异常：{exc}") from exc
+
+    platforms: list[dict] = []
+    seen_urls: set[str] = set()
+    for text, href in parser.links:
+        platform = platform_from_link(text, href)
+        if platform and platform["url"] not in seen_urls:
+            platforms.append(platform)
+            seen_urls.add(platform["url"])
+
+    note = limit_text(normalize_note_dates(parser.note))
+    return ParsedEntry(
+        title_cn=parser.title,
+        title_jp=None,  # 特殊页只有一个标题字段，作主标题用
+        weekday=extract_weekday(note),
+        broadcast_time=extract_broadcast_time(note),
+        broadcast_note=note,
+        box_office=limit_text(parser.box_office, 50),
+        image_url=limit_text(parser.poster, 500),
+        platforms=platforms,
+        work_type=limit_text(parser.work_type, 50),
+        work_tags=None,
     )
 
 
@@ -991,17 +1239,28 @@ def run_sync(
 
         # 阶段 1：解析整页所有条目块。解析失败 / 缺主标题 / 主标题无法规范化
         # 的当场记 skipped，不进入后续合并与入库。
+        # 特殊分类页（2026-10 改版）走 future_div / div_sp 专用解析器；
+        # 季度档期页仍是 <!--#A01--> 注释标记结构，走原 split_entries。
+        special_page = category in SPECIAL_CATEGORY_CODES
+        blocks = (
+            [EntryChunk(html=block) for block in split_special_entries(page_html)]
+            if special_page
+            else split_entries(page_html)
+        )
         parsed: list[ParsedEntry] = []
         parsed_keys: list[set[str]] = []
-        for chunk in split_entries(page_html):
+        for chunk in blocks:
             summary.parsed += 1
             try:
-                entry = parse_entry_chunk(
-                    chunk.html,
-                    fallback_image=chunk.fallback_image,
-                    allow_embedded_image=chunk.trust_embedded_image,
-                    slot_index=slot_index,
-                )
+                if special_page:
+                    entry = parse_special_entry(chunk.html)
+                else:
+                    entry = parse_entry_chunk(
+                        chunk.html,
+                        fallback_image=chunk.fallback_image,
+                        allow_embedded_image=chunk.trust_embedded_image,
+                        slot_index=slot_index,
+                    )
             except YucFetchError as exc:
                 summary.parsed -= 1
                 summary.skipped += 1
@@ -1099,15 +1358,19 @@ def run_sync(
 
             entry = best
             title = entry.title_main
+            # 源站缺字段的条目按人工补丁补齐（MANUAL_PATCHES），未命中则原样落库
+            patched_note, patch = apply_manual_patch(best_key, entry.broadcast_note)
             data = {
                 "season_code": season.code,
                 "source_key": limit_text(best_key),
                 "title_main": limit_text(title),
                 "title_cn": limit_text(entry.title_cn),
                 "title_jp": limit_text(entry.title_jp),
-                "weekday": entry.weekday,
-                "broadcast_time": limit_text(entry.broadcast_time, 20),
-                "broadcast_note": limit_text(entry.broadcast_note),
+                "weekday": patch.get("weekday", entry.weekday),
+                "broadcast_time": limit_text(patch.get("broadcast_time", entry.broadcast_time), 20),
+                "broadcast_note": limit_text(patched_note),
+                "air_date": patch.get("air_date") or extract_air_date(patched_note),
+                "box_office": limit_text(entry.box_office, 50),
                 "image_url": entry.image_url,
                 "platforms": entry.platforms,
                 "work_type": limit_text(entry.work_type, 50),

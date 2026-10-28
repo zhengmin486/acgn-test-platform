@@ -33,7 +33,10 @@ SPACE_PAGE_SIZE = 10
 
 # Tab 取值：非法值回退到收藏（与首页「宽容忽略」风格一致）。
 # 标注不再是独立 Tab：它与收藏是同一行数据，在收藏列表里展示与筛选。
-SPACE_TABS = ("favorites", "history", "submissions")
+# Tab 顺序：作品收藏 → 浏览记录 → 资讯收藏 → 作品申请。
+# 「资讯收藏」是 2026-10-24 加的第四个 Tab：收藏的是资讯（articles 表），
+# 与作品收藏不是同一批数据，因此不混进 favorites Tab 里做二级筛选。
+SPACE_TABS = ("favorites", "history", "articles", "submissions")
 
 # 收藏分类展示名：动画用 ACGN 圈惯用的「追番」，其余直接用类型名，
 # 避免「追漫 / 追书 / 追游」这类生造词。作为「作品收藏」内的二级筛选展示。
@@ -96,6 +99,7 @@ def space_page(
 
     favorites_total, favorites = (0, [])
     history_total, history = (0, [])
+    articles_total, article_favorites = (0, [])
     submissions_total, submissions = (0, [])
     if tab == "favorites":
         favorites_total, favorites = crud.list_favorites(
@@ -113,6 +117,13 @@ def space_page(
         history_total, history = crud.list_view_history(
             db, account.id, page=page, page_size=SPACE_PAGE_SIZE
         )
+    elif tab == "articles":
+        # 资讯收藏同样不带 type / status 筛选（那是作品收藏的维度）。
+        content_type = None
+        status = None
+        articles_total, article_favorites = crud.list_article_favorites(
+            db, account.id, page=page, page_size=SPACE_PAGE_SIZE
+        )
     else:  # submissions
         content_type = None
         status = None
@@ -124,6 +135,8 @@ def space_page(
         active_total = favorites_total
     elif tab == "history":
         active_total = history_total
+    elif tab == "articles":
+        active_total = articles_total
     else:
         active_total = submissions_total
     total_pages = max(1, (active_total + SPACE_PAGE_SIZE - 1) // SPACE_PAGE_SIZE)
@@ -154,6 +167,9 @@ def space_page(
             "history": history,
             "history_total": history_total,
             "history_count": crud.count_view_history(db, account.id),
+            "article_favorites": article_favorites,
+            "articles_total": articles_total,
+            "articles_count": crud.count_article_favorites(db, account.id),
             "status": status,
             "status_labels": crud.CONTENT_STATUS_LABELS,
             "status_filter_unmarked": crud.STATUS_FILTER_UNMARKED,
@@ -316,6 +332,25 @@ def clear_favorites(request: Request, db: DbSession, cat: str = Form(default="")
     return RedirectResponse(
         f"/me?tab=favorites&fav_cleared={removed}{suffix}", status_code=303
     )
+
+
+@router.post("/me/article-favorites/{article_id}/remove")
+def remove_article_favorite(request: Request, article_id: int, db: DbSession):
+    """资讯收藏 Tab 内取消单条；PRG 回本 Tab。
+
+    资讯没有「标注」，取消就是删行——不存在作品收藏那种「标注仍保留」的回显分支。
+    """
+    account = _current_account(request, db)
+    crud.remove_article_favorite(db, account.id, article_id)
+    return RedirectResponse("/me?tab=articles&fav_removed=1", status_code=303)
+
+
+@router.post("/me/article-favorites/clear")
+def clear_article_favorites(request: Request, db: DbSession):
+    """清空资讯收藏；回显清除条数（与作品收藏的清空一致）。"""
+    account = _current_account(request, db)
+    removed = crud.clear_article_favorites(db, account.id)
+    return RedirectResponse(f"/me?tab=articles&fav_cleared={removed}", status_code=303)
 
 
 @router.post("/me/history/{content_id}/remove")

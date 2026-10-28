@@ -27,10 +27,24 @@
 {% if not rows %}
 <div class="detail-empty">没有符合条件的作品。</div>
 {% else %}
-<div class="table-responsive table-card">
+<div class="admin-panel" data-admin-scope data-bulk-form="bulk-link-delete" data-page-size="20">
+{# 批量删除关联表单：只承载隐藏的筛选条件，勾选框与按钮用 form 属性归入本表单。
+   单条删除走同一个路由（每条关联有自己的独立表单，不出现嵌套表单）。 #}
+<form id="bulk-link-delete" method="post" action="/manage/entities/link/delete"
+      class="admin-bulkform" data-ajax-delete data-remove="chip"
+      data-id-field="link_id" data-count-param="deleted" data-verb="删除" data-entity="关联">
+    <input type="hidden" name="q" value="{{ q }}">
+    <input type="hidden" name="page" value="{{ page }}">
+</form>
+
+<div class="table-responsive table-card admin-table">
     <table class="table table-hover align-middle">
         <thead>
         <tr>
+            <th class="cell-check">
+                <input class="form-check-input" type="checkbox" data-select-all
+                       aria-label="全选本页关联">
+            </th>
             <th>ID</th>
             <th>作品</th>
             <th>作者/公司关联</th>
@@ -40,26 +54,38 @@
         </thead>
         <tbody>
         {% for row in rows %}
-        <tr>
-            <td>{{ row.content.id }}</td>
-            <td>
+        <tr data-row-id="{{ row.content.id }}">
+            <td class="cell-check">
+                <input class="form-check-input" type="checkbox" data-select-row
+                       aria-label="选择作品 {{ row.content.id }} 的全部关联">
+            </td>
+            <td class="cell-id" data-label="ID">{{ row.content.id }}</td>
+            <td class="cell-title" data-label="作品">
                 <div>{{ row.content.title }}</div>
                 <div class="small text-muted">
                     <a href="/contents/{{ row.content.id }}">查看详情页</a>
                 </div>
             </td>
-            <td>
+            <td class="cell-links" data-label="作者/公司关联">
                 {% if row.links %}
                 <div class="d-flex flex-wrap align-items-center gap-2">
                     {% for link_id, role, name in row.links %}
-                    <span class="tag-chip">
+                    <span class="tag-chip tag-chip-pick" data-chip-id="{{ link_id }}">
+                        <input class="form-check-input chip-check" type="checkbox" data-chip-check
+                               name="link_id" value="{{ link_id }}" form="bulk-link-delete"
+                               aria-label="选择关联 {{ role }}：{{ name }}">
                         {{ role }}：{{ name }}
-                        <form method="post" action="/manage/entities/link/delete" class="d-inline m-0">
+                        <form method="post" action="/manage/entities/link/delete"
+                              class="d-inline m-0"
+                              data-ajax-delete data-remove="chip" data-count-param="deleted"
+                              data-verb="删除" data-entity="关联" data-ids="{{ link_id }}"
+                              data-confirm="确定删除「{{ role }}：{{ name }}」这条关联？"
+                              data-confirm-title="删除关联" data-confirm-ok="确认删除">
                             <input type="hidden" name="link_id" value="{{ link_id }}">
                             <input type="hidden" name="q" value="{{ q }}">
                             <input type="hidden" name="page" value="{{ page }}">
-                            <button class="btn btn-sm btn-link p-0 lh-1 text-danger" type="submit"
-                                    title="删除该关联" aria-label="删除该关联">&times;</button>
+                            <button class="btn btn-sm btn-link p-0 lh-1 text-danger chip-del"
+                                    type="submit" title="删除该关联" aria-label="删除该关联">&times;</button>
                         </form>
                     </span>
                     {% endfor %}
@@ -68,14 +94,14 @@
                 <span class="text-muted small">未识别到</span>
                 {% endif %}
             </td>
-            <td>
+            <td class="cell-series" data-label="所属系列">
                 {% if row.series %}
                 <a href="/creators/{{ row.series.name|urlencode }}">{{ row.series.name }}</a>
                 {% else %}
                 <span class="text-muted small">未归系列</span>
                 {% endif %}
             </td>
-            <td>
+            <td class="cell-actions" data-label="操作">
                 {# 添加关联：角色从下拉选（公司类角色自动落 company），也可用自定义角色覆盖 #}
                 <form method="post" action="/manage/entities/link/add"
                       class="row g-1 align-items-end mb-2">
@@ -127,8 +153,17 @@
     </table>
 </div>
 
-<div class="d-flex flex-wrap justify-content-end align-items-center gap-2 mt-3">
+<div class="admin-bulkbar">
+    <span class="admin-sel-info">已选 <b data-sel-count>0</b> 条关联</span>
+    {# 窄屏表头整行隐藏，全选框移到批量栏里，手指才够得着 #}
+    <label class="admin-select-all-mobile">
+        <input class="form-check-input" type="checkbox" data-select-all aria-label="全选本页关联">
+        <span>全选本页</span>
+    </label>
+    <button class="btn btn-sm btn-danger" type="submit" form="bulk-link-delete"
+            data-bulk-submit>批量删除选中</button>
     {{ pager('/manage/entities?q=' ~ (q|urlencode) ~ '&', page, total_pages) }}
+</div>
 </div>
 {% endif %}
 {% endblock %}

@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from app import media
 from app.config import settings
 from app.database import get_db
+from app.rating import rating_display
 
 logger = logging.getLogger(__name__)
 
@@ -74,18 +75,32 @@ templates = Jinja2Templates(
 
 # 静态资源缓存版本号（模板全局）：取 style.css 的 mtime。
 # 模板以 /static/style.css?v={{ asset_v }} 引用，样式一改版本号就变，
-# 浏览器自动拉新文件，不再出现「改了 CSS 用户端还是旧样式」的缓存问题；
-# 文件缺失（异常环境）时退化为固定值，不影响渲染。
-try:
-    templates.env.globals["asset_v"] = str(int((BASE_DIR / "static" / "style.css").stat().st_mtime))
-except OSError:
-    templates.env.globals["asset_v"] = "1"
+# 浏览器自动拉新文件，不再出现「改了 CSS 用户端还是旧样式」的缓存问题。
+# 用 __str__ 而非固定字符串：进程不重启也要拿到当前 mtime —— 否则改完 CSS
+# 不重启服务，?v= 还是旧值，浏览器继续吃缓存（2026-10-22 实际踩到）。
+class _AssetVersion:
+    def __str__(self) -> str:
+        try:
+            return str(int((BASE_DIR / "static" / "style.css").stat().st_mtime))
+        except OSError:
+            return "1"
+
+
+templates.env.globals["asset_v"] = _AssetVersion()
 
 
 # 封面图片助手（模板全局）：本地封面走 /media 派生图端点（缩略图 / 压缩全图），
 # 远端完整地址原样透传；模板里直接 {{ thumb_src(item.image_url) }}。
 templates.env.globals["thumb_src"] = media.thumb_src
 templates.env.globals["full_src"] = media.full_src
+
+# 评分展示助手（模板全局）：必须连**评分人数**一起判定，只盯分数是不够的 ——
+# Bangumi 上一部只有 1 人打了 10 分的冷门作品，API 返回的 score 就是 10.0。
+# 用法 {{ rating_display(item.rating, item.rating_count) }}：
+#   返回 '7.8' 分数可用；'--' 人数太少不足采信（对齐源站显示「--」的观感）；
+#   ''   本来就没有评分 -> 返回空串，沿用既有「整块不渲染」的行为。
+# 口径与「人数未知不等于不足」的兜底说明见 app/rating.py。
+templates.env.globals["rating_display"] = rating_display
 
 # 图片对外基址的 origin（base.html head 的 preconnect 用）：配置了
 # MEDIA_BASE_URL（CDN / 图床）时提前完成 DNS + TLS 握手；默认同源不输出。

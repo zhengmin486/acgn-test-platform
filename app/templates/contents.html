@@ -2,12 +2,12 @@
 {% from "_pager.html" import pager %}
 {% from "_brand.html" import wordmark %}
 {# 全部作品页：hero 品牌带 + 吸顶类型 Tab（图标/四色）+ 关键词 + 分组筛选
-   （题材/形式/年份/排序）+ 三种视图（B站卡片[默认]/网格/列表）+ 分页。
+   （题材/形式/年份/排序）+ 三种视图（网格[默认]/卡片/列表）+ 分页。
    2026-10-20 改版①：类型从搜索栏里的下拉框提为页头 Tab（一级维度不该藏在
    二级控件里），标签按语义分三组（题材 / 形式载体 / 类型专属），新增排序与已选条件条。
-   2026-10-20 改版②（视觉）：默认视图抄哔哩哔哩——封面 + 标题 + 元数据行，
-   元数据行随排序自适应（评分/收藏/年份前置）；hero 用真实主视觉模糊底；
-   类型 Tab 与视图切换吸顶。全部交互纯 GET 链接，无 JS；新参数
+   2026-10-22 视图重排：**默认网格**（紧凑海报 + 标题 + 元信息），卡片视图放大留白
+   并保留题材/摘要，列表仍走横向行式；三者的作品卡共用 _work_card.html，
+   只有密度与字段不同。全部交互纯 GET 链接，无 JS；新参数
    （media/source/sort/view）未选时不写入 URL。 #}
 {% block title %}全部作品{% endblock %}
 
@@ -20,13 +20,8 @@
 } %}
 {% set fallback_icon = "<svg class='svg-ic' viewBox='0 0 24 24' aria-hidden='true'><path d='M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z'/></svg>" %}
 
-{% macro stars(rating) %}
-{% set star_count = (rating / 2) | int %}
-<span class="detail-stars" aria-hidden="true">{% for i in range(1, 6) %}<span class="{{ 'star-on' if i <= star_count else 'star-off' }}">★</span>{% endfor %}</span>
-{% endmacro %}
-
-{# 大数万级格式化（B站口径：128.3万） #}
-{% macro fmt_count(n) %}{% if n >= 10000 %}{{ '%.1f' % (n / 10000) }}万{% else %}{{ n }}{% endif %}{% endmacro %}
+{# 作品海报卡（网格 / 卡片共用）：封面 + 标题 + 元信息，见 _work_card.html #}
+{% from "_work_card.html" import poster_card with context %}
 
 {% block content %}
 {# ===== Hero 品牌带：真实主视觉模糊底 + 品牌罩层 + 字标 + 库统计。
@@ -96,7 +91,7 @@
     {% if media %}<input type="hidden" name="media" value="{{ media }}">{% endif %}
     {% if source_material %}<input type="hidden" name="source" value="{{ source_material }}">{% endif %}
     {% if sort %}<input type="hidden" name="sort" value="{{ sort }}">{% endif %}
-    {# view 为 None=卡片默认：不写隐藏域，改关键词后回到默认视图 #}
+    {# view 为 None=网格默认：不写隐藏域，改关键词后回到默认视图 #}
     {% if view %}<input type="hidden" name="view" value="{{ view }}">{% endif %}
 </form>
 
@@ -233,11 +228,15 @@
     </div>
 </div>
 {% else %}
+{# 元信息里被强调的字段：按当前排序决定，默认强调评分 #}
+{% set sort_label_key = 'year' if sort == 'newest' else (sort or 'rating') %}
 {% if active_view == 'list' %}
-{# ===== 列表视图：行式高密度，适合大库里扫片（1.2 万部翻网格太慢） ===== #}
+{# ===== 列表视图：行式高密度，适合大库里扫片（1.2 万部翻网格太慢）。
+   左封面 / 中标题+摘要 / 右元信息，字段与网格同一套（类型签、年份、形式、评分、收藏）。 #}
 <div class="works-list" id="works-list">
     {% for item in contents %}
-    <a class="work-row" href="/contents/{{ item.id }}">
+    {% set fav = favorite_counts.get(item.id, 0) %}
+    <a class="work-row" href="/contents/{{ item.id }}" title="{{ item.title }}">
         <span class="work-row-cover">
             <span class="work-cover" aria-hidden="true">{{ item.title[:1] }}</span>
             {% if item.image_url %}
@@ -246,17 +245,16 @@
         </span>
         <span class="work-row-main">
             <span class="work-row-title">{{ item.title }}</span>
-            <span class="work-row-summary text-secondary">{{ item.summary[:70] }}{% if item.summary|length > 70 %}…{% endif %}</span>
+            {% if item.summary %}
+            <span class="work-row-summary">{{ item.summary[:70] }}{% if item.summary|length > 70 %}…{% endif %}</span>
+            {% endif %}
         </span>
         <span class="work-row-meta">
-            <span class="badge detail-type-badge-sm">{{ type_labels.get(item.type, item.type) }}</span>
-            {% if item.year %}<span class="work-row-year">{{ item.year }}</span>{% endif %}
+            {% if item.type %}<span class="work-type work-type--sm" data-type="{{ item.type }}">{{ type_labels.get(item.type, item.type) }}</span>{% endif %}
+            {% if item.year %}<span class="work-meta-year">{{ item.year }}</span>{% endif %}
             {% if item.media %}<span class="work-row-media">{{ item.media }}</span>{% endif %}
-            {% if item.rating > 0 %}
-            <span class="work-row-rating">{{ stars(item.rating) }}<span>{{ '%.1f' % item.rating }}</span></span>
-            {% else %}
-            <span class="text-muted small">暂无评分</span>
-            {% endif %}
+            {# 评分要连「人数」一起看：只有 1 人打 10 分时 Bangumi 的 score 也是 10.0，人数太少按源站口径显示「--」（见 app/rating.py） #}{% set _rd = rating_display(item.rating, item.rating_count) %}{% if _rd == '--' %}<span class="work-meta-rating work-meta-rating--unknown" title="评分人数太少，暂不显示">--</span>{% elif _rd %}<span class="work-meta-rating">★ {{ _rd }}</span>{% endif %}
+            {% if fav %}<span class="work-meta-fav">♥ {{ fav }}</span>{% endif %}
             {% set row_tags = (tag_map.get(item.id) or [])[:3] %}
             {% if row_tags %}
             <span class="work-card-tags">
@@ -267,94 +265,26 @@
     </a>
     {% endfor %}
 </div>
-{% elif active_view == 'grid' %}
-{# ===== 网格视图（信息模式）：竖版海报卡 + 标题/评分/题材/摘要，
-   给有目的查找用；纯浏览走默认的 B站卡片视图。 #}
-<div class="works-grid" id="works-list">
+{% elif active_view == 'bili' %}
+{# ===== 卡片视图：与网格同一套海报卡，但列更少、卡身留白更大，
+   并保留题材 chips 与摘要——强调作品展示而不是一屏塞更多。 #}
+<div class="works-grid works-grid--card" id="works-list">
     {% for item in contents %}
-    <a class="work-card" href="/contents/{{ item.id }}">
-        <span class="work-cover-box">
-            <span class="work-cover" aria-hidden="true">{{ item.title[:1] }}</span>
-            {% if item.image_url %}
-            <img class="work-cover" src="{{ thumb_src(item.image_url) }}" alt="{{ item.title }}封面" loading="lazy" width="400" height="600" decoding="async" onerror="this.style.display='none'">
-            {% endif %}
-            {% if item.year %}<span class="work-card-year">{{ item.year }}</span>{% endif %}
-        </span>
-        <span class="work-card-body">
-            <span class="work-card-title">{{ item.title }}</span>
-            <span class="work-card-rating">
-                <span class="badge detail-type-badge-sm">{{ type_labels.get(item.type, item.type) }}</span>
-                {% if item.book_kind == 'literature' %}
-                <span class="badge detail-kind-badge" title="日本普通小说：与文库出身的轻小说同区，但不属于轻小说">文学</span>
-                {% endif %}
-            {% if item.rating > 0 %}
-            {{ stars(item.rating) }}
-            <span>{{ '%.1f' % item.rating }}</span>
-            {% else %}
-            <span class="text-muted small">暂无评分</span>
-            {% endif %}
-            </span>
-            {# 题材 chip：不点进详情也能看出这片讲什么（至多 2 个，多了刷屏） #}
-            {% set card_tags = (tag_map.get(item.id) or [])[:2] %}
-            {% if card_tags %}
-            <span class="work-card-tags">
-                {% for name in card_tags %}<span class="work-card-tag">{{ name }}</span>{% endfor %}
-            </span>
-            {% endif %}
-            <span class="text-secondary work-card-summary">{{ item.summary[:60] }}{% if item.summary|length > 60 %}…{% endif %}</span>
-        </span>
-    </a>
+    {{ poster_card(item, 'card', tags=tag_map.get(item.id), favorites=favorite_counts.get(item.id, 0), strong=sort_label_key) }}
     {% endfor %}
 </div>
 {% else %}
-{# ===== B站式卡片视图（默认）：封面 + 标题 + 元数据行。
-   元数据行随排序自适应——点了排序每张卡都看得出变化：
-   rating→★ 前置加粗 / favorites→♥ 前置 / newest→年份前置；无排序回退默认序。
-   列宽与网格同源（auto-fill 动态列），卡片更轻：无卡身、无摘要，一屏作品数约翻倍。 #}
-<div class="works-grid works-grid--bili" id="works-list">
+{# ===== 网格视图（默认）：紧凑竖版海报 + 标题 + 元信息行，
+   封面只放类型签；评分/收藏/年份在封面下方一行，按当前排序把对应字段前置加粗。 #}
+<div class="works-grid" id="works-list">
     {% for item in contents %}
-    <a class="bili-card" href="/contents/{{ item.id }}">
-        <span class="bili-cover work-cover-box">
-            <span class="work-cover" aria-hidden="true">{{ item.title[:1] }}</span>
-            {% if item.image_url %}
-            <img class="work-cover" src="{{ thumb_src(item.image_url) }}" alt="{{ item.title }}封面" loading="lazy" width="400" height="600" decoding="async" onerror="this.style.display='none'">
-            {% endif %}
-            {# 封面左上徽标列：四色类型签 + 「文学」细分角标（book_kind=literature 时，
-               与网格视图同口径——默认视图也不能丢了这个区分） #}
-            <span class="bili-badges">
-                <span class="bili-type" data-type="{{ item.type }}">{{ type_labels.get(item.type, item.type) }}</span>
-                {% if item.book_kind == 'literature' %}
-                <span class="bili-kind detail-kind-badge" title="日本普通小说：与文库出身的轻小说同区，但不属于轻小说">文学</span>
-                {% endif %}
-            </span>
-            {# 当年新作角标：年份来自作品信息，不依赖排序 #}
-            {% if item.year and item.year >= current_year %}<span class="bili-new" title="{{ item.year }} 年作品">新</span>{% endif %}
-        </span>
-        <span class="bili-body">
-            <span class="bili-title">{{ item.title }}</span>
-            <span class="bili-meta">
-                {% if sort == 'favorites' %}
-                <span class="bili-fav bili-strong">♥ {{ fmt_count(favorite_counts.get(item.id, 0)) }}</span>
-                {% if item.rating > 0 %}<span class="bili-rating">★ {{ '%.1f' % item.rating }}</span>{% endif %}
-                {% if item.year %}<span class="bili-year">{{ item.year }}</span>{% endif %}
-                {% elif sort == 'newest' %}
-                {% if item.year %}<span class="bili-year bili-strong">{{ item.year }}</span>{% endif %}
-                {% if item.rating > 0 %}<span class="bili-rating">★ {{ '%.1f' % item.rating }}</span>{% endif %}
-                <span class="bili-fav">♥ {{ fmt_count(favorite_counts.get(item.id, 0)) }}</span>
-                {% else %}
-                {% if item.rating > 0 %}<span class="bili-rating bili-strong">★ {{ '%.1f' % item.rating }}</span>{% endif %}
-                <span class="bili-fav">♥ {{ fmt_count(favorite_counts.get(item.id, 0)) }}</span>
-                {% if item.year %}<span class="bili-year">{{ item.year }}</span>{% endif %}
-                {% endif %}
-            </span>
-        </span>
-    </a>
+    {{ poster_card(item, 'tile', favorites=favorite_counts.get(item.id, 0), strong=sort_label_key) }}
     {% endfor %}
 </div>
 {% endif %}
 
 {# 分页链接前缀：带上全部当前筛选条件，翻页不丢状态。
-   creator/year/media/source/sort 为空时不拼该参数；view 仅网格/列表时写。 #}
+   creator/year/media/source/sort 为空时不拼该参数；view 仅卡片/列表时写（网格是默认值）。 #}
 {% set pager_prefix = '/contents?q=' ~ q|urlencode ~ '&type=' ~ (content_type or '')|urlencode ~ '&tags=' ~ (tags|join(','))|urlencode ~ ('&creator=' ~ (creator or '')|urlencode if creator else '') ~ ('&year=' ~ (year or '')|urlencode if year else '') ~ ('&media=' ~ (media or '')|urlencode if media else '') ~ ('&source=' ~ (source_material or '')|urlencode if source_material else '') ~ ('&sort=' ~ (sort or '')|urlencode if sort else '') ~ ('&view=' ~ view if view else '') ~ '&' %}
 
 {% if total_pages > 1 %}

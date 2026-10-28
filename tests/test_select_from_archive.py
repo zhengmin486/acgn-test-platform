@@ -244,6 +244,14 @@ class TestHasAnimeMangaRelation:
         assert has_anime_manga_relation([{"id": 9, "relation": "漫画化"}])
         assert has_anime_manga_relation([{"id": 9, "relation": "动画化"}])
 
+    def test_novel_type_and_wording_hits(self):
+        """游戏改编自轻小说（type=1）或关系文案带「小说/轻小说/原作/改编」也算原作关联。"""
+        assert has_anime_manga_relation([{"id": 9, "type": 1, "relation": "游戏"}])
+        assert has_anime_manga_relation([{"id": 9, "relation": "小说原作"}])
+        assert has_anime_manga_relation([{"id": 9, "relation": "轻小说改编"}])
+        # 「游戏原声」不含原作信号，不算
+        assert not has_anime_manga_relation([{"id": 9, "relation": "游戏原声"}])
+
     def test_unrelated_shapes(self):
         assert not has_anime_manga_relation(None)
         assert not has_anime_manga_relation("bad")
@@ -308,8 +316,9 @@ class TestApplyIngestPolicy:
         kept, stats, _calls = self._run([anime, comic])
         assert [p["id"] for p in kept] == [7, 8]
         assert stats == {
-            "novel_dropped": 0, "game_galge": 0, "game_related": 0,
-            "game_dropped": 0, "game_fetch_failed": 0,
+            "novel_dropped": 0, "game_galge": 0, "game_adaptation": 0,
+            "game_anime_style": 0, "game_jrpg_indie": 0, "game_margin": 0,
+            "game_related": 0, "game_dropped": 0, "game_fetch_failed": 0,
         }
 
     def test_order_preserved(self):

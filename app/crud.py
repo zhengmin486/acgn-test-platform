@@ -5,6 +5,7 @@ MySQL 接入与 Alembic 迁移尚未落地。
 """
 
 import math
+import random
 import re
 import secrets
 import time
@@ -30,13 +31,16 @@ from sqlalchemy.orm import Session, aliased, defer, sessionmaker
 from app.config import settings
 from app.database import Base
 from app.fake_data import FAKE_CONTENTS
+from app.rating import MIN_RATING_COUNT, effective_rating
 from app.search_query import parse_query, season_variants
 from app.tagging import canonical_genre, expand_genre_names, split_tags
 from app.models import (
     AnimeSchedule,
+    AnonymousPersonaResult,
     Article,
     ArticleContentLink,
     ArticleEntity,
+    ArticleFavorite,
     ArticleTag,
     BangumiCollection,
     BilibiliFollow,
@@ -53,12 +57,14 @@ from app.models import (
     ContentTag,
     ContentViewHistory,
     EmailChangeToken,
+    EmailVerificationCode,
     EmailVerificationToken,
     Entity,
     ExecutionBatch,
     ExecutionRecord,
     InviteCode,
     PasswordResetToken,
+    PersonaLabelStat,
     PersonaReport,
     PhoneVerificationCode,
     ScheduleSyncRun,
@@ -172,10 +178,25 @@ def list_top_contents(db: Session, limit: int = 6) -> list[Content]:
     """评分榜：按评分从高到低取前 limit 条（首页推荐在「零命中」时回落用它）。"""
     stmt = (
         select(Content)
-        .order_by(Content.rating.desc(), Content.id.asc())
+        # 榜单按「有效评分」排：人数不足的（1 个人打的 10 分）按 0 沉底，
+        # 不再顶在评分榜 / 首页前面（2026-10-28）。
+        .order_by(_effective_rating_expr().desc(), Content.id.asc())
         .limit(limit)
     )
     return list(db.scalars(stmt))
+
+def list_contents_by_ids(db: Session, content_ids) -> list[Content]:
+    """按 id 批量取作品（选题式测试提交后回填作品用）。
+
+    返回顺序由数据库决定，不保证与传入顺序一致——调用方要按 id 回查就自己
+    建字典。上限由调用方保证：路由侧已把条数压到题面大小以内（最多一两百），
+    不会撞 SQLite 的 999 参数上限。
+    """
+    ids = [int(value) for value in content_ids]
+    if not ids:
+        return []
+    return list(db.scalars(select(Content).where(Content.id.in_(ids))).all())
+
 
 def get_content(db: Session, content_id: int) -> Content | None:
     """按主键查询，不存在返回 None（由路由层转 404）。"""
@@ -247,7 +268,7 @@ def _tag_idf_weights(db: Session) -> dict[int, float]:
 def list_related_contents_with_reasons(
     db: Session,
     content: Content,
-    limit: int = 6,
+    limit: int = 12,
     exclude_ids: Iterable[int] | None = None,
 ) -> list[tuple[Content, str]]:
     """详情页相关内容推荐：(作品, 推荐理由)，理由全部来自库内真实关联。
@@ -265,6 +286,14 @@ def list_related_contents_with_reasons(
     - ``exclude_ids``：调用方（详情页）传入系列区已展示的作品，默认去重；
     - 跨类型候选只在没有真实创作关系时降权（0.6），有关系的跨类型不降；
     - 候选不足就少给几条，允许空态，不强行填满。
+
+    **默认 12 条（2026-10-24，原 6）**：详情页海报网格
+    （.detail-poster-grid，auto-fill + --detail-card-min 150px）在 PC 各断点
+    实测 5 列（lg 936px）/ 6 列（xl 1116px）/ 7 列（xxl 1296px），6 条在 6/7
+    列宽只铺一行、末行空缺，版面明显发虚。12 条在最常见的 6 列宽正好排满 2
+    行；7 列末行 5/7、5 列末行 2/5 是已知取舍（与首页 HOME_RECOMMEND_MAX=100
+    同一哲学：不凑整除、不硬填）。手机 2 列排 6 行，区块在详情页最底部，
+    滚动成本可接受。
     """
     exclude = {int(value) for value in (exclude_ids or ())}
     exclude.add(content.id)
@@ -378,7 +407,7 @@ def list_related_contents_with_reasons(
 def list_related_contents(
     db: Session,
     content: Content,
-    limit: int = 6,
+    limit: int = 12,
     exclude_ids: Iterable[int] | None = None,
 ) -> list[Content]:
     """详情页相关内容推荐（只要作品、不要理由时用它）。
@@ -386,6 +415,7 @@ def list_related_contents(
     排序口径见 ``list_related_contents_with_reasons``：
     实体关系（原作 / 导演 / 制作公司 / 出版社 / 音乐插画）→ IDF 题材补位 →
     同类型榜单兜底。``exclude_ids`` 传系列区已展示的作品即可默认去重。
+    默认条数与 ``list_related_contents_with_reasons`` 保持一致（12）。
     """
     return [
         row
@@ -523,6 +553,9 @@ def replace_content_tags(db: Session, content_id: int, tag_names: list[str]) -> 
         tag = get_or_create_tag(db, name)
         db.add(ContentTag(content_id=content_id, tag_id=tag.id))
     db.commit()
+    # 标签变了，推荐索引必须作废：否则最长滞后 TAG_INDEX_TTL_SECONDS 才生效，
+    # 期间推荐仍按旧标签算（测试里改完标签立刻查推荐，不失效就会读到上一次的结果）。
+    invalidate_tag_index()
     return names
 
 
@@ -684,6 +717,7 @@ def replace_content_cast(db: Session, content_id: int, cast: list[dict]) -> int:
         seen.add(key)
         character_id = item.get("character_id")
         person_id = item.get("person_id")
+        relation = str(item.get("relation") or "").strip()[:10] or None
         rows.append(
             ContentCast(
                 content_id=content_id,
@@ -691,6 +725,7 @@ def replace_content_cast(db: Session, content_id: int, cast: list[dict]) -> int:
                 character_id=int(character_id) if character_id else None,
                 person_id=int(person_id) if person_id else None,
                 actor=actor,
+                relation=relation,
                 sort_order=int(item.get("sort_order") or index),
             )
         )
@@ -742,6 +777,91 @@ def list_content_facts(db: Session, content_id: int) -> list[tuple[str, str]]:
     return [(str(key), str(value)) for key, value in rows]
 
 
+def _build_tag_index(db: Session) -> tuple[dict, dict, set]:
+    """扫出「作品 → 规范题材标签」索引：(标量表, 标签表, 站内标签全集)。
+
+    只取打分真正需要的标量列，不取整个 Content 实体：「作品 × 标签」是十几万行
+    的 JOIN 结果，取实体等于把每一行都实例化成 ORM 对象（本函数只用其中几个
+    字段），而 Content.aliases 是 JSON 列，每行还会触发一次 json.loads。线上
+    12012 部作品实测首页 1.78s，96% 耗在这两件事上（2026-10-26 改）。
+    """
+    rows = db.execute(
+        select(
+            Content.id,
+            Content.bangumi_id,
+            Content.title,
+            Content.type,
+            Content.year,
+            Content.rating,
+            # 评分人数一起取：这些 dict 直接喂给卡片模板，缺了它卡片就无法
+            # 判断分数能不能显示，低票的 10 分会照样漏出来。
+            Content.rating_count,
+            Tag.name,
+        )
+        .join(ContentTag, ContentTag.content_id == Content.id)
+        .join(Tag, Tag.id == ContentTag.tag_id)
+        .order_by(Content.id, Tag.id)
+    ).all()
+    # 同一作品在结果里占多行（每个标签一行），标量只在首次登记即可
+    plain_by_id: dict[int, dict] = {}
+    tags_by_content: dict[int, set[str]] = {}
+    site_tags: set[str] = set()
+    for content_id, bangumi_id, title, content_type, year, rating, rating_count, tag_name in rows:
+        if content_id not in plain_by_id:
+            plain_by_id[content_id] = {
+                "id": content_id,
+                "bangumi_id": bangumi_id,
+                "title": title,
+                "type": content_type,
+                "year": year,
+                "rating": rating,
+                "rating_count": rating_count,
+            }
+        name = str(tag_name)
+        # 站内标签也归一到规范名：未洗过的长尾写法（「日常系」）能对上口味词
+        canonical = canonical_genre(name) or name
+        site_tags.update((name, canonical))
+        tags_by_content.setdefault(content_id, set()).add(canonical)
+    return plain_by_id, tags_by_content, site_tags
+
+
+# 「作品 × 题材标签」索引的进程内缓存：全站一份，按 TTL 复用（单位秒）。
+# 作品与标签都是低频写入，而每次重建要扫十几万行 JOIN——首页请求、同步后的
+# 报告重算、兜底推荐都会走这里，不缓存就是同样的活重复三遍（2026-10-28）。
+TAG_INDEX_TTL_SECONDS = 600
+# 按数据库 URL 分槽，而不是单槽全局变量：pytest 每个用例建自己的临时 SQLite
+# 文件，单槽会让 A 用例扫出来的索引被 B 用例继续用（2026-10-28 改）。线上只有一个
+# 库，实际就是单槽；多进程部署的注意事项见 _tag_index 的注释。
+_tag_index_cache: dict[str, tuple[float, tuple[dict, dict, set]]] = {}
+
+
+def _tag_index(db: Session) -> tuple[dict, dict, set]:
+    """取索引：TTL 内复用上次的扫描结果。
+
+    返回值全链路只读（打分时的 tags & avoided 是集合运算，不会就地改这两个集合），
+    所以同一库共享一份是安全的。
+
+    **前提：uvicorn 单 worker（无 --workers）**，因此进程内缓存不会读到另一个
+    进程的旧数据。若以后改成多 worker / gunicorn 多进程，每个进程各持一份缓存
+    会互相不一致，届时要么把 TTL 压到极低、要么换成进程外缓存——这一条务必同步改。
+    """
+    bind = db.get_bind()
+    url = getattr(bind, "url", None) or getattr(getattr(bind, "engine", None), "url", None)
+    key = str(url) if url is not None else "default"
+    now = time.monotonic()
+    cached = _tag_index_cache.get(key)
+    if cached is not None and now - cached[0] < TAG_INDEX_TTL_SECONDS:
+        return cached[1]
+    index = _build_tag_index(db)
+    _tag_index_cache[key] = (now, index)
+    return index
+
+
+def invalidate_tag_index() -> None:
+    """作品入库 / 标签变更后作废索引缓存，避免推荐仍按旧标签算（最长滞后 TTL）。"""
+    _tag_index_cache.clear()
+
+
 def recommend_contents(
     db: Session,
     *,
@@ -765,22 +885,9 @@ def recommend_contents(
     """
     exclude = {int(value) for value in (exclude_bangumi_ids or [])}
 
-    rows = db.execute(
-        select(Content, Tag.name)
-        .join(ContentTag, ContentTag.content_id == Content.id)
-        .join(Tag, Tag.id == ContentTag.tag_id)
-        .order_by(Content.id, Tag.id)
-    ).all()
-    content_by_id: dict[int, Content] = {}
-    tags_by_content: dict[int, set[str]] = {}
-    site_tags: set[str] = set()
-    for content, tag_name in rows:
-        content_by_id[content.id] = content
-        name = str(tag_name)
-        # 站内标签也归一到规范名：未洗过的长尾写法（「日常系」）能对上口味词
-        canonical = canonical_genre(name) or name
-        site_tags.update((name, canonical))
-        tags_by_content.setdefault(content.id, set()).add(canonical)
+    # 索引走进程内缓存：上面的 JOIN 每次重扫是首页最大的一笔开销，而作品与标签
+    # 都属于低频写入，TTL 内直接复用上一次的结果，打分口径与返回结构均未变。
+    plain_by_id, tags_by_content, site_tags = _tag_index(db)
 
     positive = expand_genre_names(positive_tags or [], site_tags)
     avoided = set(expand_genre_names(avoided_tags or [], site_tags))
@@ -793,8 +900,9 @@ def recommend_contents(
 
     scored: list[dict] = []
     for content_id, tags in tags_by_content.items():
-        content = content_by_id[content_id]
-        if content.bangumi_id is not None and int(content.bangumi_id) in exclude:
+        item = plain_by_id[content_id]
+        bangumi_id = item["bangumi_id"]
+        if bangumi_id is not None and int(bangumi_id) in exclude:
             continue
         if tags & avoided:
             continue
@@ -803,18 +911,29 @@ def recommend_contents(
             continue
         scored.append(
             {
-                "content_id": content.id,
-                "title": content.title,
-                "type": content.type,
-                "year": content.year,
-                "rating": float(content.rating or 0),
+                "content_id": item["id"],
+                "title": item["title"],
+                "type": item["type"],
+                "year": item["year"],
+                # rating 保留源站原值：展示端要连「人数」一起判断才渲染「--」；
+                # 但排序与加权一律用 effective_rating（人数不足按 0），
+                # 否则「1 个人打的 10 分」既排在最前、又被当成高分加权顶上首页
+                # （2026-10-28 实测就是这两个现象）。
+                "rating": float(item["rating"] or 0),
+                "rating_count": item["rating_count"],
                 "matched": matched[:3],
                 "score": sum(weights.get(name, 1.0) for name in matched) * 10
-                + float(content.rating or 0),
+                + effective_rating(item["rating"], item["rating_count"]),
             }
         )
 
-    scored.sort(key=lambda item: (-item["score"], -item["rating"], item["content_id"]))
+    scored.sort(
+        key=lambda item: (
+            -item["score"],
+            -effective_rating(item["rating"], item["rating_count"]),
+            item["content_id"],
+        )
+    )
     results = []
     for item in scored[: max(0, limit)]:
         results.append(
@@ -824,11 +943,76 @@ def recommend_contents(
                 "type": item["type"],
                 "year": item["year"],
                 "rating": item["rating"],
+                # 卡片要连人数一起判断分数能不能显示，缺了它首页仍会漏出 10.0
+                "rating_count": item["rating_count"],
                 "matched": item["matched"],
                 "reason": f"命中本命题材：{'、'.join(item['matched'])}",
             }
         )
     return results
+
+
+QUIZ_TYPES = ("anime", "comic", "game", "novel")
+# 热度池的倍数：每个类目先按热度倒序取「名额 × 本值」条作候选，再从中随机抽。
+# 太小则题目永远是那几部顶流；太大则混进大量冷门。
+QUIZ_POOL_FACTOR = 6
+
+
+def sample_quiz_contents(db: Session, size: int = 20, seed: object = 0) -> list[dict]:
+    """选题式成分测试的题面：按类目配额取样，热度打底 + 随机打散。
+
+    - **四个类目均分**名额（20 题 → 每类 5 张；100 题 → 每类 25 张）：站内动画
+      本来就是压倒性多数，按占比加权会让另外三类各分到一两张，问卷退化成
+      「你看过动画吗」，失去区分度；
+    - 每个类目先按「评分人数 + 评分」倒序圈一个热度池，**只取有本地封面的**
+      （image_url 为空的条目在卡面是灰块，观感很差），再从池里随机抽——兼顾
+      「有一定热度」与每次来都是新的一批；
+    - ``seed`` 决定抽到哪几张：同一 seed 题目稳定（刷新 / 回来接着选不会换题），
+      页面换一个 seed 就是「换一批」；
+    - 只 select 需要的标量列，不取 Content 实体：aliases 是 JSON 列，取实体会
+      每行触发一次 json.loads（首页那个 1.78s 的旧坑）。
+
+    已知可优化：没做系列去重（同一 IP 的多季可能被同时抽中），先把链路跑通。
+    """
+    per_type = max(1, int(size) // len(QUIZ_TYPES))
+    pool_limit = per_type * QUIZ_POOL_FACTOR
+    rng = random.Random(str(seed))
+    picked: list = []
+    for content_type in QUIZ_TYPES:
+        rows = db.execute(
+            select(
+                Content.id,
+                Content.title,
+                Content.type,
+                Content.year,
+                Content.rating,
+                Content.rating_count,
+                Content.image_url,
+            )
+            .where(
+                Content.type == content_type,
+                Content.image_url.is_not(None),
+                Content.image_url != "",
+            )
+            .order_by(
+                func.coalesce(Content.rating_count, 0).desc(), Content.rating.desc()
+            )
+            .limit(pool_limit)
+        ).all()
+        picked.extend(rows if len(rows) <= per_type else rng.sample(rows, per_type))
+    rng.shuffle(picked)
+    return [
+        {
+            "id": content_id,
+            "title": title,
+            "type": content_type,
+            "year": year,
+            "rating": rating,
+            "rating_count": rating_count,
+            "image_url": image_url,
+        }
+        for content_id, title, content_type, year, rating, rating_count, image_url in picked
+    ]
 
 
 # 首页「推荐作品」的编辑口味：站长的本命 / 避雷（站内标签口径，匹配时经 tagging 展开）。
@@ -1026,14 +1210,29 @@ def list_tags_with_counts(
     ``exclude`` 用于把不该出现在题材组的标签挡在 SQL 之外（形式载体与
     当前类型的专属词）：过滤必须发生在 limit 之前，否则高频形式词会
     把前 N 个名额吃光，题材组反而空了。
+
+    默认（``content_type=None``）只统计全站题材频率：``content_tags`` 已经把
+    标签与作品关联在一起，不需要再 ``JOIN contents`` 表。那一步冗余 join 会让
+    SQLite 把几十万行标签关联物化成临时表再聚合——线上 4000+ 题材、30 万行
+    关联时实测从 ~15ms 涨到 ~180ms（2026-10-26 改）。只有按类型过滤时才需要
+    join ``Content`` 来加 ``Content.type`` 的 where 条件。
     """
-    stmt = (
-        select(Tag.name, func.count(ContentTag.id))
-        .join(ContentTag, ContentTag.tag_id == Tag.id)
-        .join(Content, Content.id == ContentTag.content_id)
-    )
-    if content_type:
-        stmt = stmt.where(Content.type == content_type)
+    if content_type is not None:
+        # 按类型统计：必须 join Content 才能加类型过滤
+        stmt = (
+            select(Tag.name, func.count(ContentTag.id))
+            .select_from(ContentTag)
+            .join(Tag, Tag.id == ContentTag.tag_id)
+            .join(Content, Content.id == ContentTag.content_id)
+            .where(Content.type == content_type)
+        )
+    else:
+        # 全站统计：content_tags 已含 tag↔content 关联，无需再碰 contents 表
+        stmt = (
+            select(Tag.name, func.count(ContentTag.id))
+            .select_from(ContentTag)
+            .join(Tag, Tag.id == ContentTag.tag_id)
+        )
     if exclude:
         stmt = stmt.where(Tag.name.not_in(list(exclude)))
     stmt = (
@@ -1481,6 +1680,189 @@ def list_work_info_terms(db: Session) -> list[tuple[str, str, str | None, int, s
     return rows
 
 
+# ---------- ACGN 系游戏准入词表（资讯导入白名单，2026-10-23） ----------
+
+# 准入标签：只收明确的 ACG 向标签。RPG(471) / ACT(416) / AVG(280) 太宽——
+# 使命召唤、侠盗猎车手这类欧美 3A 也带这些标签，不能作为放行依据（线上实测）。
+ACGN_GAME_TAGS: tuple[str, ...] = ("Galgame", "乙女向", "同人", "JRPG")
+
+# 词条最短长度（回放 151 条线上真实数据后收紧，2026-10-23）：
+# 纯假名 4 字符、含汉字 3 字、纯 ASCII 5 字符。
+# 起点是「2 字也收」，实测「ツキ」「リラ」「海底」这类 2~3 字通用词条会在普通
+# 游戏稿里到处命中（サバキスタン→ツキ、リラックマ→リラ），把该拒的稿子放进来。
+# 人工 IP 表的别名不受这个限制——那是人工确认过的 IP，两个字也要生效。
+_MIN_KANA_TERM = 4
+_MIN_CJK_TERM = 3
+_MIN_ASCII_TERM = 5
+
+# 占位角色名：Bangumi 的角色字段里会用「主人公」「ヒロイン」这类泛指代替无名角色，
+# 它们出现在任何一篇游戏稿里都会命中（回放时「ほの暮しの庭」因为「主人公」被放行）。
+_PLACEHOLDER_CHARACTERS: frozenset[str] = frozenset({
+    "主人公", "ヒロイン", "モブ", "村人", "兵士", "住民", "店員", "少年", "少女",
+    "主人公(仮)", "プレイヤー", "勇者", "魔王",
+})
+
+
+def _split_alias_blob(raw) -> list[str]:
+    """把 aliases 里的脏格式拆成干净别名。
+
+    Bangumi 导入过程留下过 ``["{\\n[中文别名|xx]\\n[English]\\n}"]`` 这种把多个
+    别名塞进一个字符串的记录，直接展开会得到一个永远匹配不到的长名字。
+    这里按 ``[...]`` 拆开，并去掉 ``中文别名|`` 前缀。正常别名原样返回。
+    """
+    out: list[str] = []
+    for item in raw or []:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        if "\n[" in text or text.startswith("{"):
+            for match in re.findall(r"\[([^\[\]]+)\]", text):
+                name = match.split("|", 1)[-1].strip()
+                if name:
+                    out.append(name)
+        else:
+            out.append(text)
+    return out
+
+
+def _usable_game_term(name) -> bool:
+    """词条是否够长（太短的会在正文里误匹配）。
+
+    分三档：纯 ASCII 5 字符、纯假名 4 字符、含汉字 3 字。
+    「ツキ」「リラ」这类 2~3 字词条在日语标题里到处命中，必须丢掉。
+    """
+    text = str(name or "").strip()
+    if not text:
+        return False
+    if all(ord(ch) < 128 for ch in text):
+        return len(text) >= _MIN_ASCII_TERM
+    kana = sum(1 for ch in text if "\u3040" <= ch <= "\u30ff")
+    non_ascii = sum(1 for ch in text if ord(ch) >= 128)
+    if kana == non_ascii:  # 全假名（含长音符）
+        return len(text) >= _MIN_KANA_TERM
+    return len(text) >= _MIN_CJK_TERM
+
+
+def list_acgn_game_terms(
+    db: Session, manual_aliases: Iterable[str] = ()
+) -> list[str]:
+    """ACGN 系游戏的实体词表（资讯导入白名单）。
+
+    准入集合（哪些游戏算 ACGN 系）：
+    1. 标签 ∈ ``ACGN_GAME_TAGS``（Galgame / 乙女向 / 同人 / JRPG）；
+    2. 与动画 / 漫画 / 轻小说共享 series（有明确改编关联）；
+    3. 命中人工 IP 表（补宝可梦这类没有 ACG 标签的 IP，以及二游）。
+
+    对每个准入作品展开 6 类词条：**标题 / 原名 / 别名 / 系列名 / 角色名 / 创作者公司**。
+    这样「セイバー新宿ver.」「Fate/hollow ataraxia 复刻」这种标题里没有「Galgame」
+    字样的资讯也能命中；而 Call of Duty / 侠盗猎车手不在准入集合里，它们的标题、
+    角色与公司词根本不会进词表——这比维护一张 3A 黑名单可靠。
+
+    每轮导入调用一次即可（cron 每轮新进程），不要按文章逐条调用：2464 部游戏
+    展开成数千词条，逐篇重算是浪费。
+    """
+    game_rows = db.execute(
+        select(
+            Content.id,
+            Content.title,
+            Content.title_original,
+            Content.aliases,
+            Content.series_id,
+        ).where(Content.type == "game")
+    ).all()
+
+    tagged_ids = set(
+        db.scalars(
+            select(ContentTag.content_id)
+            .join(Tag, Tag.id == ContentTag.tag_id)
+            .where(Tag.name.in_(ACGN_GAME_TAGS))
+        )
+    )
+    # 非游戏作品占用的系列：游戏与其同系列 = 有改编关联（动画化 / 漫画化）。
+    non_game_series = set(
+        db.scalars(
+            select(Content.series_id)
+            .where(Content.type != "game", Content.series_id.is_not(None))
+            .distinct()
+        )
+    )
+    manual = [str(alias).strip().lower() for alias in manual_aliases]
+    manual = [alias for alias in manual if alias]
+
+    allowed: set[int] = set()
+    for content_id, title, original, aliases, series_id in game_rows:
+        if content_id in tagged_ids:
+            allowed.add(content_id)
+            continue
+        if series_id is not None and series_id in non_game_series:
+            allowed.add(content_id)
+            continue
+        if manual:
+            names = [title, original, *_split_alias_blob(aliases)]
+            haystack = " ".join(str(name) for name in names if name).lower()
+            if any(alias in haystack for alias in manual):
+                allowed.add(content_id)
+
+    terms: list[str] = []
+    seen: set[str] = set()
+
+    def _add(name, *, manual: bool = False) -> None:
+        text = str(name or "").strip()
+        if not text or text in seen:
+            return
+        if not manual and not _usable_game_term(text):
+            return
+        seen.add(text)
+        terms.append(text)
+
+    # 人工表的别名本身也进词表：库里没有该 IP 的游戏条目时（例如只有动画、或游戏
+    # 未收录），作品扩展一条都产生不了，这个别名就是唯一的命中途径。
+    # 人工确认过的 IP 不做最短长度过滤（「月姫」「NieR」这种短名也要生效）。
+    for alias in manual_aliases:
+        _add(alias, manual=True)
+
+    if not allowed:
+        return terms
+
+    series_names: dict[int, str] = {}
+    series_ids = {
+        row[4] for row in game_rows if row[0] in allowed and row[4] is not None
+    }
+    if series_ids:
+        series_names = dict(
+            db.execute(select(Series.id, Series.name).where(Series.id.in_(series_ids))).all()
+        )
+
+    for content_id, title, original, aliases, series_id in game_rows:
+        if content_id not in allowed:
+            continue
+        _add(title)
+        _add(original)
+        for alias in _split_alias_blob(aliases):
+            _add(alias)
+        if series_id is not None:
+            _add(series_names.get(series_id))
+
+    for character in db.scalars(
+        select(ContentCast.character)
+        .where(ContentCast.content_id.in_(allowed))
+        .distinct()
+    ):
+        if str(character or "").strip() in _PLACEHOLDER_CHARACTERS:
+            continue
+        _add(character)
+
+    for entity_name in db.scalars(
+        select(Entity.name)
+        .join(ContentEntityLink, ContentEntityLink.entity_id == Entity.id)
+        .where(ContentEntityLink.content_id.in_(allowed))
+        .distinct()
+    ):
+        _add(entity_name)
+
+    return terms
+
+
 def replace_article_entities(
     db: Session,
     article_id: int,
@@ -1689,6 +2071,29 @@ def list_content_entity_roles(
     return grouped
 
 
+def list_content_entity_roles_typed(
+    db: Session,
+    content_id: int,
+) -> dict[str, list[tuple[str, str]]]:
+    """与 list_content_entity_roles 同构，但每组元素带实体类型：(名称, person/company)。
+
+    详情页要把人（导演 / 音乐 / 角色设计 …）挪进 Staff 表、只在「关系」里留
+    公司，这需要类型信息；老函数保持原返回值不破坏既有调用与断言。
+    """
+    grouped: dict[str, list[tuple[str, str]]] = {}
+    rows = db.execute(
+        select(ContentEntityLink.role, Entity.name, Entity.entity_type)
+        .join(Entity, Entity.id == ContentEntityLink.entity_id)
+        .where(ContentEntityLink.content_id == content_id)
+        .order_by(ContentEntityLink.id)
+    ).all()
+    for role, name, entity_type in rows:
+        grouped.setdefault(role, []).append(
+            (str(name), str(entity_type or ENTITY_TYPE_PERSON))
+        )
+    return grouped
+
+
 def count_content_entity_links(db: Session, content_id: int) -> int:
     """某作品的作者/公司关联数（CLI 汇总与去重跳过判断用）。"""
     return (
@@ -1703,9 +2108,22 @@ def count_content_entity_links(db: Session, content_id: int) -> int:
 
 def delete_content_entity_link(db: Session, link_id: int) -> bool:
     """删除单条作品-实体关联（管理端手工纠错），返回是否删除。"""
-    result = db.execute(sa_delete(ContentEntityLink).where(ContentEntityLink.id == link_id))
+    return delete_content_entity_links(db, [link_id]) > 0
+
+
+def delete_content_entity_links(db: Session, ids) -> int:
+    """批量删除作品-实体关联（管理端多选删除），返回删除行数。
+
+    ids 先去重再删：勾选框按关联行提交，同一 id 重复提交会导致行数统计偏大。
+    """
+    cleaned = sorted({int(item) for item in ids if str(item).strip().isdigit()})
+    if not cleaned:
+        return 0
+    result = db.execute(
+        sa_delete(ContentEntityLink).where(ContentEntityLink.id.in_(cleaned))
+    )
     db.commit()
-    return bool(result.rowcount)
+    return result.rowcount or 0
 
 
 def add_content_entity_link(
@@ -1783,6 +2201,39 @@ def list_entity_contents(
     if limit is not None:
         stmt = stmt.limit(limit)
     return list(db.scalars(stmt))
+
+
+def list_entity_contents_with_roles(
+    db: Session,
+    entity_id: int,
+    limit: int | None = None,
+) -> list[tuple[Content, list[str]]]:
+    """某实体的作品 + 该实体在每部作品里的职责（原作 / 动画制作 / 导演 …）。
+
+    与 list_entity_contents 同一口径（评分降序、同分按 id、内连接去重），
+    但每部作品附带职责列表：同一作品以多个角色关联同一实体时全部带上
+    （联合唯一 (content_id, entity_id, role) 保证不重复）。供 /creators
+    实体页展示「这部作品里他是干嘛的」。
+    """
+    rows = db.execute(
+        select(Content, ContentEntityLink.role)
+        .join(ContentEntityLink, ContentEntityLink.content_id == Content.id)
+        .where(ContentEntityLink.entity_id == entity_id)
+        .order_by(Content.rating.desc(), Content.id)
+    ).all()
+    merged: dict[int, tuple[Content, list[str]]] = {}
+    for content, role in rows:
+        entry = merged.get(content.id)
+        if entry is None:
+            entry = (content, [])
+            merged[content.id] = entry
+        role = str(role)
+        if role and role not in entry[1]:
+            entry[1].append(role)
+    result = list(merged.values())
+    if limit is not None:
+        result = result[:limit]
+    return result
 
 
 def get_or_create_series(db: Session, name: str) -> Series:
@@ -2098,6 +2549,7 @@ def list_articles_page(
     page: int = 1,
     page_size: int = ARTICLES_PAGE_SIZE,
     published_only: bool = True,
+    first_page_extra: int = 0,
 ) -> tuple[int, list[Article]]:
     """资讯列表页的全量分页查询：按发布时间从新到旧，可按来源/分类筛选 + 关键词搜索。
 
@@ -2106,6 +2558,11 @@ def list_articles_page(
       不做类别配额，只做分页；模板文案「共 N 篇资讯 · 按发布时间从新到旧排列」
       就是照这个口径写的。
     - 首页 / 的精选位仍走 list_home_feed（折叠官方 PR + 优先级排序 + 单类别配额）。
+
+    ``first_page_extra``：第一页额外多取几条。列表页第一页有一条独立的头条位
+    （`articles[0]`），剩下的才进网格——不补这一条，网格就是 ``page_size - 1`` 条，
+    桌面 4 列时最后一行空一格（2026-10-23 用户报「第一页少一个作品」）。
+    补 1 条后第一页是「1 头条 + page_size 条网格」，后续页偏移量相应顺延。
 
     返回 (total, items)：total 是筛选后的全量条数，供「第 x / y 页」与计数展示。
     """
@@ -2120,18 +2577,35 @@ def list_articles_page(
     if q:
         stmt = stmt.where(_article_keyword_condition(q))
 
+    extra = max(0, first_page_extra)
     total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    if page <= 1:
+        offset = 0
+        limit = page_size + extra
+    else:
+        # 第一页吃掉了 extra 条，后面的页全部往后顺延，避免同一条资讯出现两次。
+        offset = extra + (page - 1) * page_size
+        limit = page_size
     items = list(
         db.scalars(
             stmt.order_by(Article.published_at.desc(), Article.id.desc())
-            .offset(max(0, page - 1) * page_size)
-            .limit(page_size)
+            .offset(offset)
+            .limit(limit)
             # 列表页不渲染正文（body 是最大的列，资讯正文动辄几十 KB）：
             # 延迟加载，行对象在需要时才会补查这一列，列表 SQL 不再拖全量正文。
             .options(defer(Article.body))
         )
     )
     return total, items
+
+
+def articles_page_total_pages(total: int, page_size: int, first_page_extra: int = 0) -> int:
+    """资讯列表页的总页数（第一页多取 extra 条，剩余条数按 page_size 折算）。"""
+    extra = max(0, first_page_extra)
+    rest = max(0, total - extra)
+    if total <= 0:
+        return 1
+    return max(1, (rest + page_size - 1) // page_size)
 
 
 def article_source_counts(
@@ -2285,6 +2759,21 @@ def _title_hit(pattern: str):
     )
 
 
+def _effective_rating_expr():
+    """排序用的「有效评分」SQL 表达式：评分人数不足时按 0 参与排序。
+
+    与 app.rating.effective_rating 同一口径，只是 order_by 必须落在 SQL 里
+    （数据库排序，不能拿 Python 值排）。这样「1 个人打的 10 分」就不会
+    顶在「评分最高」的最前面，而是沉到末尾（2026-10-28）。
+    人数未知（NULL）保留原值——还没回填的存量行不该被误伤成 0。
+    """
+    return case(
+        (Content.rating_count.is_(None), Content.rating),
+        (Content.rating_count >= MIN_RATING_COUNT, Content.rating),
+        else_=0.0,
+    )
+
+
 def _content_search_stmt(
     keyword: str,
     content_type: str | None,
@@ -2383,15 +2872,15 @@ def _content_search_stmt(
             .scalar_subquery()
         )
         stmt = stmt.order_by(
-            favorite_count.desc(), Content.rating.desc(), Content.id.asc()
+            favorite_count.desc(), _effective_rating_expr().desc(), Content.id.asc()
         )
     elif sort == "rating":
-        stmt = stmt.order_by(Content.rating.desc(), Content.id.asc())
+        stmt = stmt.order_by(_effective_rating_expr().desc(), Content.id.asc())
     elif sort == "newest":
         # 年份倒序（无发行年的排最后），同年再按评分降序兜底，
         # 否则同一年的一千部作品内部顺序全靠 id，看着像随机。
         stmt = stmt.order_by(
-            Content.year.desc(), Content.rating.desc(), Content.id.asc()
+            Content.year.desc(), _effective_rating_expr().desc(), Content.id.asc()
         )
     elif pattern is not None:
         rank = case(
@@ -2399,7 +2888,7 @@ def _content_search_stmt(
             (_info_recall(pattern), 2),
             else_=1,
         )
-        stmt = stmt.order_by(rank.desc(), Content.rating.desc(), Content.id)
+        stmt = stmt.order_by(rank.desc(), _effective_rating_expr().desc(), Content.id)
     else:
         stmt = stmt.order_by(Content.id)
     return stmt
@@ -2482,7 +2971,10 @@ def search_contents_page(
         source_material,
         sort,
     )
-    total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
+    # 计数子查询去掉 ORDER BY 让 SQLite 能扁平化：否则它会把整张 contents
+    # （含 summary / aliases 等大文本列）全字段物化成临时表再数行数，耗时随
+    # 作品文本量暴涨。排序只影响取数、不影响总数，去掉零副作用（2026-10-26）。
+    total = db.scalar(select(func.count()).select_from(stmt.order_by(None).subquery())) or 0
     items = list(
         db.scalars(stmt.offset((page - 1) * page_size).limit(page_size))
     )
@@ -2724,6 +3216,36 @@ def ensure_content_year_column(engine: Engine) -> list[str]:
     return added
 
 
+# 评分人数（Bangumi rating.total）。有了它才能区分「真高分」和「1 个人打的 10 分」，
+# 见 app/rating.py 的口径说明。历史库的行留 NULL，表示「人数未知」——
+# 未知按可信处理（不会导致存量作品无法显示评分），由回填脚本逐步补齐。
+_CONTENT_RATING_COUNT_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("rating_count", "INTEGER"),
+)
+
+
+def ensure_content_rating_count_column(engine: Engine) -> list[str]:
+    """为已存在的 contents 表补齐 rating_count 列，幂等，返回新增列名。
+
+    与 ensure_content_year_column 同一模式：create_all 只建新表、不给老表加列，
+    历史库必须在这里 ALTER。不回填任何值，回填交给
+    scripts/backfill_rating_count.py（要回源查，不能凭空造）。
+    """
+    inspector = inspect(engine)
+    if "contents" not in inspector.get_table_names():
+        return []
+
+    existing = {column["name"] for column in inspector.get_columns("contents")}
+    added: list[str] = []
+    for name, ddl in _CONTENT_RATING_COUNT_COLUMNS:
+        if name in existing:
+            continue
+        with engine.begin() as connection:
+            connection.execute(text(f"ALTER TABLE contents ADD COLUMN {name} {ddl}"))
+        added.append(name)
+    return added
+
+
 # 封面按需下载：低热作品先只记远端地址，被访问时再下载回填 image_url。
 _CONTENT_REMOTE_IMAGE_COLUMNS: tuple[tuple[str, str], ...] = (
     ("remote_image_url", "VARCHAR(500)"),
@@ -2818,6 +3340,24 @@ def ensure_content_meta_failed_column(engine: Engine) -> list[str]:
     with engine.begin() as connection:
         connection.execute(text("ALTER TABLE contents ADD COLUMN meta_failed_at DATETIME"))
     return ["meta_failed_at"]
+
+
+def ensure_content_cast_relation_column(engine: Engine) -> list[str]:
+    """为已存在的 content_cast 表补齐 relation 列（Bangumi 角色重要度），幂等。
+
+    无 Alembic：create_all 只建新表、不给老表加列，历史库必须在这里 ALTER。
+    历史行留 NULL（重刷元数据后才有值），排序与展示按「未知」兜底，不会报错。
+    """
+    inspector = inspect(engine)
+    if "content_cast" not in inspector.get_table_names():
+        return []
+
+    existing = {column["name"] for column in inspector.get_columns("content_cast")}
+    if "relation" in existing:
+        return []
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE content_cast ADD COLUMN relation VARCHAR(10)"))
+    return ["relation"]
 
 
 def ensure_content_summary_original_column(engine: Engine) -> list[str]:
@@ -3136,6 +3676,32 @@ def ensure_schedule_work_info_columns(engine: Engine) -> list[str]:
     return added
 
 
+def ensure_schedule_time_columns(engine: Engine) -> list[str]:
+    """为已存在的 anime_schedules 表补齐 air_date / box_office 列，幂等，返回新增列名。
+
+    - air_date：特殊分类按时间分组排版与排序的依据（ISO 日期 YYYY-MM-DD）；
+    - box_office：内地总票房（仅大陆引进剧场版页有），如「内地总票房￥6.78亿」。
+
+    历史行留 NULL，由下一次 scripts/sync_yuc_schedule.py 同步时从 broadcast_note
+    与票房块回填（upsert 的 compare 字段已含这两列）。
+    """
+    inspector = inspect(engine)
+    if "anime_schedules" not in inspector.get_table_names():
+        return []
+
+    existing = {column["name"] for column in inspector.get_columns("anime_schedules")}
+    added: list[str] = []
+    if "air_date" not in existing:
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE anime_schedules ADD COLUMN air_date VARCHAR(10)"))
+        added.append("air_date")
+    if "box_office" not in existing:
+        with engine.begin() as connection:
+            connection.execute(text("ALTER TABLE anime_schedules ADD COLUMN box_office VARCHAR(50)"))
+        added.append("box_office")
+    return added
+
+
 def ensure_schedule_link_columns(engine: Engine) -> list[str]:
     """为已存在的 anime_schedules 表补齐档期↔作品库关联列，幂等，返回新增列名。
 
@@ -3181,6 +3747,26 @@ def ensure_schedule_link_columns(engine: Engine) -> list[str]:
     return added
 
 
+def ensure_invite_role_column(engine: Engine) -> list[str]:
+    """为 invite_codes 表补齐 role 列（幂等）。
+
+    该列记录邀请码登记的目标角色（user / admin），注册消费时以码内记录为准建号。
+    历史库 ALTER 时带 NOT NULL DEFAULT 'user'，既有行统一回填为普通用户，
+    不改动任何已存在数据语义；新库由 create_all 建好带默认值的列。
+    """
+    inspector = inspect(engine)
+    if "invite_codes" not in inspector.get_table_names():
+        return []
+    existing = {column["name"] for column in inspector.get_columns("invite_codes")}
+    if "role" in existing:
+        return []
+    with engine.begin() as connection:
+        connection.execute(
+            text("ALTER TABLE invite_codes ADD COLUMN role VARCHAR(20) NOT NULL DEFAULT 'user'")
+        )
+    return ["role"]
+
+
 def init_db(engine: Engine) -> int:
     """建表（如无）并播种，返回播种行数。
 
@@ -3201,10 +3787,12 @@ def init_db(engine: Engine) -> int:
     ensure_content_book_kind_column(engine)
     ensure_content_title_alias_columns(engine)
     ensure_content_summary_original_column(engine)
+    ensure_content_rating_count_column(engine)
     ensure_favorite_status_columns(engine)
     ensure_content_favorite_content_index(engine)
     ensure_content_meta_columns(engine)
     ensure_content_meta_failed_column(engine)
+    ensure_content_cast_relation_column(engine)
     ensure_persona_report_columns(engine)
     ensure_test_case_source_column(engine)
     ensure_article_image_column(engine)
@@ -3213,11 +3801,18 @@ def init_db(engine: Engine) -> int:
     ensure_article_major_column(engine)
     ensure_content_submission_extra_columns(engine)
     ensure_schedule_work_info_columns(engine)
+    ensure_schedule_time_columns(engine)
     ensure_schedule_link_columns(engine)
+    ensure_invite_role_column(engine)
     db = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)()
     try:
         seeded = seed_if_empty(db)
         ensure_default_users(db)
+        # 首页海报配置行（单行，默认「关闭自动更新」）：表由 create_all 建好，
+        # 这里保证配置行存在，重启后模式 / 频率 / 游标全部延续。
+        from app import home_posters  # 函数内 import：home_posters 依赖 models，不进顶层循环
+
+        home_posters.ensure_config(db)
         return seeded
     finally:
         db.close()
@@ -3950,6 +4545,168 @@ def consume_phone_code(
     return True
 
 
+# ---------- 注册邮箱验证码 ----------
+# 注册流程在「建号之前」验证邮箱，所以验证码不属于任何账号：只按邮箱寻址，
+# 与短信验证码（按 user_id 寻址）分开成表，避免给「还没有账号」的记录留空 user_id。
+
+EMAIL_PURPOSE_REGISTER = "register"
+EMAIL_PURPOSES = (EMAIL_PURPOSE_REGISTER,)
+
+
+def _random_digits(count: int) -> str:
+    """生成 count 位随机数字验证码（secrets，不用 random）。"""
+    return "".join(secrets.choice("0123456789") for _ in range(count))
+
+
+def issue_email_code(
+    db: Session,
+    email: str,
+    purpose: str = EMAIL_PURPOSE_REGISTER,
+    ip: str | None = None,
+) -> str:
+    """签发邮箱验证码，返回明文（唯一一次出现的地方）。
+
+    - 库中只存 SHA-256 哈希，明文只在本返回值与邮件正文里出现；
+    - 该邮箱同类未消费的旧码一并作废，保证「同一时刻只有一个有效码」；
+    - 冷却与频率限制由路由层判断（``email_code_cooldown_remaining`` /
+      ``email_code_send_blocked_reason``），本函数只负责签发。
+    """
+    if purpose not in EMAIL_PURPOSES:
+        raise ValueError("验证码用途无效")
+    address = normalize_email(email)
+    if not address:
+        raise ValueError("邮箱不能为空")
+    now = datetime.now()
+    for row in db.scalars(
+        select(EmailVerificationCode).where(
+            EmailVerificationCode.email == address,
+            EmailVerificationCode.purpose == purpose,
+            EmailVerificationCode.consumed_at.is_(None),
+        )
+    ):
+        row.consumed_at = now
+    code = _random_digits(settings.email_code_digits)
+    db.add(
+        EmailVerificationCode(
+            email=address,
+            purpose=purpose,
+            code_hash=hash_token(f"{address}:{code}"),
+            ip=(ip or "").strip() or None,
+            expires_at=now + timedelta(seconds=settings.email_code_ttl_seconds),
+            created_at=now,
+        )
+    )
+    db.commit()
+    return code
+
+
+def email_code_cooldown_remaining(
+    db: Session, email: str, purpose: str = EMAIL_PURPOSE_REGISTER
+) -> int:
+    """该邮箱距下次可发码还剩多少秒（0 = 可以立即发送）。"""
+    address = normalize_email(email)
+    if not address:
+        return 0
+    created = db.scalar(
+        select(func.max(EmailVerificationCode.created_at)).where(
+            EmailVerificationCode.email == address,
+            EmailVerificationCode.purpose == purpose,
+        )
+    )
+    if created is None:
+        return 0
+    remaining = settings.email_resend_cooldown_seconds - (
+        datetime.now() - created
+    ).total_seconds()
+    return max(0, int(remaining))
+
+
+def _count_email_codes_since(
+    db: Session, since: datetime, *, email: str | None = None, ip: str | None = None
+) -> int:
+    """统计窗口内已签发的验证码条数（邮箱维度或 IP 维度）。"""
+    stmt = select(func.count()).select_from(EmailVerificationCode).where(
+        EmailVerificationCode.created_at >= since
+    )
+    if email:
+        stmt = stmt.where(EmailVerificationCode.email == normalize_email(email))
+    if ip:
+        stmt = stmt.where(EmailVerificationCode.ip == ip)
+    return db.scalar(stmt) or 0
+
+
+def email_code_send_blocked_reason(
+    db: Session, email: str, ip: str | None = None
+) -> str:
+    """发码频率限制：返回非空串表示本次应拒绝发送（串即给用户的原因）。"""
+    now = datetime.now()
+    address = normalize_email(email)
+    if address and _count_email_codes_since(
+        db,
+        now - timedelta(seconds=settings.email_code_email_window_seconds),
+        email=address,
+    ) >= settings.email_code_max_per_email:
+        return "该邮箱申请验证码过于频繁，请稍后再试"
+    if ip and _count_email_codes_since(
+        db,
+        now - timedelta(seconds=settings.email_code_ip_window_seconds),
+        ip=ip,
+    ) >= settings.email_code_max_per_ip:
+        return "当前网络申请验证码过于频繁，请稍后再试"
+    return ""
+
+
+def pending_email_code(
+    db: Session, email: str, purpose: str = EMAIL_PURPOSE_REGISTER
+) -> EmailVerificationCode | None:
+    """该邮箱当前「未消费且未过期」的验证码记录（不含明文）。"""
+    address = normalize_email(email)
+    if not address:
+        return None
+    now = datetime.now()
+    return db.scalar(
+        select(EmailVerificationCode)
+        .where(
+            EmailVerificationCode.email == address,
+            EmailVerificationCode.purpose == purpose,
+            EmailVerificationCode.consumed_at.is_(None),
+            EmailVerificationCode.expires_at >= now,
+        )
+        .order_by(
+            EmailVerificationCode.created_at.desc(), EmailVerificationCode.id.desc()
+        )
+    )
+
+
+def verify_email_code(
+    db: Session, email: str, code: str, purpose: str = EMAIL_PURPOSE_REGISTER
+) -> tuple[bool, str]:
+    """校验**并消费**邮箱验证码，返回 ``(是否通过, 说明)``。
+
+    - 通过：立即写 consumed_at（同一码不能再用第二次），说明为空串；
+    - 失败：区分「没有有效验证码 / 验证码不正确 / 错误次数过多」，
+      每次失败 attempts 加一，超过 ``email_code_max_attempts`` 直接作废该码。
+    """
+    address = normalize_email(email)
+    if not address:
+        return False, "邮箱不能为空"
+    record = pending_email_code(db, address, purpose)
+    if record is None:
+        return False, "验证码不存在或已失效，请重新发送验证码"
+    record.attempts += 1
+    submitted = (code or "").strip()
+    if not submitted or record.code_hash != hash_token(f"{address}:{submitted}"):
+        if record.attempts >= settings.email_code_max_attempts:
+            record.consumed_at = datetime.now()
+            db.commit()
+            return False, "验证码错误次数过多，请重新发送验证码"
+        db.commit()
+        return False, "验证码不正确"
+    record.consumed_at = datetime.now()
+    db.commit()
+    return True, ""
+
+
 def count_favorites(
     db: Session, user_id: int, content_type: str | None = None
 ) -> int:
@@ -4098,6 +4855,97 @@ def list_favorites(
             base.order_by(
                 ContentFavorite.created_at.desc(),
                 Content.id.desc(),
+            )
+            .offset((page - 1) * page_size)
+            .limit(page_size)
+        )
+    )
+    return total, items
+
+
+# ---------- 资讯收藏（2026-10-24） ----------
+# 与作品收藏（ContentFavorite）同一套写法，但独立成表：主体是 Article，
+# 没有「标注」概念（作品收藏的 status 是看没看过，资讯不存在这个状态），
+# 所以取消收藏就是删行，不存在「留空壳行」的分支。
+
+
+def is_article_favorite(db: Session, user_id: int, article_id: int) -> bool:
+    """是否已收藏该资讯（详情页按钮状态）。"""
+    return (
+        db.scalar(
+            select(ArticleFavorite.id).where(
+                ArticleFavorite.user_id == user_id,
+                ArticleFavorite.article_id == article_id,
+            )
+        )
+        is not None
+    )
+
+
+def add_article_favorite(db: Session, user_id: int, article_id: int) -> bool:
+    """收藏资讯；已收藏时返回 False（幂等，不产生重复行）。"""
+    if is_article_favorite(db, user_id, article_id):
+        return False
+    db.add(ArticleFavorite(user_id=user_id, article_id=article_id))
+    db.commit()
+    return True
+
+
+def remove_article_favorite(db: Session, user_id: int, article_id: int) -> bool:
+    """取消收藏；返回是否真的取消了（幂等）。"""
+    result = db.execute(
+        sa_delete(ArticleFavorite).where(
+            ArticleFavorite.user_id == user_id,
+            ArticleFavorite.article_id == article_id,
+        )
+    )
+    db.commit()
+    return bool(result.rowcount)
+
+
+def clear_article_favorites(db: Session, user_id: int) -> int:
+    """清空资讯收藏，返回清除条数。"""
+    result = db.execute(
+        sa_delete(ArticleFavorite).where(ArticleFavorite.user_id == user_id)
+    )
+    db.commit()
+    return result.rowcount or 0
+
+
+def count_article_favorites(db: Session, user_id: int) -> int:
+    """资讯收藏总数（Tab 徽标）。
+
+    **内连接 articles，与列表口径一致**：资讯被管理员删除后关系行仍保留，
+    但列表里查不到——徽标若按关系行计数就会出现「显示 1 条、点进去是空的」。
+    """
+    return (
+        db.scalar(
+            select(func.count(ArticleFavorite.id))
+            .select_from(ArticleFavorite)
+            .join(Article, ArticleFavorite.article_id == Article.id)
+            .where(ArticleFavorite.user_id == user_id)
+        )
+        or 0
+    )
+
+
+def list_article_favorites(
+    db: Session, user_id: int, page: int = 1, page_size: int = 20
+) -> tuple[int, list[Article]]:
+    """收藏资讯分页（按收藏时间倒序）：内连接 articles，资讯已删则不展示。"""
+    base = (
+        select(Article)
+        .join(ArticleFavorite, ArticleFavorite.article_id == Article.id)
+        .where(ArticleFavorite.user_id == user_id)
+    )
+    total = (
+        db.scalar(select(func.count()).select_from(base.order_by(None).subquery())) or 0
+    )
+    items = list(
+        db.scalars(
+            base.order_by(
+                ArticleFavorite.created_at.desc(),
+                Article.id.desc(),
             )
             .offset((page - 1) * page_size)
             .limit(page_size)
@@ -4274,6 +5122,33 @@ def list_user_taste_rows(
             )
         )
     return result
+
+
+def count_user_taste_rows(db: Session, user_id: int) -> tuple[int, int, int]:
+    """口味原料的纯计数：(总条数, 收藏数, 标注数)。
+
+    与 ``list_user_taste_rows`` 完全同口径（行存在即有关系：favorited 或 status
+    非空；作品已删则内连接落空不计），但只做一次聚合查询。原本页面为了显示一个
+    数字要付两份代价：先把整批 Content 实例化，再顺带跑一次 list_content_tags_map
+    把标签批量拉出来——而标签在只取 len() 的场景里根本用不上（2026-10-28 改）。
+    """
+    row = db.execute(
+        select(
+            func.count(),
+            func.sum(case((ContentFavorite.favorited.is_(True), 1), else_=0)),
+            func.sum(case((ContentFavorite.status.is_not(None), 1), else_=0)),
+        )
+        .select_from(ContentFavorite)
+        .join(Content, Content.id == ContentFavorite.content_id)
+        .where(
+            ContentFavorite.user_id == user_id,
+            or_(
+                ContentFavorite.favorited.is_(True),
+                ContentFavorite.status.is_not(None),
+            ),
+        )
+    ).one()
+    return int(row[0] or 0), int(row[1] or 0), int(row[2] or 0)
 
 
 def count_content_status(
@@ -5096,6 +5971,91 @@ def set_persona_username(
     return row
 
 
+# 游客结果快照的保留天数：给「先去注册再回来领」留足回头窗口，
+# 又不至于让这张表无限长大（2026-10-28）。
+ANONYMOUS_RESULT_TTL_DAYS = 30
+
+
+def save_anonymous_persona_result(
+    db: Session, payload: dict, *, source: str = "quiz"
+) -> int:
+    """游客结果落一份快照，返回结果 id（用来签结果令牌）。
+
+    顺带清一次过期快照：这个入口本身就是「有人刚算完」，比另起定时任务省事。
+    """
+    row = AnonymousPersonaResult(
+        payload=payload or {},
+        source=(source or "quiz")[:20],
+        created_at=datetime.now(),
+    )
+    db.add(row)
+    db.commit()
+    purge_anonymous_persona_results(db)
+    return int(row.id)
+
+
+def load_anonymous_persona_result(
+    db: Session, result_id: int
+) -> AnonymousPersonaResult | None:
+    try:
+        return db.get(AnonymousPersonaResult, int(result_id))
+    except (TypeError, ValueError):
+        return None
+
+
+def claim_anonymous_persona_result(
+    db: Session, result_id: int, user_id: int
+) -> dict | None:
+    """把游客快照认领给某个账号，返回 payload 供写入正式报告。
+
+    已被认领、过期、不存在都返回 None——认领是一次性的，别人先领走了就不该
+    再被同一个令牌搬第二遍。
+    """
+    row = load_anonymous_persona_result(db, result_id)
+    if row is None or row.claimed_by is not None:
+        return None
+    cutoff = datetime.now() - timedelta(days=ANONYMOUS_RESULT_TTL_DAYS)
+    if row.created_at and row.created_at < cutoff:
+        return None
+    row.claimed_by = int(user_id)
+    row.claimed_at = datetime.now()
+    db.commit()
+    return row.payload or {}
+
+
+def purge_anonymous_persona_results(db: Session) -> int:
+    """删掉超过保留期的匿名结果，返回删除条数。"""
+    cutoff = datetime.now() - timedelta(days=ANONYMOUS_RESULT_TTL_DAYS)
+    result = db.execute(
+        sa_delete(AnonymousPersonaResult).where(
+            AnonymousPersonaResult.created_at < cutoff
+        )
+    )
+    db.commit()
+    return int(result.rowcount or 0)
+
+
+def record_persona_label(db: Session, label_key: str) -> tuple[int, int]:
+    """给某个成分桶记一次，返回 (该桶计数, 全部桶合计)。
+
+    用于结果页的「占已测用户的 X%」。计数口径是「生成一次 +1」，不做用户去重
+    （理由见 models.PersonaLabelStat 的文档）。任何异常都不该连累出报告——
+    调用方负责 try/except，这里只做纯数据操作。
+    """
+    key = (label_key or "").strip()[:60]
+    if not key:
+        return 0, 0
+    row = db.scalar(select(PersonaLabelStat).where(PersonaLabelStat.label_key == key))
+    if row is None:
+        row = PersonaLabelStat(label_key=key, count=0, updated_at=datetime.now())
+        db.add(row)
+    row.count += 1
+    row.updated_at = datetime.now()
+    db.commit()
+    total = db.scalar(select(func.coalesce(func.sum(PersonaLabelStat.count), 0)))
+    return int(row.count), int(total or 0)
+
+
 def save_persona_report(
     db: Session,
     user_id: int,
@@ -5579,14 +6539,20 @@ def create_invite_codes(
     expires_at: datetime | None = None,
     note: str = "",
     created_by: int | None = None,
+    role: str = ROLE_USER,
 ) -> list[InviteCode]:
     """批量生成邀请码，返回明文码行列表（新的在前由调用方决定排序展示）。
 
     逐个提交 + 唯一索引冲突重试：单个码碰撞只影响该码，不影响同批已生成的；
     数量超限抛 ValueError，由路由层 / CLI 回显。
+
+    ``role`` 为该邀请码登记的目标角色（仅限 user / admin，不含 owner——站长邀请码
+    不通过此通道发放）：消费时注册流程以**码内 role** 建号，前端传什么角色都不认。
     """
     if count < 1 or count > INVITE_CODE_MAX_BATCH:
         raise ValueError(f"单次生成数量需在 1-{INVITE_CODE_MAX_BATCH} 之间")
+    if role not in (ROLE_USER, ROLE_ADMIN):
+        raise ValueError("邀请码目标角色只能是普通用户或管理员")
     cleaned_note = (note or "").strip() or None
     rows: list[InviteCode] = []
     for _ in range(count):
@@ -5599,6 +6565,7 @@ def create_invite_codes(
                 note=cleaned_note,
                 expires_at=expires_at,
                 created_by=created_by,
+                role=role,
             )
             db.add(row)
             try:
@@ -5680,6 +6647,28 @@ def revoke_invite_code(db: Session, invite_id: int) -> tuple[bool, str]:
     row.revoked_at = datetime.now()
     db.commit()
     return True, ""
+
+
+def revoke_invite_codes(db: Session, ids) -> int:
+    """批量作废邀请码（管理端多选作废），返回实际作废条数。
+
+    只作废「未使用且未作废」的码：已用 / 已作废的跳过，不算成功数，
+    这样前端提示的数量与真实变化一致。ids 去重后一次执行，避免重复统计。
+    """
+    cleaned = sorted({int(item) for item in ids if str(item).strip().isdigit()})
+    if not cleaned:
+        return 0
+    result = db.execute(
+        update(InviteCode)
+        .where(
+            InviteCode.id.in_(cleaned),
+            InviteCode.used_at.is_(None),
+            InviteCode.revoked_at.is_(None),
+        )
+        .values(revoked_at=datetime.now())
+    )
+    db.commit()
+    return result.rowcount or 0
 
 
 def delete_user(db: Session, user: User) -> None:
@@ -5842,6 +6831,8 @@ SCHEDULE_COMPARE_FIELDS = (
     "weekday",
     "broadcast_time",
     "broadcast_note",
+    "air_date",
+    "box_office",
     "work_type",
     "work_tags",
     "image_url",
@@ -5898,10 +6889,14 @@ def normalize_title_key(text: str | None) -> str:
     与 scripts/fill_schedule_works.py 的 normalize_title 同口径：
     两边的标题来自不同站点（Yuc 档期页 / Bangumi），只有去掉空白、
     标点、大小写差异后才有可比性。
+
+    NFKC（全半角统一）是必需的一步：档期侧写「転生したら剣でしたⅡ」，
+    Bangumi 侧写「転生したら剣でしたII」，不统一就会被当成两个标题。
     """
     if not text:
         return ""
-    cleaned = re.sub(r"[\s　]+", "", str(text))
+    cleaned = unicodedata.normalize("NFKC", str(text))
+    cleaned = re.sub(r"[\s　]+", "", cleaned)
     cleaned = re.sub(
         r"[!！?？。.,，、·・:：;；~〜\-—_'\"“”‘’()（）\[\]【】]", "", cleaned
     )
@@ -6153,18 +7148,15 @@ def list_all_schedules(
     weekday: int | None = None,
     category: str | None = None,
 ) -> list[AnimeSchedule]:
-    """整季/整分类档期作品（不分页）：页面默认视图按星期分组展示使用。
+    """整季/整分类档期作品（不分页）：页面默认视图按星期/日期分组展示使用。
 
-    排序与 list_schedules 一致：星期升序、无星期最后、同星期按主标题。
+    排序与 list_schedules 一致：季度档期按星期升序、无星期最后、同星期按主标题；
+    特殊分类按 air_date 倒序（新的在前）、无日期最后。
     """
     stmt = _schedule_filter_stmt(season, keyword, weekday, category=category)
     return list(
         db.scalars(
-            stmt.order_by(
-                AnimeSchedule.weekday.is_(None),
-                AnimeSchedule.weekday.asc(),
-                AnimeSchedule.title_main.asc(),
-            )
+            stmt.order_by(*_schedule_order_clauses(category))
         )
     )
 
@@ -6181,24 +7173,38 @@ def list_schedules(
 ) -> tuple[int, list[AnimeSchedule]]:
     """分页查询档期作品：可按档期、分类、星期、关键词（标题/播出说明）筛选。
 
-    排序：星期几升序（便于按周一到周日浏览），未解析出星期的排在最后，
-    同星期内按主标题排序。
+    排序分两种维度：
+    - 季度档期：星期几升序（便于按周一到周日浏览），未解析出星期的排在最后，
+      同星期内按主标题排序；
+    - 特殊分类：按 air_date 倒序（最新播出/上映在前），无日期的（仅季度描述
+      如「2027冬」）排最后，同日按主标题。
     """
     stmt = _schedule_filter_stmt(season, keyword, weekday, category=category)
 
     total = db.scalar(select(func.count()).select_from(stmt.subquery())) or 0
     items = list(
         db.scalars(
-            stmt.order_by(
-                AnimeSchedule.weekday.is_(None),  # SQLite 中 False 在前：有星期的排前面
-                AnimeSchedule.weekday.asc(),
-                AnimeSchedule.title_main.asc(),
-            )
+            stmt.order_by(*_schedule_order_clauses(category))
             .offset((page - 1) * page_size)
             .limit(page_size)
         )
     )
     return total, items
+
+
+def _schedule_order_clauses(category: str | None) -> tuple:
+    """按查询维度给出排序子句：特殊分类按日期倒序，季度档期按星期升序。"""
+    if category:
+        return (
+            AnimeSchedule.air_date.is_(None),  # 有日期的排前（SQLite False 在前）
+            AnimeSchedule.air_date.desc(),
+            AnimeSchedule.title_main.asc(),
+        )
+    return (
+        AnimeSchedule.weekday.is_(None),
+        AnimeSchedule.weekday.asc(),
+        AnimeSchedule.title_main.asc(),
+    )
 
 
 def get_schedule(db: Session, schedule_id: int) -> AnimeSchedule | None:

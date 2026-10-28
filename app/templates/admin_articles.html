@@ -4,7 +4,9 @@
 {% block title %}资讯数据{% endblock %}
 {% block content %}
 <h1 class="h3 mb-1 section-heading">资讯数据</h1>
-<p class="text-muted small mb-3">共 {{ total }} 篇文章（含未发布）。删除为真实写库操作。</p>
+<p class="text-muted small mb-3">
+    共 <span data-admin-total>{{ total }}</span> 篇文章（含未发布）。删除为真实写库操作。
+</p>
 {% include "_manage_nav.html" %}
 
 {% if deleted is not none %}
@@ -28,10 +30,23 @@
 {% if not articles %}
 <div class="detail-empty">没有符合条件的资讯。</div>
 {% else %}
-<div class="table-responsive table-card">
+<div class="admin-panel" data-admin-scope data-bulk-form="bulk-article-delete" data-page-size="20">
+{# 批量删除表单：只承载隐藏的筛选条件，勾选框与按钮用 form 属性归入本表单 #}
+<form id="bulk-article-delete" method="post" action="/manage/articles/delete"
+      class="admin-bulkform" data-ajax-delete data-remove="row"
+      data-id-field="ids" data-count-param="deleted" data-verb="删除" data-entity="资讯">
+    <input type="hidden" name="q" value="{{ q }}">
+    <input type="hidden" name="page" value="{{ page }}">
+</form>
+
+<div class="table-responsive table-card admin-table">
     <table class="table table-hover align-middle">
         <thead>
         <tr>
+            <th class="cell-check">
+                <input class="form-check-input" type="checkbox" data-select-all
+                       aria-label="全选本页资讯">
+            </th>
             <th>ID</th>
             <th>标题</th>
             <th>分类</th>
@@ -42,26 +57,39 @@
         </thead>
         <tbody>
         {% for a in articles %}
-        <tr>
-            <td>{{ a.id }}</td>
-            <td>
+        <tr data-row-id="{{ a.id }}">
+            <td class="cell-check">
+                <input class="form-check-input" type="checkbox" data-row-check
+                       name="ids" value="{{ a.id }}" form="bulk-article-delete"
+                       aria-label="选择资讯 {{ a.id }}">
+            </td>
+            <td class="cell-id" data-label="ID">{{ a.id }}</td>
+            <td class="cell-title" data-label="标题">
                 <div>{{ a.title }}</div>
                 <div class="small text-muted">
                     {{ a.summary[:50] }}{% if a.summary|length > 50 %}…{% endif %}
                 </div>
             </td>
-            <td><span class="badge bg-secondary">{{ a.category }}</span></td>
-            <td>
+            <td class="cell-category" data-label="分类">
+                <span class="badge bg-secondary">{{ a.category }}</span>
+            </td>
+            <td class="cell-status" data-label="状态">
                 {% if a.is_published %}
                 <span class="badge bg-success">已发布</span>
                 {% else %}
                 <span class="badge bg-secondary">未发布</span>
                 {% endif %}
             </td>
-            <td class="text-muted small">{{ a.published_at.strftime('%Y-%m-%d %H:%M') }}</td>
-            <td class="text-nowrap">
+            <td class="cell-time text-muted small" data-label="发布时间">
+                {{ a.published_at.strftime('%Y-%m-%d %H:%M') }}
+            </td>
+            <td class="cell-actions" data-label="操作">
                 <a class="btn btn-sm btn-outline-secondary" href="/articles/{{ a.id }}">查看</a>
-                <form method="post" action="/manage/articles/{{ a.id }}/delete" class="d-inline">
+                <form method="post" action="/manage/articles/{{ a.id }}/delete" class="d-inline"
+                      data-ajax-delete data-remove="row" data-count-param="deleted"
+                      data-verb="删除" data-entity="资讯" data-ids="{{ a.id }}"
+                      data-confirm="确定删除资讯《{{ a.title }}》？删除后不可恢复。"
+                      data-confirm-title="删除资讯" data-confirm-ok="确认删除">
                     <input type="hidden" name="q" value="{{ q }}">
                     <input type="hidden" name="page" value="{{ page }}">
                     <button class="btn btn-sm btn-outline-danger" type="submit">删除</button>
@@ -73,8 +101,17 @@
     </table>
 </div>
 
-<div class="d-flex flex-wrap justify-content-end align-items-center gap-2 mt-3">
+<div class="admin-bulkbar">
+    <span class="admin-sel-info">已选 <b data-sel-count>0</b> 篇</span>
+    {# 窄屏表头整行隐藏，全选框移到批量栏里，手指才够得着 #}
+    <label class="admin-select-all-mobile">
+        <input class="form-check-input" type="checkbox" data-select-all aria-label="全选本页">
+        <span>全选本页</span>
+    </label>
+    <button class="btn btn-sm btn-danger" type="submit" form="bulk-article-delete"
+            data-bulk-submit>批量删除选中</button>
     {{ pager('/manage/articles?q=' ~ (q|urlencode) ~ '&', page, total_pages) }}
+</div>
 </div>
 {% endif %}
 {% endblock %}

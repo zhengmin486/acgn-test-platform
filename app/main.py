@@ -28,7 +28,9 @@ from app import (
     ingest_api,
     legacy_redirects,
     media,
+    oauth,
     persona_pages,
+    poster_admin,
     site_admin_pages,
     space_pages,
     submission_pages,
@@ -129,6 +131,7 @@ async def _server_error_handler(request: Request, exc: Exception):
 
 app.include_router(auth.router)
 app.include_router(api.router)
+app.include_router(oauth.router)
 # 增量入库通道（/api/ingest/*）：本机抓 Bangumi 后回传服务器入库。
 # 鉴权在端点内（X-Ingest-Key + 站长），不在这里挂 require_admin_api——
 # 抓取端是脚本、没有站内登录态。未配置 INGEST_API_KEY 时端点一律 503。
@@ -147,6 +150,9 @@ app.include_router(submission_pages.router)
 # 封面图片上传（/manage/contents/{id}/cover，仅 staff）：管理员给作品补图 / 换图，
 # 与导入落地的封面同一条 app/media.py 管线（校验 → 落盘 → 双尺寸派生）。
 app.include_router(cover_admin.router)
+# 首页海报轮播管理（/manage/posters，仅 staff）：全站名单的更新模式 / 频率 /
+# 手动指定与排序。与页面内手动浏览独立，见 app/home_posters.py。
+app.include_router(poster_admin.router, dependencies=[Depends(require_admin_page)])
 # 御宅成分检测（/me/persona）：登录用户绑定 Bangumi 用户名、同步公开收藏并生成画像。
 app.include_router(persona_pages.router)
 # 免登录试算（/persona）：引流入口，不写库、不建账号，只渲染当次结果。

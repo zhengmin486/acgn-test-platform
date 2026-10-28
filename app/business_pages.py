@@ -5,14 +5,17 @@
 """
 
 import logging
+import re
 import threading
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import date, datetime
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi import APIRouter, BackgroundTasks, Form, HTTPException, Query, Request
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from urllib.parse import quote, urlencode
 
-from app import article_body, bangumi_meta, crud, media, persona
+from app import article_body, bangumi_meta, crud, home_posters, media, persona
+from app.auth import LoginRequired, safe_next_url
 from app.config import settings
 from app.database import SessionLocal
 from app.page_common import CONTENT_TYPE_LABELS, DbSession, render_missing, templates
@@ -42,12 +45,15 @@ _ASSET_LOCK = threading.Lock()
 # 改列宽 clamp 的两个端点时，必须回来确认新的列数集合仍能整除本值。
 CONTENT_PAGE_SIZE = 60
 
-# 首页「推荐作品」模块：自适应网格的初始条数 + 「展开」后的上限。
-# 初始取 CONTENT_PAGE_SIZE：网格列数实测 1~6，60 是 LCM——初始视图在任何
-# 窗口宽度下末行都是满的（与全部作品页同一契约）。
-# 展开上限 100（用户拍板）：100 只整除 2/4/5，展开态在 3/6 列宽度下末行
-# 可能不满一行（已知取舍；要严格满行须把上限抬到 120）。
-HOME_RECOMMEND_INITIAL = CONTENT_PAGE_SIZE
+# 首页「推荐作品」模块：手机端折叠初始条数 + 「展开」后的上限。
+# 折叠分界跟「最新资讯」侧栏组件一致：资讯栏用 col-12 col-lg-3，仅 lg（≥992）
+# 并排主列，<992 移到主列下方（下移）。所以 PC（≥992，资讯栏并排）不折叠、
+# 直接铺开全部（上限 HOME_RECOMMEND_MAX），原展开按钮位置改为「更多作品」入口；
+# 手机（<992，资讯栏下移）折叠到前 HOME_RECOMMEND_INITIAL_MOBILE 部，超出收起、
+# 「展开更多推荐」点开。
+# 上限 100（用户拍板）：100 只整除 2/4/5，展开态在 3/6 列宽度下末行可能不满一行
+# （已知取舍；要严格满行须把上限抬到 120）。
+HOME_RECOMMEND_INITIAL_MOBILE = 10
 HOME_RECOMMEND_MAX = 100
 
 # 首页资讯软配额：核心内容优先、不强行填满（与每日入库上限同为 30）。
@@ -67,7 +73,7 @@ SORT_OPTIONS: tuple[tuple[str, str], ...] = (
 SORT_LABELS = dict(SORT_OPTIONS)
 # 视图三档：bili 是默认视图（未选不写 URL，保持既有链接形状）——
 # B站式「封面 + 标题 + 元数据行」卡片；grid 保留摘要供有目的查找；list 高密度扫片。
-VIEW_LABELS = {"bili": "卡片", "grid": "网格", "list": "列表"}
+VIEW_LABELS = {"grid": "网格", "bili": "卡片", "list": "列表"}
 
 
 def _refresh_content_assets(content_id: int) -> None:
@@ -139,8 +145,9 @@ def index(request: Request, db: DbSession):
     type_counts = crud.count_contents_by_type(db)
     # 推荐作品：登录用户按个人口味（成分画像 / 站内实时口径，见 persona.build_user_home_picks），
     # 无任何可用信号时回落站长口味；游客一律站长口味（与旧行为一致）。
-    # 取满 HOME_RECOMMEND_MAX，模板默认铺前 HOME_RECOMMEND_INITIAL 部（网格适配、
-    # 末行必满），其余收起，「展开更多推荐」按钮点开（无 JS 时前 60 部照常可见）。
+    # 取满 HOME_RECOMMEND_MAX，PC（≥992，资讯栏并排）由 CSS 直接铺开全部、不折叠；
+    # 手机（<992，资讯栏下移）模板只铺前 HOME_RECOMMEND_INITIAL_MOBILE 部，其余带
+    # home-top-extra 收起，「展开更多推荐」按钮点开（无 JS 时前 10 部照常可见）。
     current_user = getattr(request.state, "current_user", None)
     top_contents = None
     if current_user is not None:
@@ -149,6 +156,12 @@ def index(request: Request, db: DbSession):
         )
     if not top_contents:
         top_contents = crud.list_home_recommendations(db, limit=HOME_RECOMMEND_MAX)
+    # 首页海报轮播（hero 右侧 Coverflow）：优先服务端全站生效名单；
+    # 名单为空时（默认「关闭自动更新」且未保存过名单）回落当季新番实时候选，
+    # 不落库、不改任何全站配置——默认状态下首页也不会是死的。
+    coverflow_items = home_posters.list_active_posters(db)
+    if not coverflow_items:
+        coverflow_items = home_posters.list_candidates(db)[: home_posters.COVERFLOW_SIZE]
     return templates.TemplateResponse(
         request=request,
         name="index.html",
@@ -156,7 +169,7 @@ def index(request: Request, db: DbSession):
             "type_labels": CONTENT_TYPE_LABELS,
             "type_counts": type_counts,
             "top_contents": top_contents,
-            "home_rec_initial": HOME_RECOMMEND_INITIAL,
+            "home_rec_mobile_initial": HOME_RECOMMEND_INITIAL_MOBILE,
             # 首页资讯：30 条软配额，按 priority_score 排序、兼顾类别覆盖、
             # 折叠官方 PR 源（PR 仍可在资讯频道按来源浏览）。
             "latest_articles": crud.list_home_feed(
@@ -164,6 +177,8 @@ def index(request: Request, db: DbSession):
             ),
             "hide_adult": settings.news_hide_adult_content,
             "spotlight": spotlight,
+            # 首页海报轮播数据（服务端名单 / 当季回落），见 app/home_posters.py
+            "coverflow_items": coverflow_items,
             # hero 数据行：收录作品数 / 本日新番 / 资讯篇数（全部真实统计，空库显示 0）
             "stats": {
                 "works": sum(type_counts.values()),
@@ -205,8 +220,9 @@ def contents_page(
     信息列，与题材标签完全解耦：选「TV」不会改变题材 chips 的计数范围。
     ``sort`` / ``view`` / ``media`` / ``source`` 一律「未选不写入 URL」——
     既有分享链接与测试断言都按旧参数形状（q/type/tags/creator/year）书写。
-    默认视图是 B站式卡片（``view=bili`` 不写参数）：封面 + 标题 + 元数据行，
-    元数据行随排序自适应（评分/收藏/年份哪个在前），grid 保留摘要、list 高密度。
+    默认视图是网格（``view`` 不写参数 = 网格）：紧凑竖版海报 + 标题 + 元信息行，
+    元信息随排序自适应（评分/收藏/年份哪个排序哪个前置）；``view=bili`` 是卡片视图
+    （列更少、卡身留白更大，保留题材 chips 与摘要），``view=list`` 是横向行式列表。
     """
     keyword = q.strip()
     # 非法排序 / 视图值静默退回默认，不报错（页面侧宽容，与类型一致）
@@ -615,10 +631,11 @@ def contents_page(
             }
         )
 
-    # 视图切换：卡片（默认，不写参数）/ 网格（view=grid）/ 列表（view=list）。
-    # 卡片是默认视图，所以它的链接刻意不带 view 参数——未选不写入 URL，
-    # 既有分享链接与测试断言仍按旧形状（q/type/tags/creator/year）成立。
-    bili_url = _contents_url(
+    # 视图切换：网格（默认，不写参数）/ 卡片（view=bili）/ 列表（view=list）。
+    # 网格是默认视图，所以它的链接刻意不带 view 参数——未选不写入 URL，
+    # 既有分享链接与测试断言仍按旧形状（q/type/tags/creator/year）成立；
+    # ``view=grid`` 依旧被接受（老链接仍落在网格视图上）。
+    grid_url = _contents_url(
         q=q,
         content_type=content_type,
         creator=creator_name,
@@ -630,7 +647,7 @@ def contents_page(
         sort=sort,
         view=None,
     )
-    grid_url = _contents_url(
+    bili_url = _contents_url(
         q=q,
         content_type=content_type,
         creator=creator_name,
@@ -640,7 +657,7 @@ def contents_page(
         media=media_name,
         source_material=source_name,
         sort=sort,
-        view="grid",
+        view="bili",
     )
     list_url = _contents_url(
         q=q,
@@ -656,16 +673,16 @@ def contents_page(
     )
     view_options = [
         {
-            "code": "bili",
-            "label": VIEW_LABELS["bili"],
-            "selected": view is None,
-            "url": bili_url,
-        },
-        {
             "code": "grid",
             "label": VIEW_LABELS["grid"],
-            "selected": view == "grid",
+            "selected": view in (None, "grid"),
             "url": grid_url,
+        },
+        {
+            "code": "bili",
+            "label": VIEW_LABELS["bili"],
+            "selected": view == "bili",
+            "url": bili_url,
         },
         {
             "code": "list",
@@ -741,9 +758,9 @@ def contents_page(
             "sort": sort,
             "sort_label": SORT_LABELS.get(sort or "", ""),
             "active_filters": active_filters,
-            # view 是原始参数（None=卡片默认，不写 URL）；active_view 供模板分支
+            # view 是原始参数（None=网格默认，不写 URL）；active_view 供模板分支
             "view": view,
-            "active_view": view or "bili",
+            "active_view": view or "grid",
             "view_options": view_options,
             "grid_url": grid_url,
             "list_url": list_url,
@@ -810,6 +827,53 @@ def _contents_url(
         params["all_tags"] = 1
     return "/contents?" + urlencode(params)
 
+# Staff 折叠区（执行 / 助理类职位）最多展示条数：infobox 里这类职位动辄三四十条，
+# 全铺开会把「查看全部」变成一堵墙；够看、且不丢主创。
+STAFF_EXTRA_LIMIT = 24
+
+
+@dataclass(frozen=True)
+class StaffRow:
+    """Staff 表里的一行：既可能是 content_credits 的行，也可能是实体关系兜底出来的。
+
+    模板只读 role / name / tier，用轻量结构就不用为了兜底写一个没入库的 ORM 对象。
+    """
+
+    role: str
+    name: str
+    tier: str = "main"
+    sort_order: int = 999
+
+
+def merge_entity_people_into_staff(credits, entity_roles) -> list:
+    """Staff 兜底：credits 里没有的人，用人物实体关系补上。
+
+    两层数据覆盖面不同：实体关联（导演 / 系列构成 / 音乐 / 角色设计 / 原作）
+    是更早写入的一层，老作品未必重刷过 infobox，但至少能在 Staff 表里露头；
+    重刷后 credits 的职位更精确，所以排前面、同名只留一条（按人名去重）。
+    """
+    rows = list(credits)
+    known = {row.name for row in rows}
+    for role, pairs in (entity_roles or {}).items():
+        for name, entity_type in pairs:
+            if entity_type != crud.ENTITY_TYPE_PERSON or name in known:
+                continue
+            known.add(name)
+            rows.append(StaffRow(role=role, name=name))
+    return rows
+
+
+def split_staff_credits(credits, *, limit: int = STAFF_EXTRA_LIMIT):
+    """Staff 分两段：主创（main）全部展示，执行 / 助理类（long）截断到 limit。
+
+    候选（candidate，来自 persons 接口的原画长尾）不展示——它们在本站还没有
+    足够作品积累，只留在库里等 promote_staff_candidates 转正。
+    """
+    main = [row for row in credits if row.tier == "main"]
+    extra = [row for row in credits if row.tier == "long"]
+    return main, extra[:limit]
+
+
 @router.get("/contents/{content_id}", response_class=HTMLResponse)
 def content_detail(
     request: Request,
@@ -864,6 +928,51 @@ def content_detail(
         exclude_ids=[row.id for row in series_contents],
     )
     series = crud.get_series(db, item.series_id) if item.series_id else None
+
+    # 人物 / 公司分流（2026-10-22）：
+    # 「基本信息·关系」以前把导演 / 系列构成 / 音乐 / 角色设计这些人名也塞进来，
+    # 与右侧 Staff 表重复，且 Staff 表只剩副导演 / 脚本这类边角职位、常年为空。
+    # 现在人一律进 Staff 表（姓名仍是 /creators/{name} 链接，标签反查能力保留），
+    # 关系区只留公司 / 协会；作品制作公司另有「制作」行，这里再去重一次。
+    entity_roles_typed = crud.list_content_entity_roles_typed(db, content_id)
+    studios = crud.list_content_studios(db, content_id)
+    studio_names = set(studios)
+    content_org_roles: dict[str, list[str]] = {}
+    for role, pairs in entity_roles_typed.items():
+        # 「动画制作」已由「制作」行展示；只有在制作公司为空时才退回关系区显示
+        if role == "动画制作" and studio_names:
+            continue
+        names = [name for name, entity_type in pairs if entity_type != crud.ENTITY_TYPE_PERSON]
+        names = [name for name in names if name not in studio_names]
+        if names:
+            content_org_roles[role] = names
+    # Staff 里哪些人名有实体页可跳（其余渲染成纯文本，不制造 404 链接）
+    content_people_entities = {
+        name
+        for pairs in entity_roles_typed.values()
+        for name, entity_type in pairs
+        if entity_type == crud.ENTITY_TYPE_PERSON
+    }
+    # Staff 表：职位序在 bangumi_meta.STAFF_ROLE_RANK（导演 → 系列构成 → … → 执行类），
+    # 历史数据的 sort_order 是旧的 4 职位序，必须再按职位名排一次才对。
+    # credits 之外再用人物实体兜底：没重刷过 infobox 的老作品也不至于空。
+    staff_credits = [
+        row
+        for row in crud.list_content_credits(db, content_id)
+        if row.tier in ("main", "long")
+    ]
+    staff_credits = merge_entity_people_into_staff(staff_credits, entity_roles_typed)
+    staff_rank = bangumi_meta.STAFF_ROLE_RANK
+    staff_credits.sort(
+        key=lambda row: (
+            0 if row.tier == "main" else 1,
+            staff_rank.get(row.role, len(staff_rank)),
+            row.sort_order,
+            getattr(row, "id", 0),
+        )
+    )
+    staff_shown, staff_extra = split_staff_credits(staff_credits)
+
     return templates.TemplateResponse(
         request=request,
         name="detail.html",
@@ -880,11 +989,14 @@ def content_detail(
             "content_status": content_status,
             "status_labels": crud.CONTENT_STATUS_LABELS,
             "content_tags": crud.list_content_tags(db, content_id),
-            "content_studios": crud.list_content_studios(db, content_id),
-            "content_credits": crud.list_content_credits(db, content_id),
-            "content_cast": crud.list_content_cast(db, content_id, limit=12),
+            "content_studios": studios,
+            "content_staff": staff_credits,
+            "content_staff_main": staff_shown,
+            "content_staff_long": staff_extra,
+            "content_cast": crud.list_content_cast(db, content_id, limit=60),
             "content_facts": crud.list_content_facts(db, content_id),
-            "content_entity_roles": crud.list_content_entity_roles(db, content_id),
+            "content_org_roles": content_org_roles,
+            "content_people_entities": content_people_entities,
             "content_series": series,
             "series_contents": series_contents,
             # 系列作品的关系标签（前作 / 续作 / 衍生作 / 同系列），键为作品 id
@@ -924,6 +1036,13 @@ def cast_detail(request: Request, person_id: int, db: DbSession):
     rows = sorted(
         merged.values(), key=lambda item: (-item["content"].rating, -item["content"].id)
     )
+    # 每部作品附带 persona 行数据：配音角色（cast）+ 制作职责（credits）。
+    # 卡片宏里 persona 存在即替代摘要——人物页里「他演了谁」比通用简介重要。
+    for entry in rows:
+        entry["persona"] = [
+            *([("配音", entry["characters"])] if entry["characters"] else []),
+            *([("职责", entry["roles"])] if entry["roles"] else []),
+        ]
     return templates.TemplateResponse(
         request=request,
         name="person.html",
@@ -985,7 +1104,10 @@ def creator_detail(request: Request, name: str, db: DbSession):
     """
     entity = crud.get_entity_by_name(db, name)
     if entity is not None:
-        contents = crud.list_entity_contents(db, entity.id, limit=CREATOR_WORKS_LIMIT)
+        # [(作品, [职责…])]：实体页每张卡显示该实体在这部作品里的职责
+        contents = crud.list_entity_contents_with_roles(
+            db, entity.id, limit=CREATOR_WORKS_LIMIT
+        )
         return templates.TemplateResponse(
             request=request,
             name="creators.html",
@@ -1044,14 +1166,22 @@ def articles_page(
     资讯留在「综合动态」兜底桶（2026-10-21 用户定稿：来源不做筛选入口）。
     """
     page_size = crud.ARTICLES_PAGE_SIZE
+    # 第一页第一条单独做成头条位，剩下的才进网格。若只取 page_size 条，网格就是
+    # page_size - 1 条 → 桌面 4 列时最后一行空一格（用户 2026-10-23 报「第一页少一个作品」）。
+    # 所以这个视图每页多取 1 条：第一页是「1 条头条 + 满一页网格」，后续页按 page_size 顺延，
+    # 总页数与偏移量都按同一个 extra 算（不能按当前页算，否则第 2 页口径会变）。
+    # 搜索 / 非动画分类筛选没有头条位，按原样分页。
+    featured_view = not q and (not category or category == "动画")
+    extra = 1 if featured_view else 0
     total, articles = crud.list_articles_page(
         db,
         q=q or None,
         category=category or None,
         page=page,
         page_size=page_size,
+        first_page_extra=extra,
     )
-    total_pages = max(1, (total + page_size - 1) // page_size)
+    total_pages = crud.articles_page_total_pages(total, page_size, extra)
     if total and page > total_pages:
         # 筛选后页码越界（如从第 5 页切到只有 1 页的分类）：夹回最后一页。
         page = total_pages
@@ -1061,7 +1191,10 @@ def articles_page(
             category=category or None,
             page=page,
             page_size=page_size,
+            first_page_extra=extra,
         )
+        total_pages = crud.articles_page_total_pages(total, page_size, extra)
+    has_featured = featured_view and page == 1
 
     params = []
     if q:
@@ -1078,6 +1211,7 @@ def articles_page(
         name="articles.html",
         context={
             "articles": articles,
+            "has_featured": has_featured,
             "q": q,
             "category": category,
             "categories": _ordered_category_counts(category_counts),
@@ -1111,6 +1245,45 @@ def article_detail_lead(article) -> str:
     return lead
 
 
+# 资讯主体 -> 分类色（颜色只做辅助识别，不为每篇文章单独配色）
+_ARTICLE_CATEGORY_KEYS = (
+    ("动画", "is-anime"),
+    ("漫画", "is-comic"),
+    ("轻小说", "is-novel"),
+    ("游戏", "is-game"),
+)
+
+
+def article_category_class(category: str | None) -> str:
+    """分类徽标的配色修饰类；认不出的分类走中性色（不猜、不硬套）。"""
+    text = (category or "").strip()
+    for keyword, modifier in _ARTICLE_CATEGORY_KEYS:
+        if keyword and keyword in text:
+            return modifier
+    return "is-general"
+
+
+def _drop_duplicate_lead_image(blocks: list[dict], hero_url: str) -> list[dict]:
+    """去掉「头图字段」与「正文首图」指向同一张图的重复输出。
+
+    导入时头图优先取列表页缩略图，正文首图常常就是同一张 keyvisual——
+    页面先渲染封面、正文再渲染一次，读者看到的是同一张图连着两遍。
+    只处理正文里的**第一张**图：图集、对比图里刻意重复的同图属于原文结构，
+    不能按 URL 一把全删。
+    """
+    hero_key = article_body.image_key(hero_url)
+    if not hero_key:
+        return blocks
+    for index, block in enumerate(blocks):
+        if block.get("kind") != article_body.KIND_IMAGE:
+            continue
+        if article_body.image_key(block.get("url", "")) != hero_key:
+            return blocks
+        return blocks[:index] + blocks[index + 1 :]
+    return blocks
+
+
+
 @router.get("/articles/{article_id}", response_class=HTMLResponse)
 def article_detail_page(
     request: Request,
@@ -1134,14 +1307,35 @@ def article_detail_page(
     # 详情页先渲染摘要再渲染正文会出现「同一段说两遍」。正文已覆盖摘要时不再单独展示。
     lead = article_detail_lead(article)
 
+    # 正文块：纯文本 / HTML 富文本都解析成同一套块结构（见 app/article_body）。
+    # base_url 传原文地址，HTML 正文里的相对链接与图片才能补全成可跳转地址。
+    hero_image = (article.image_url or "").strip()
+    blocks = article_body.parse_blocks(
+        article.body, base_url=article.original_url or ""
+    )
+    if hero_image:
+        blocks = _drop_duplicate_lead_image(blocks, hero_image)
+
+    # 收藏状态：资讯详情页是公开页（不要求登录），游客一律按未收藏渲染，
+    # 点了按钮才弹登录窗（模板里的 data-login-gate）。
+    current_user = getattr(request.state, "current_user", None)
+    is_article_favorited = (
+        crud.is_article_favorite(db, current_user.id, article_id)
+        if current_user is not None
+        else False
+    )
+
     return templates.TemplateResponse(
         request=request,
         name="article_detail.html",
         context={
             "article": article,
             "lead": lead,
-            # 正文行级结构：文本段 / [图] / [媒体]，模板按块渲染（body 仍是纯文本）
-            "body_blocks": article_body.parse_blocks(article.body),
+            "is_article_favorited": is_article_favorited,
+            # 正文块：文本段 / 标题 / 列表 / 引用 / 表格 / 图片 / 媒体
+            "body_blocks": blocks,
+            "hero_image": hero_image,
+            "category_class": article_category_class(article.category),
             "article_tags": crud.list_article_tags(db, article_id),
             "article_entity_chips": _article_entity_chips(
                 crud.list_article_entities(db, article_id)
@@ -1169,6 +1363,37 @@ def _article_entity_chips(entities) -> list[dict]:
         chips.append({"name": item.name, "label": label, "url": url})
     return chips
 
+
+@router.post("/articles/{article_id}/favorite")
+def toggle_article_favorite(
+    request: Request,
+    article_id: int,
+    db: DbSession,
+    next: str = Form(default=""),
+):
+    """资讯收藏 / 取消收藏（切换）；资讯不存在走统一 404。
+
+    与作品收藏同一个套路（POST + PRG 303 + ``?fav=`` 回显），区别只有两点：
+    资讯详情页是公开页，所以登录判断放在函数里而不是路由级守卫
+    （游客点按钮由 ``LoginRequired`` 带 ``next`` 跳登录，登录后回本页）；
+    资讯没有「标注」概念，取消收藏就是删行，不存在留空壳行的分支。
+    """
+    current_user = getattr(request.state, "current_user", None)
+    if current_user is None:
+        raise LoginRequired(next_url=f"/articles/{article_id}")
+    if crud.get_article(db, article_id) is None:
+        return render_missing(request, "资讯", article_id)
+    if crud.is_article_favorite(db, current_user.id, article_id):
+        crud.remove_article_favorite(db, current_user.id, article_id)
+        result = "removed"
+    else:
+        crud.add_article_favorite(db, current_user.id, article_id)
+        result = "added"
+    # next 经 safe_next_url 校验（只允许站内相对路径），拼 fav 回参后 303 回跳。
+    target = safe_next_url(next) or f"/articles/{article_id}"
+    separator = "&" if "?" in target else "?"
+    return RedirectResponse(f"{target}{separator}fav={result}", status_code=303)
+
 # ---------- 新番档期展示（只读：数据来自同步脚本，不在请求时抓取外部网站） ----------
 
 WEEKDAY_NAMES = {1: "周一", 2: "周二", 3: "周三", 4: "周四", 5: "周五", 6: "周六", 7: "周日"}
@@ -1194,6 +1419,106 @@ def _group_by_weekday(works: list) -> list[dict]:
     return [group for group in groups if group["works"]]
 
 
+# ---------- 特殊分类：按播出/上映日期分组（时间线） ----------
+
+# 既无 air_date 也无播出说明的条目归入这一组，永远排在最后。
+DATE_UNKNOWN_GROUP = ""
+ISO_DATE_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
+ISO_MONTH_RE = re.compile(r"^(\d{4})-(\d{2})$")
+
+# 剧场类特殊分类按月分组（用户 2026-10-24 拍板）：一部电影一个上映日，按日分会
+# 碎成大量单条组——线上实测 cn_movie 76 部 71 组、ova_sp 363 部 238 组，时间线
+# 稀碎看不出「这个月上了哪些片」。按月归拢后组数降到个位数~十几条，当月片单一
+# 目了然。未上线新番（unreleased）不在此列：倒计时到天对追番有意义，保持按日。
+MONTH_GROUP_CATEGORIES = frozenset({"ova_sp", "cn_movie"})
+
+
+def _date_group_name(key: str, by_month: bool = False) -> str:
+    """分组键转展示名。
+
+    按日：ISO 日期 → 「2026年12月11日」；按月：ISO 月键 → 「2026年11月」。
+    原文（如 2027冬、TV放送：9/2-9/9）两种粒度都保留；空键 → 「时间待定」。
+    """
+    if by_month:
+        match = ISO_MONTH_RE.match(key)
+        if match:
+            return f"{int(match.group(1))}年{int(match.group(2))}月"
+        return key or "时间待定"
+    match = ISO_DATE_RE.match(key)
+    if match:
+        return f"{int(match.group(1))}年{int(match.group(2))}月{int(match.group(3))}日"
+    return key or "时间待定"
+
+
+def _date_countdown(iso: str) -> str | None:
+    """距今天数文案：未来「还有 N 天」、过去「N 天前」、当天「今天」。"""
+    try:
+        target = date.fromisoformat(iso)
+    except ValueError:
+        return None
+    delta = (target - date.today()).days
+    if delta == 0:
+        return "今天"
+    if delta > 0:
+        return f"还有 {delta} 天"
+    return f"{abs(delta)} 天前"
+
+
+def _group_by_date(works: list, by_month: bool = False) -> list[dict]:
+    """把特殊分类作品按播出/上映日期分组：新的日期在前，无日期的按原文归组。
+
+    ``by_month=True``（剧场类 ova_sp / cn_movie，见 MONTH_GROUP_CATEGORIES）时
+    分组键取到月：air_date 前 7 位 → 「2026年11月」。电影一部一个上映日，按日
+    分组会碎成大量单条组，按月归拢才看得出「这个月上了哪些片」。月组不派生
+    周几与距今天数——月份不是时间点，组头只留组名 + 条数（模板对两个字段判空，
+    自动隐藏）。
+
+    缺失 air_date 时回退 broadcast_note 原文（如「2027冬」只描述季度、
+    「TV放送：9/2-9/9」是源站的特殊说明）——不猜具体日期，源站怎么说就怎么归组。
+    「时间待定」组（既无日期也无说明）固定排最后。
+    组内顺序沿用查询排序（air_date 倒序 + 主标题），不做二次调整。
+    """
+    buckets: dict[str, list] = {}
+    for item in works:
+        air = (item.air_date or "").strip()
+        if by_month and ISO_DATE_RE.match(air):
+            key = air[:7]  # 2026-11-27 → 2026-11（月粒度）
+        else:
+            key = air or (item.broadcast_note or "").strip()
+        key = key or DATE_UNKNOWN_GROUP
+        buckets.setdefault(key, []).append(item)
+
+    groups: list[dict] = []
+    # 字符串倒序天然即「日期新的在前」：air_date 是定长 ISO 前缀，季度描述
+    # （2027冬）以年份开头同规则参与比较；空键（时间待定）最小，排最后。
+    for key in sorted(buckets, reverse=True):
+        members = buckets[key]
+        weekday_name = None
+        countdown = None
+        match = None if by_month else ISO_DATE_RE.match(key)
+        if match:
+            try:
+                weekday_index = date(
+                    int(match.group(1)), int(match.group(2)), int(match.group(3))
+                ).weekday() + 1  # 周一=1 … 周日=7
+            except ValueError:
+                weekday_index = None
+            if weekday_index in WEEKDAY_NAMES:
+                weekday_name = WEEKDAY_NAMES[weekday_index]
+            countdown = _date_countdown(key)
+        groups.append(
+            {
+                "key": key,
+                "name": _date_group_name(key, by_month=by_month),
+                "weekday_name": weekday_name,
+                "countdown": countdown,
+                # 键名用 works 而非 items：dict.items 是内建方法，模板属性访问会撞名
+                "works": members,
+            }
+        )
+    return groups
+
+
 @router.get("/schedule", response_class=HTMLResponse)
 def schedule_page(
     request: Request,
@@ -1204,10 +1529,15 @@ def schedule_page(
     weekday: str | None = Query(default=None, max_length=4),
     page: int = Query(default=1, ge=1),
 ):
-    """新番档期页：季度导航 / 特殊分类 tab、按星期分组浏览与关键词/星期筛选。
+    """新番档期页：季度导航 / 特殊分类 tab、按星期/日期分组浏览与关键词/星期筛选。
 
     两种浏览维度互斥：给定 category（unreleased / ova_sp / cn_movie）时按特殊分类
     展示；否则按季度档期（season=YYYYMM）展示。两者内部都支持关键词/星期筛选。
+    默认视图的分组维度随维度切换：季度档期按播出星期分组（周更时间表），
+    特殊分类按播出/上映日期分组（时间线，新的在前）——未上线新番与剧场版
+    没有星期概念，源站本身也按日期排版；其中剧场类（ova_sp / cn_movie）分组
+    到月（一部电影一个上映日，按日碎组，见 MONTH_GROUP_CATEGORIES），未上线
+    新番仍按日（倒计时到天对追番有意义）。
     未指定任何维度时默认展示最新已同步季度档期；数据库无档期数据时显示引导提示。
     weekday 收字符串再归一：筛选表单的「全部」选项与分页链接在未选星期时
     都会发出 ``weekday=``（空值），严格 int 声明会 422——空串/非数字一律
@@ -1238,6 +1568,7 @@ def schedule_page(
     works: list = []
     total_pages = 1
     weekday_groups: list[dict] = []
+    date_groups: list[dict] = []
     season_url = None
 
     if category:
@@ -1256,9 +1587,15 @@ def schedule_page(
             )
             total_pages = max(1, (total + SCHEDULE_PAGE_SIZE - 1) // SCHEDULE_PAGE_SIZE)
         else:
+            # 特殊分类默认视图：按播出/上映日期分组的时间线（不按星期——星期对
+            # 未上线新番/剧场版没有意义，源站本身也是按日期排版）。
+            # 分组粒度按分类走：剧场类（ova_sp / cn_movie）到月，未上线新番到日
+            # （见 MONTH_GROUP_CATEGORIES 的由来）。
             works = crud.list_all_schedules(db, category=category)
             total = len(works)
-            weekday_groups = _group_by_weekday(works)
+            date_groups = _group_by_date(
+                works, by_month=category in MONTH_GROUP_CATEGORIES
+            )
         season_url = works[0].source_url if works else None
     elif seasons:
         current_season = season or seasons[0]["season_code"]
@@ -1298,6 +1635,7 @@ def schedule_page(
             "total_pages": total_pages,
             "works": works,
             "weekday_groups": weekday_groups,
+            "date_groups": date_groups,
             "grouped_mode": not filter_mode,
         },
     )

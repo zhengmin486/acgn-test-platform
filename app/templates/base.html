@@ -113,11 +113,15 @@
         var pendingForm = null;
         var submitting = false;
 
-        function lockButtons(form) {
+        function lockButtons(form, submitter) {
             var buttons = form.querySelectorAll("button");
             for (var i = 0; i < buttons.length; i++) {
                 var btn = buttons[i];
                 if (btn.type === "button" || btn.disabled) continue;
+                /* submitter 不能禁用：submit 事件先于提交条目构建，
+                   disabled 控件不进提交体，会丢掉它的 name/value
+                   （如多提交按钮表单里 remove_id=xxx 的动作标记）。 */
+                if (btn === submitter) continue;
                 if (!btn.querySelector(".btn-spinner")) {
                     var spin = document.createElement("span");
                     spin.className = "btn-spinner";
@@ -155,7 +159,7 @@
                 lockButtons(form);
                 return;
             }
-            if (!message) lockButtons(form);
+            if (!message) lockButtons(form, event.submitter);
         }, true);
 
         if (modal) {
@@ -413,5 +417,10 @@
     });
 })();
 </script>
+{# 后台管理表格：多选 / 二次确认 / 无刷新删除。
+   必须放在上面的公共脚本之后——它复用其中的 App.toast 与 data-confirm 确认弹窗，
+   且提交拦截顺序依赖注册先后（公共脚本先注册、先执行）。
+   位置在 body 末尾，DOM 已就绪；页面上没有管理表格时它自己什么都不做。 #}
+<script src="/static/admin_table.js?v={{ asset_v }}"></script>
 </body>
 </html>

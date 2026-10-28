@@ -8,8 +8,14 @@
 - 单次失败不中断其余数据源，最终退出码非 0，方便 cron 邮件 / 任务计划
   程序告警。
 
+特殊档期分类（未上线新番 / 剧场版ova与特别篇 / 大陆引进剧场版）不在 Atom 的
+/YYYYMM/ 季度发现路径里，必须按分类码单独同步；cron 每次跑完季度档期后
+接力跑这三个（见 special_category_codes 与 main 的接力逻辑），否则三个
+分类页永远是空的（2026-10-24 前即因无人触发而全为 0）。
+
 用法示例：
-    # 每天跑一次：新番档期（Atom 里的最新一期）+ 多源资讯（按自然日配额）
+    # 每天跑一次：新番档期（Atom 里的最新一期）+ 三个特殊分类
+    # （未上线新番/剧场版ova与特别篇/大陆引进剧场版）+ 多源资讯（按自然日配额）
     python scripts/run_sync.py
     # 只同步新番档期（自动取最新一期）
     python scripts/run_sync.py --task yuc_schedule
@@ -121,6 +127,21 @@ def build_scope(task_key: str, args) -> str:
     return (args.scope or "").strip()  # articles：栏目名，留空=全部
 
 
+def special_category_codes() -> list[str]:
+    """特殊档期分类码：未上线新番 / 剧场版ova与特别篇 / 大陆引进剧场版。
+
+    它们不是 YYYYMM 档期，不在 Atom 的季度发现路径里（分类码同时充当
+    season_code 与 category），必须按分类码走 run_task(TASK_YUC, code)——
+    该 scope 由 app.sync_tasks 特殊处理（读 Atom 定位分类页再抓），且不做
+    作品库自动补库（档期窗口算不出来）。
+    """
+    from scripts.sync_yuc_schedule import (  # 局部导入：避免脚本启动即建 opener
+        SPECIAL_CATEGORIES,
+    )
+
+    return [c["code"] for c in SPECIAL_CATEGORIES]
+
+
 def build_parser() -> argparse.ArgumentParser:
     """构建 CLI 参数定义（独立成函数便于测试）。"""
     parser = argparse.ArgumentParser(
@@ -171,6 +192,91 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _run_one(
+    task_key: str,
+    scope_text: str,
+    *,
+    apply: bool,
+    scope_limit: str | None,
+    session_factory,
+) -> tuple[sync_tasks.TaskResult | None, int]:
+    """执行一个 (数据源, 范围) 组合并打印结果；返回 (结果, 失败计数)。
+
+    抽出来供「季度档期」与「特殊分类接力」共用：执行、打印、异常处理完全
+    一致；失败不抛给调用方，只以失败计数汇总，最后统一决定退出码。
+    """
+    label = sync_tasks.task_labels().get(task_key, task_key)
+    print(f"----- {label}（范围：{scope_text or '默认'}）-----")
+    try:
+        result = sync_tasks.run_task(
+            task_key,
+            scope_text,
+            apply=apply,
+            scope_limit=scope_limit,
+            trigger=sync_tasks.TRIGGER_SCHEDULED,
+            session_factory=session_factory,
+        )
+    except (sync_tasks.ScopeError, sync_tasks.TaskBusyError) as exc:
+        # 范围不合法 / 正在执行：这条跳过，继续下一个，最后以退出码告警
+        print(f"[{label}] 未执行：{exc}")
+        return None, 1
+    except Exception as exc:  # 网络异常等：run_task 已把记录标记为失败，这里只回显
+        print(f"[{label}] 执行出错：{exc}")
+        return None, 1
+
+    counts = (
+        f"新增 {result.added}、更新 {result.updated}、无变化 {result.unchanged}、"
+        f"重复 {result.duplicates}、跳过 {result.skipped}、失败 {result.failed}"
+    )
+    print(f"[{label}] {sync_tasks.STATUS_LABELS[result.status]}：{counts}")
+    if result.message:
+        print(f"  {result.message}")
+    if result.run_id:
+        print(f"  运行记录：sync_task_runs.id={result.run_id}（trigger=scheduled）")
+    return result, 0 if result.status == sync_tasks.STATUS_OK else 1
+
+
+# 自动复核高分段评分人数的口径：>9 分的作品一旦缺评分人数，会以「未知」身份
+# 被当成可信分数顶到「评分最高」最前面，所以同步收尾必须补查一遍。
+HIGH_RATING_REVIEW_MIN = 9.0
+HIGH_RATING_REVIEW_LIMIT = 300
+
+
+def _review_high_ratings() -> int:
+    """同步后复核高分段作品的评分人数；返回 1 表示这一步失败。
+
+    直接复用 scripts/backfill_rating_count.py（同一套判定口径与限速），
+    不在这里另写一份请求逻辑，避免两处行为漂移。
+    """
+    # 复核要回源查 Bangumi：官方 api.bgm.tv 在服务器上不可达（Network unreachable），
+    # 定时环境如果没配镜像地址，这里兜底用镜像；已配则完全不动。
+    # 必须**先** setdefault 再 import —— 镜像地址是在模块导入时读取的。
+    import os
+
+    os.environ.setdefault("BANGUMI_API_BASE", "https://bgmapi.anibt.net")
+    from scripts.backfill_rating_count import main as backfill_rating_count_main
+
+    print()
+    print(
+        f"[rating_review] 复核评分 >= {HIGH_RATING_REVIEW_MIN} 的作品"
+        f"（最多 {HIGH_RATING_REVIEW_LIMIT} 条）的评分人数…"
+    )
+    try:
+        code = backfill_rating_count_main(
+            [
+                "--min-rating",
+                str(HIGH_RATING_REVIEW_MIN),
+                "--limit",
+                str(HIGH_RATING_REVIEW_LIMIT),
+                "--apply",
+            ]
+        )
+    except Exception as exc:  # 复核失败不影响同步主体结果，但要计入失败数
+        print(f"[rating_review] 失败：{exc}")
+        return 1
+    return 0 if code == 0 else 1
+
+
 def main(argv=None, *, session_factory=None) -> int:
     """CLI 入口：依次同步各数据源；有失败返回非 0 退出码。"""
     args = build_parser().parse_args(argv)
@@ -181,6 +287,7 @@ def main(argv=None, *, session_factory=None) -> int:
         print(f"用法错误：{exc}")
         return EXIT_USAGE
 
+    session_factory_injected = session_factory is not None
     if session_factory is None:
         engine = build_engine(args.database_url)
         session_factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
@@ -199,38 +306,38 @@ def main(argv=None, *, session_factory=None) -> int:
             print(f"[{task_key}] 用法错误：{exc}")
             return EXIT_USAGE
 
-        label = sync_tasks.task_labels().get(task_key, task_key)
-        print(f"----- {label}（范围：{scope_text or '默认'}）-----")
-        try:
-            result = sync_tasks.run_task(
-                task_key,
-                scope_text,
-                apply=apply_mode,
-                scope_limit=str(args.limit) if args.limit else None,
-                trigger=sync_tasks.TRIGGER_SCHEDULED,
-                session_factory=session_factory,
-            )
-        except (sync_tasks.ScopeError, sync_tasks.TaskBusyError) as exc:
-            # 范围不合法 / 正在执行：这条数据源跳过，继续下一个，最后以退出码告警
-            print(f"[{label}] 未执行：{exc}")
-            failures += 1
-            continue
-        except Exception as exc:  # 网络异常等：run_task 已把记录标记为失败，这里只回显
-            print(f"[{label}] 执行出错：{exc}")
-            failures += 1
-            continue
-
-        counts = (
-            f"新增 {result.added}、更新 {result.updated}、无变化 {result.unchanged}、"
-            f"重复 {result.duplicates}、跳过 {result.skipped}、失败 {result.failed}"
+        _result, failed = _run_one(
+            task_key,
+            scope_text,
+            apply=apply_mode,
+            scope_limit=str(args.limit) if args.limit else None,
+            session_factory=session_factory,
         )
-        print(f"[{label}] {sync_tasks.STATUS_LABELS[result.status]}：{counts}")
-        if result.message:
-            print(f"  {result.message}")
-        if result.run_id:
-            print(f"  运行记录：sync_task_runs.id={result.run_id}（trigger=scheduled）")
-        if result.status != sync_tasks.STATUS_OK:
-            failures += 1
+        failures += failed
+
+        # 新番档期接力同步三个特殊分类（未上线新番 / 剧场版ova与特别篇 /
+        # 大陆引进剧场版）：它们不进 Atom 季度发现路径，不接力就永远是空的。
+        # 与季度档期各自独立运行——季度失败不挡住分类，某个分类失败也不
+        # 影响其余数据源。幂等，每天重复跑只有「无变化」。
+        if task_key == sync_tasks.TASK_YUC:
+            for code in special_category_codes():
+                _cat_result, cat_failed = _run_one(
+                    task_key,
+                    code,
+                    apply=apply_mode,
+                    scope_limit=None,
+                    session_factory=session_factory,
+                )
+                failures += cat_failed
+
+    # 同步收尾：自动复核高分段作品的「评分人数」。
+    # >9 分的作品会被顶到「评分最高」最前面，必须确认它到底有多少人打分 ——
+    # Bangumi 上两三个人就能打出 9.5，不该和万人打出的 9.5 并列
+    # （2026-10-28 实测：冒险兄弟 / 米菲 / Незнайка 的 9.5 都只有 2 人打分）。
+    # 幂等：只查「还没查过人数」的行，重复跑只有「无变化」。
+    # 仅在正式写入时跑；测试注入 session_factory 时跳过，避免单测打网络。
+    if apply_mode and session_factory_injected is False:
+        failures += _review_high_ratings()
 
     if failures:
         print(f"完成：{failures} 个数据源未完全成功。")

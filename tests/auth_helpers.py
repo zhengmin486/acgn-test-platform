@@ -47,3 +47,50 @@ def login_as_user(client) -> None:
     """以普通用户身份登录。"""
     resp = login(client, USER_USERNAME, USER_PASSWORD)
     assert resp.status_code == 303, f"普通用户登录失败：{resp.status_code} {resp.text}"
+
+
+# ---------- 注册流程（邮箱验证码） ----------
+# 注册现在是两步：POST /register/code 发码 -> POST /register 校验码 + 建号。
+# 测试环境没有配置 SMTP，验证码由注册页的「未配置邮件服务」兜底面板给出。
+
+import re
+
+_DEV_CODE_PATTERN = re.compile(r"本次验证码：<code>(\d{6})</code>")
+
+
+def request_register_code(client, email: str, **extra):
+    """走 /register/code 申请验证码，返回响应（页面里含验证码）。"""
+    data = {"email": email}
+    data.update(extra)
+    return client.post("/register/code", data=data, follow_redirects=False)
+
+
+def extract_code(response) -> str:
+    """从未配置邮件服务时的兜底面板里取出验证码。"""
+    match = _DEV_CODE_PATTERN.search(response.text)
+    assert match is not None, f"页面未给出验证码：{response.text[:400]}"
+    return match.group(1)
+
+
+def register(client, username: str, password: str = "pw-123456",
+             email: str | None = None, code: str | None = None, **extra):
+    """按新流程注册：先申请验证码，再提交（不跟随重定向）。
+
+    ``code`` 可显式传入（测错误码 / 复用码 / 过期码）；不传则自动取本次签发的码。
+    """
+    address = email or f"{username}@example.com"
+    if code is None:
+        code_response = request_register_code(client, address, **extra)
+        if code_response.status_code != 200:
+            # 发码这一步就被拒（邀请码无效 / 邮箱已注册 / 限流…）：直接把它交回断言。
+            return code_response
+        code = extract_code(code_response)
+    data = {
+        "username": username,
+        "password": password,
+        "confirm": password,
+        "email": address,
+        "code": code,
+    }
+    data.update(extra)
+    return client.post("/register", data=data, follow_redirects=False)

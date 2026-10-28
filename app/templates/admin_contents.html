@@ -4,7 +4,9 @@
 {% block title %}作品数据{% endblock %}
 {% block content %}
 <h1 class="h3 mb-1 section-heading">作品数据</h1>
-<p class="text-muted small mb-3">共 {{ total }} 条作品。删除为真实写库操作，只删除所选条目。</p>
+<p class="text-muted small mb-3">
+    共 <span data-admin-total>{{ total }}</span> 条作品。删除为真实写库操作，只删除所选条目。
+</p>
 {% include "_manage_nav.html" %}
 
 {% if deleted is not none %}
@@ -34,9 +36,13 @@
     </div>
 </form>
 
-{# 批量删除表单：只承载隐藏的筛选条件；勾选框与批量按钮用 form 属性归入本表单，
+{# 管理列表面板：多选 + 无刷新删除的作用域。
+   批量删除表单只承载隐藏的筛选条件；勾选框与批量按钮用 form 属性归入本表单，
    单条删除按钮各自使用所在单元格内的独立表单，避免出现嵌套表单。 #}
-<form id="bulk-delete" method="post" action="/manage/contents/delete">
+<div class="admin-panel" data-admin-scope data-bulk-form="bulk-delete" data-page-size="20">
+<form id="bulk-delete" method="post" action="/manage/contents/delete"
+      class="admin-bulkform" data-ajax-delete data-remove="row"
+      data-id-field="ids" data-count-param="deleted" data-verb="删除" data-entity="作品">
     <input type="hidden" name="q" value="{{ q }}">
     <input type="hidden" name="type" value="{{ content_type }}">
     <input type="hidden" name="page" value="{{ page }}">
@@ -45,11 +51,14 @@
 {% if not contents %}
 <div class="detail-empty">没有符合条件的作品。</div>
 {% else %}
-<div class="table-responsive table-card">
+<div class="table-responsive table-card admin-table">
     <table class="table table-hover align-middle">
         <thead>
         <tr>
-            <th style="width: 2.25rem;"></th>
+            <th class="cell-check">
+                <input class="form-check-input" type="checkbox" data-select-all
+                       aria-label="全选本页作品">
+            </th>
             <th>ID</th>
             <th>标题</th>
             <th>类型</th>
@@ -60,21 +69,30 @@
         </thead>
         <tbody>
         {% for c in contents %}
-        <tr>
-            <td>
-                <input class="form-check-input" type="checkbox" name="ids" value="{{ c.id }}"
-                       form="bulk-delete" aria-label="选择作品 {{ c.id }}">
+        <tr data-row-id="{{ c.id }}">
+            <td class="cell-check">
+                <input class="form-check-input" type="checkbox" data-row-check
+                       name="ids" value="{{ c.id }}" form="bulk-delete"
+                       aria-label="选择作品 {{ c.id }}">
             </td>
-            <td>{{ c.id }}</td>
-            <td>{{ c.title }}</td>
-            <td><span class="badge bg-info text-dark">{{ type_labels.get(c.type, c.type) }}</span></td>
-            <td>{{ '%.1f'|format(c.rating) }}</td>
-            <td class="small text-muted" style="max-width: 360px;">
+            <td class="cell-id" data-label="ID">{{ c.id }}</td>
+            <td class="cell-title" data-label="标题">{{ c.title }}</td>
+            <td class="cell-type" data-label="类型">
+                <span class="badge bg-info text-dark">{{ type_labels.get(c.type, c.type) }}</span>
+            </td>
+            <td class="cell-rating" data-label="评分">{{ '%.1f'|format(c.rating) }}</td>
+            <td class="cell-summary small text-muted" data-label="简介">
                 {{ c.summary[:60] }}{% if c.summary|length > 60 %}…{% endif %}
             </td>
-            <td class="text-nowrap">
+            <td class="cell-actions" data-label="操作">
                 <a class="btn btn-sm btn-outline-secondary" href="/contents/{{ c.id }}">查看</a>
-                <form method="post" action="/manage/contents/delete" class="d-inline">
+                {# 单条删除：data-confirm 由 base.html 的确认弹窗接管（二次确认）；
+                   有 JS 时走 fetch 无刷新删除，无 JS 时照常 PRG 提交。 #}
+                <form method="post" action="/manage/contents/delete" class="d-inline"
+                      data-ajax-delete data-remove="row" data-count-param="deleted"
+                      data-verb="删除" data-entity="作品"
+                      data-confirm="确定删除《{{ c.title }}》？删除后不可恢复。"
+                      data-confirm-title="删除作品" data-confirm-ok="确认删除">
                     <input type="hidden" name="ids" value="{{ c.id }}">
                     <input type="hidden" name="q" value="{{ q }}">
                     <input type="hidden" name="type" value="{{ content_type }}">
@@ -88,9 +106,18 @@
     </table>
 </div>
 
-<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mt-3">
-    <button class="btn btn-sm btn-danger" type="submit" form="bulk-delete">批量删除选中</button>
+<div class="admin-bulkbar">
+    <span class="admin-sel-info">已选 <b data-sel-count>0</b> 条</span>
+    {# 窄屏表头整行隐藏，全选框移到批量栏里，手指才够得着 #}
+    <label class="admin-select-all-mobile">
+        <input class="form-check-input" type="checkbox" data-select-all aria-label="全选本页">
+        <span>全选本页</span>
+    </label>
+    {# 按钮不写 disabled：无 JS 时保持可用（JS 会在 0 选中时才禁用它） #}
+    <button class="btn btn-sm btn-danger" type="submit" form="bulk-delete"
+            data-bulk-submit>批量删除选中</button>
     {{ pager('/manage/contents?q=' ~ (q|urlencode) ~ '&type=' ~ (content_type|urlencode) ~ '&', page, total_pages) }}
 </div>
 {% endif %}
+</div>
 {% endblock %}

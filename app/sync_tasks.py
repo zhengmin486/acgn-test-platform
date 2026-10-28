@@ -37,7 +37,7 @@ from scripts.import_articles import (
 )
 from scripts.import_bangumi import ImportSummary, run_import
 from scripts.news_daily import DailyNewsSummary, run_import_daily
-from scripts.fill_schedule_works import fill_works_for_season
+from scripts.fill_schedule_works import fill_works_for_season, link_schedules_to_contents
 from scripts.sync_yuc_schedule import (
     ATOM_URL,
     SeasonNotFoundError,
@@ -582,6 +582,44 @@ def _auto_fill_works(
     return summary.message
 
 
+def _auto_link_special(
+    category_code: str, *, apply: bool, session_factory, trigger: str
+) -> str:
+    """特殊分类同步后的自动关联：把档期条目按标题匹配到作品库，卡片才能直跳详情页。
+
+    与季度档期的补库不同——特殊分类**不新建作品**（未上线新番将来由 Bangumi
+    收录流程自然进来），只把「作品库里已有」的关联上：
+
+    1. 标题归一匹配（日文原名 / 中文名 / 主标题 ↔ 作品 title / aliases）不联网，
+       几百毫秒完成，手动点击与定时任务都跑；
+    2. Bangumi 解析兜底要逐条联网，只在定时任务里接力，避免阻塞 Web 进程。
+
+    关联失败不影响分类同步本身的结果，只把原因写进运行记录。
+    """
+    if not apply:
+        return "预览模式未执行作品关联"
+    use_network = trigger == TRIGGER_SCHEDULED
+    try:
+        summary = link_schedules_to_contents(
+            session_factory=session_factory,
+            season_code=category_code,
+            apply=True,
+            use_network=use_network,
+        )
+    except Exception as exc:  # noqa: BLE001 - 关联失败不牵连分类同步结果
+        return f"作品关联未执行：{_short_reason(exc)}"
+    parts = [f"关联作品 {summary.linked} 部"]
+    if summary.already:
+        parts.append(f"已关联 {summary.already} 部")
+    if summary.unmatched:
+        parts.append(f"未匹配 {summary.unmatched} 部")
+    if summary.failed:
+        parts.append(f"失败 {summary.failed} 部")
+    if not use_network:
+        parts.append("手动同步未启用联网解析兜底")
+    return "，".join(parts)
+
+
 def _execute(
     spec: TaskSpec,
     parsed: ParsedScope,
@@ -601,7 +639,8 @@ def _execute(
         season_code = parsed.season_code
         if season_code in crud.SCHEDULE_CATEGORY_LABELS:
             # 特殊档期分类：从 Atom 解析页面 URL 与展示名后直接抓页面（不经档期发现），
-            # 写入时带 category；特殊分类不做自动补库（不是 YYYYMM 档期，填库无意义）。
+            # 写入时带 category；特殊分类不做自动补库（不是 YYYYMM 档期，填库无意义），
+            # 但要做作品关联——把库里已有的作品匹配上，卡片点击直跳详情页。
             url, label = _resolve_special_category(season_code)
             summary = run_sync(
                 season_code,
@@ -613,6 +652,13 @@ def _execute(
                 category=season_code,
             )
             result = _from_yuc(summary, spec, parsed, mode)
+            note = _auto_link_special(
+                season_code,
+                apply=apply,
+                session_factory=session_factory,
+                trigger=trigger,
+            )
+            result.message = f"{result.message}；{note}" if result.message else note
             return result
         summary = run_sync(
             season_code,

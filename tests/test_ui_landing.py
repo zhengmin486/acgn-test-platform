@@ -199,10 +199,13 @@ def test_home_today_schedule_filtered_and_sorted(today_client):
     assert resp.status_code == 200
     html = resp.text
     assert "本日新番" in html
-    assert "别天番" not in html
-    early = html.index("早晨番")
-    late = html.index("深夜番")
-    notime = html.index("无时间番")
+    # 只断言「本日新番」区块内的过滤与排序：hero 海报轮播也会展示当季候选
+    # （名单为空时的回落，见 app/home_posters.py），标题会先出现在页面顶部。
+    spotlight = html[html.index("data-spotlight"):]
+    assert "别天番" not in spotlight
+    early = spotlight.index("早晨番")
+    late = spotlight.index("深夜番")
+    notime = spotlight.index("无时间番")
     assert early < late < notime
     assert "12:00 更新" in html and "23:00 更新" in html
     # 更新时间徽标（HH:MM）随卡片渲染

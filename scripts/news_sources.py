@@ -32,7 +32,13 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from email.utils import parsedate_to_datetime
 
-from scripts.import_articles import clean_text, html_to_text
+from scripts.import_articles import (
+    DEFAULT_USER_AGENT,
+    _is_decorative_image,
+    absolute_image_url,
+    clean_text,
+    html_to_text,
+)
 
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -60,10 +66,18 @@ class SourceSpec:
     region: str = "日本"  # 默认地区（内部权重参考）
     source_type: str = "媒体编译"  # 来源类型
     max_items: int = 20
+    # 无限制源（2026-10-25 用户定稿「acgch 可以没有任何限制包括配额」）：
+    # 该源的候选**不经过 news_filters 任何一层过滤**（硬广 / 促销 / 抽奖 / VOD /
+    # 非 ACGN 主体 / 游戏准入 / 通稿去重全不生效），也**不占每日配额、不受单源入池
+    # 上限与类别封顶限制**——RSS 里有多少新条目就全抓。只保留按 URL / 标题的
+    # 存量去重（幂等）。默认 False：其它源行为完全不变。
+    unrestricted: bool = False
 
 
-# 注册顺序不再决定取数顺序：scripts/news_daily.run_import_daily 会按
-# priority_score 归集后再填每日软配额。这里仅按语言分组排列，便于阅读。
+# 实际抓取顺序由 news_daily._ordered_sources 决定：**动画 → 漫画 → 轻小说 → 游戏 → 其它**
+# （2026-10-23 定稿），同类内保持本表顺序；官方 PR 源垫底。配合 NEWS_CATEGORY_FLOOR
+# （每类每天至少 10 条）避免「先到先得」把配额全喂给游戏源。
+# 这里的书写顺序仅按语言分组排列，便于阅读；要调整抓取优先级请改 _ordered_sources。
 SOURCES: tuple[SourceSpec, ...] = (
     # —— 日语源（动画 / 漫画 / 轻小说 / 游戏）——
     # natalie_comic（コミックナタリー）是本类最稳的漫画 RSS，但本服务器出网对其返回 405，
@@ -82,7 +96,13 @@ SOURCES: tuple[SourceSpec, ...] = (
     # ACGCH（acgch.com）简中版：日本媒体的中文编译，标题规范、无水文；
     # RSS 恒 50 条，站方分类（动画/漫画/轻小说/业界/活动周边/虚拟主播）与
     # 本站分类对齐，虚拟主播类落「综合动态」兜底桶。2026-10-21 调查后接入。
-    SourceSpec("acgch", "ACGCH", "https://acgch.com/zh-hans/rss.xml", "rss", "综合动态", "zh"),
+    # **unrestricted（2026-10-25 用户定稿）**：该源不做任何过滤、不占配额——
+    # 快讯 / 动画 / 虚拟主播 / 新番表 / 漫画 / 轻小说 / 游戏 / 活动·周边 / 业界
+    # 全抓。改这个flag 前先读 news_daily 里 unrestricted 的四个绕过点。
+    SourceSpec(
+        "acgch", "ACGCH", "https://acgch.com/zh-hans/rss.xml", "rss",
+        "综合动态", "zh", unrestricted=True,
+    ),
     SourceSpec("gcores", "机核 GCORES", "https://www.gcores.com/rss", "rss", "综合动态", "zh"),
     # 触乐：中文游戏行业 / 创作者向媒体（人物专访、行业特稿），补中文行业缺口；
     # 「触乐怪话 / 触乐夜话」栏目为编辑随笔，由 news_filters 按标题前缀过滤。
@@ -194,7 +214,7 @@ def _link_href(element: ET.Element, rel: str | None = None) -> str:
     return ""
 
 
-def _entry_image(element: ET.Element, description: str) -> str:
+def _entry_image(element: ET.Element, description: str, base: str | None = None) -> str:
     """优先 Atom 的 ``rel=enclosure`` 图片链接，退回 RSS 的 thumbnail/enclosure，最后正文首图。"""
     for child in element.iter():
         if _local(child.tag) == "link" and (child.get("rel") or "").lower() == "enclosure":
@@ -205,7 +225,7 @@ def _entry_image(element: ET.Element, description: str) -> str:
     return (
         _attr_by_local(element, "thumbnail")
         or _attr_by_local(element, "enclosure")
-        or _first_image(description)
+        or _first_image(description, base)
     )
 
 
@@ -242,7 +262,9 @@ def parse_feed(xml_text: str, source: SourceSpec) -> list[NewsCandidate]:
         published = parse_feed_date(
             _child_text(node, "pubdate", "date", "published", "updated", "pubDate")
         )
-        image = _entry_image(node, description)
+        # base=订阅源地址：description 里的相对图片路径按源站 origin 补全
+        # （2026-10-25 修复前补到 Aniplex 域名，见 absolute_image_url 注释）。
+        image = _entry_image(node, description, source.url)
         candidates.append(
             NewsCandidate(
                 title=title,
@@ -250,16 +272,19 @@ def parse_feed(xml_text: str, source: SourceSpec) -> list[NewsCandidate]:
                 source=source,
                 published_at=published,
                 summary=clean_text(description)[:SUMMARY_MAX],
-                body=html_to_text(description)[:BODY_MAX_CHARS],
+                body=html_to_text(description, base=source.url)[:BODY_MAX_CHARS],
                 image_url=image or None,
             )
         )
     return candidates
 
 
-def _first_image(html: str) -> str:
+def _first_image(html: str, base: str | None = None) -> str:
+    """取 HTML 里第一张图的地址；相对路径按 base（页面/订阅源地址）补全。"""
     match = _IMG_SRC_RE.search(html or "")
-    return match.group(1).strip() if match else ""
+    if not match:
+        return ""
+    return absolute_image_url(match.group(1), base)
 
 
 def urljoin(base: str, link: str) -> str:
@@ -374,11 +399,11 @@ def parse_gamersky_detail(html: str, candidate: NewsCandidate) -> NewsCandidate:
             if index > 0:
                 body_html = body_html[:index]
         if not candidate.image_url:
-            candidate.image_url = _first_image(body_html) or None
+            candidate.image_url = _first_image(body_html, candidate.url) or None
         # 正文按行清洗：游民详情的正文区开头混过统计像素链接（[媒体] https://...）
         # 与 HTML 注释残留（-->），直接 html_to_text 会一并塞进正文。
         candidate.body = (
-            _clean_body_text(body_html) or html_to_text(body_html)
+            _clean_body_text(body_html, candidate.url) or html_to_text(body_html, base=candidate.url)
         )[:BODY_MAX_CHARS]
     candidate.needs_detail = False
     return candidate
@@ -452,6 +477,10 @@ def hydrate_head_image(candidate: NewsCandidate, *, fetch) -> NewsCandidate:
 _BODY_CONTAINER_KEYS: tuple[str, ...] = (
     "mce-content-body", "article-body", "entry-content", "maintxt",
     "post-content", "entry-body", "article-content",
+    # 2026-10-23：リスアニ！的正文容器是 `div.detail__wysiwyg parts__wysiwyg`，
+    # アニメ！アニメ！是 `article.arti-body`。两者都不在旧表里，导致正文提取为空、
+    # 详情页只剩 feed 导语（用户报「新源没有文章详情」）。
+    "wysiwyg", "arti-body",
 )
 _BODY_MARKER_RE = re.compile(
     r'<(div|article|section)\b[^>]*(?:class|id)="[^"]*(?:'
@@ -474,6 +503,25 @@ _BODY_LINE_NOISE_MAX = 12
 # ACGCH 文章容器自带的站点噪音（阅读时长元信息 / 投稿 CTA），实测 2026-10-21。
 _BODY_NOISE_WORDS: tuple[str, ...] = ("分钟读完", "来投个稿")
 _BODY_MIN_CHARS = 60
+
+# 软装饰图 = 表情贴纸 / 站娘 / 吉祥物一类，**可能是正文内容**，不能一刀切丢。
+# 2026-10-25 用户定稿「按位置保留」：判定语义是「孤立贴在正文首尾的算站点装饰，
+# 夹在文字中间的算行内表情保留」——acgch 把 sticker 当行内表情用，而页面顶部的
+# 贴纸多是模板资产。与 import_articles._is_decorative_image 的硬装饰
+# （logo / icon / 追踪像素，一律丢）分层。
+_SOFT_DECORATIVE_RE = re.compile(
+    r"/(?:mascot|stickers?|emoji|emoticons?|yukkuri|chara)/",
+    re.IGNORECASE,
+)
+
+
+def _is_soft_decorative(url: str) -> bool:
+    """表情贴纸 / 吉祥物类图片：按位置决定去留（见 _drop_edge_soft_decorations）。"""
+    text = (url or "").strip()
+    if not text:
+        return False
+    path = urllib.parse.urlsplit(text).path if "://" in text else text
+    return bool(_SOFT_DECORATIVE_RE.search(path))
 
 
 def strip_html_noise(html: str) -> str:
@@ -502,10 +550,14 @@ def _slice_element(html: str, start: int, tag: str) -> str:
     return html[start:]  # 没找到闭合：退化为到文末，再由长度校验兜底
 
 
-def _clean_body_text(html_fragment: str) -> str:
-    """正文片段 → 纯文本行（去导航噪音 / 纯 URL / 图片占位残留）。"""
+def _clean_body_text(html_fragment: str, base: str | None = None) -> str:
+    """正文片段 → 纯文本行（去导航噪音 / 纯 URL / 图片占位残留）。
+
+    ``base`` 是页面地址：相对图片路径按它的 origin 补全（见 absolute_image_url）。
+    软装饰图（表情贴纸）按位置过滤：只保留段落中间的（2026-10-25 用户定稿）。
+    """
     lines: list[str] = []
-    for line in html_to_text(html_fragment).splitlines():
+    for line in html_to_text(html_fragment, base=base).splitlines():
         line = line.strip()
         if not line or line == "&nbsp;" or line == "-->":
             continue
@@ -518,15 +570,42 @@ def _clean_body_text(html_fragment: str) -> str:
         if len(line) < _BODY_LINE_NOISE_MAX and not re.search(r"[。！？…」』〕]", line):
             continue
         lines.append(line)
+    lines = _drop_edge_soft_decorations(lines)
     return "\n".join(lines).strip()
 
 
-def extract_body(html: str) -> str:
+def _drop_edge_soft_decorations(lines: list[str]) -> list[str]:
+    """丢掉**孤立贴在正文首尾**的软装饰图行，夹在文字中间的原样保留。
+
+    「孤立」= 该行的上/下方没有任何文本行：页面顶部的贴纸通常只有它一个，
+    后面紧跟正文；文末的贴纸同理。夹在两段之间的贴纸是行内表情（acgch 的
+    用法），保留。只删 ``[图]`` 行，文本行一律不动。
+    """
+    if not lines:
+        return lines
+    drop: set[int] = set()
+    for index, line in enumerate(lines):
+        if not line.startswith("[图]") or not _is_soft_decorative(line[len("[图]"):].strip()):
+            continue
+        has_prev = any(lines[j].strip() for j in range(index - 1, -1, -1))
+        has_next = any(lines[j].strip() for j in range(index + 1, len(lines)))
+        if not (has_prev and has_next):
+            drop.add(index)
+    if not drop:
+        return lines
+    return [line for index, line in enumerate(lines) if index not in drop]
+
+
+def extract_body(html: str, base_url: str | None = None) -> str:
     """详情页 HTML → 正文纯文本（复用 html_to_text：图片转 [图] 行、段落换行）。
 
     先清理 script/style/注释，再按 class/id 关键词找已知正文容器；每个候选按标签深度
     切出完整内容、转文本，**取文本最长的一个**（同页往往先出现「相关文章」卡片）。
     最后兜底整篇 <article>（animeanime 这类没有专属 class 的站）。
+
+    ``base_url`` 是详情页地址：容器里的相对图片路径按它的 origin 补全——
+    2026-10-25 修复前不传 base，acgch 的 ``/mascot/sticker-pointing.webp`` 会被补成
+    Aniplex 域名（404），正文里留裂图。
 
     找不到容器 / 提取结果过短时返回空串——由调用方保留 RSS 摘要，
     绝不把短摘要扩写成「正文」。
@@ -537,11 +616,11 @@ def extract_body(html: str) -> str:
     best = ""
     for match in _BODY_MARKER_RE.finditer(cleaned):
         content = _slice_element(cleaned, match.end(), match.group(1).lower())
-        text = _clean_body_text(content)
+        text = _clean_body_text(content, base_url)
         if len(text) > len(best):
             best = text
     for match in re.finditer(r"<article\b[^>]*>", cleaned, re.IGNORECASE):
-        text = _clean_body_text(_slice_element(cleaned, match.end(), "article"))
+        text = _clean_body_text(_slice_element(cleaned, match.end(), "article"), base_url)
         if len(text) > len(best):
             best = text
     return best[:BODY_MAX_CHARS] if len(best) >= _BODY_MIN_CHARS else ""

@@ -1,10 +1,11 @@
 """定时同步 CLI 测试：scripts/run_sync.py 的参数编排与运行记录。
 
 覆盖：
-- 默认数据源：新番档期（Atom 最新一期）+ 多源每日资讯，trigger=scheduled；
+- 默认数据源：新番档期（Atom 最新一期）+ 三个特殊分类接力 + 多源每日资讯，trigger=scheduled；
 - --task / --season / --scope / --limit / --preview 的参数分发；
 - 用法错误（未知数据源、bangumi 缺 ID）退出码 2；
 - ScopeError / TaskBusyError / 意外异常：该数据源跳过、退出码 1；
+- 特殊分类单个失败被隔离：其余分类与数据源照跑，退出码 1；
 - 部分成功（有失败项）同样退出码 1；
 - 运行记录落库：sync_task_runs.trigger=scheduled、mode 与状态正确。
 
@@ -62,7 +63,11 @@ def make_result(task_key: str, *, failed: int = 0, added: int = 1) -> sync_tasks
 
 
 class FakeRunTask:
-    """记录 run_task 调用的假实现，按脚本返回结果或抛异常。"""
+    """记录 run_task 调用的假实现，按脚本返回结果或抛异常。
+
+    脚本键优先 (task_key, scope) 元组，退回 task_key——用于让「季度档期成功、
+    某个特殊分类失败」这类按范围区分的场景。
+    """
 
     def __init__(self, script=None):
         self.calls: list[dict] = []
@@ -70,7 +75,9 @@ class FakeRunTask:
 
     def __call__(self, task_key, scope_text, **kwargs):
         self.calls.append({"task_key": task_key, "scope": scope_text, **kwargs})
-        step = self._script.get(task_key, "ok")
+        step = self._script.get(
+            (task_key, scope_text), self._script.get(task_key, "ok")
+        )
         if isinstance(step, Exception):
             raise step
         if step == "ok":
@@ -96,18 +103,26 @@ def fake_latest_season(monkeypatch):
 
 
 class TestArgumentDispatch:
-    def test_default_runs_yuc_and_news(self, factory, fake_run_task, fake_latest_season):
+    def test_default_runs_yuc_special_and_news(self, factory, fake_run_task, fake_latest_season):
         code = run_sync.main([], session_factory=factory)
         assert code == 0
-        assert [call["task_key"] for call in fake_run_task.calls] == [
-            sync_tasks.TASK_YUC,
-            sync_tasks.TASK_NEWS,
+        # 季度档期（Atom 最新一期）→ 三个特殊分类接力 → 资讯
+        assert [call["scope"] for call in fake_run_task.calls] == [
+            "202610",
+            "unreleased",
+            "ova_sp",
+            "cn_movie",
+            "",
         ]
+        assert all(call["task_key"] == sync_tasks.TASK_YUC for call in fake_run_task.calls[:4])
         yuc_call = fake_run_task.calls[0]
         assert yuc_call["scope"] == "202610"  # Atom 最新一期（打桩固定值）
         assert yuc_call["apply"] is True
         assert yuc_call["trigger"] == sync_tasks.TRIGGER_SCHEDULED
-        assert fake_run_task.calls[1]["scope"] == ""  # 配额由配置决定，无范围
+        assert fake_run_task.calls[1]["scope"] == "unreleased"
+        assert fake_run_task.calls[-1]["scope"] == ""  # 配额由配置决定，无范围
+        # 特殊分类不带条数上限（scope_limit 只对 articles 有意义）
+        assert all(call["scope_limit"] is None for call in fake_run_task.calls[:4])
 
     def test_task_bangumi_requires_scope(self, factory, fake_run_task):
         code = run_sync.main(["--task", "bangumi"], session_factory=factory)
@@ -160,9 +175,12 @@ class TestArgumentDispatch:
     def test_all_keyword_equals_default(self, factory, fake_run_task, fake_latest_season):
         code = run_sync.main(["--task", "all"], session_factory=factory)
         assert code == 0
-        assert [call["task_key"] for call in fake_run_task.calls] == [
-            sync_tasks.TASK_YUC,
-            sync_tasks.TASK_NEWS,
+        assert [call["scope"] for call in fake_run_task.calls] == [
+            "202610",
+            "unreleased",
+            "ova_sp",
+            "cn_movie",
+            "",
         ]
 
 
@@ -175,8 +193,20 @@ class TestFailureHandling:
         code = run_sync.main([], session_factory=factory)
         assert code == run_sync.EXIT_TASK_FAILED
         assert "未执行" in capsys.readouterr().out
-        # 失败不中断：资讯仍然执行了
-        assert len(fake_run_task.calls) == 2
+        # 失败不中断：特殊分类与资讯仍然执行了（4 次 yuc + 1 次 news）
+        assert len(fake_run_task.calls) == 5
+        assert [call["scope"] for call in fake_run_task.calls] == [
+            "202610", "unreleased", "ova_sp", "cn_movie", "",
+        ]
+
+    def test_special_category_failure_isolated(self, factory, fake_run_task, fake_latest_season):
+        """某个特殊分类失败不影响其余：季度/其他分类/资讯都照跑，退出码告警。"""
+        fake_run_task._script[(sync_tasks.TASK_YUC, "ova_sp")] = RuntimeError("页面炸了")
+        code = run_sync.main([], session_factory=factory)
+        assert code == run_sync.EXIT_TASK_FAILED
+        assert [call["scope"] for call in fake_run_task.calls] == [
+            "202610", "unreleased", "ova_sp", "cn_movie", "",
+        ]
 
     def test_busy_error_fails(self, factory, fake_run_task, fake_latest_season, capsys):
         fake_run_task._script[sync_tasks.TASK_NEWS] = sync_tasks.TaskBusyError("正在执行")
@@ -228,19 +258,29 @@ class TestRunRecords:
                 mode="apply" if apply else "preview", quota=20, added=3, existing=2
             )
 
+        # 特殊分类定位要读 Atom（触网），打桩成固定页面地址
+        monkeypatch.setattr(
+            sync_tasks,
+            "_resolve_special_category",
+            lambda code: (f"https://yuc.wiki/{code}/", code),
+        )
         monkeypatch.setattr(sync_tasks, "run_sync", fake_run_sync)
         monkeypatch.setattr(sync_tasks, "run_import_daily", fake_run_daily)
 
         code = run_sync.main([], session_factory=factory)
         assert code == 0
-        assert yuc_calls == ["202610"]
+        assert yuc_calls == ["202610", "unreleased", "ova_sp", "cn_movie"]
         assert news_calls == [{"apply": True}]
 
         db = factory()
         try:
             runs = list(db.scalars(select(SyncTaskRun).order_by(SyncTaskRun.id)))
-            assert len(runs) == 2
+            # 季度档期 + 三个特殊分类 + 资讯，各一条运行记录
+            assert len(runs) == 5
             assert [run.task_key for run in runs] == [
+                sync_tasks.TASK_YUC,
+                sync_tasks.TASK_YUC,
+                sync_tasks.TASK_YUC,
                 sync_tasks.TASK_YUC,
                 sync_tasks.TASK_NEWS,
             ]
@@ -259,6 +299,11 @@ class TestRunRecords:
                 season_url="u", preview=3,
             )
 
+        monkeypatch.setattr(
+            sync_tasks,
+            "_resolve_special_category",
+            lambda code: (f"https://yuc.wiki/{code}/", code),
+        )
         monkeypatch.setattr(sync_tasks, "run_sync", fake_run_sync)
         monkeypatch.setattr(
             sync_tasks,
@@ -273,7 +318,7 @@ class TestRunRecords:
         db = factory()
         try:
             runs = list(db.scalars(select(SyncTaskRun)))
-            assert len(runs) == 2
+            assert len(runs) == 5
             assert {run.mode for run in runs} == {"preview"}
             assert all(run.status == "ok" for run in runs)
         finally:
@@ -294,6 +339,11 @@ class TestHelpers:
         assert run_sync.resolve_tasks("bangumi") == ["bangumi"]
         with pytest.raises(ValueError):
             run_sync.resolve_tasks("nope")
+
+    def test_special_category_codes(self):
+        # 与 crud.SCHEDULE_CATEGORY_LABELS 的三个键一致（/schedule 分类 tab 的数据来源）
+        assert run_sync.special_category_codes() == ["unreleased", "ova_sp", "cn_movie"]
+        assert set(run_sync.special_category_codes()) == set(crud.SCHEDULE_CATEGORY_LABELS)
 
     def test_build_scope_yuc_uses_latest_season(self, monkeypatch, fake_latest_season):
         args = run_sync.build_parser().parse_args([])

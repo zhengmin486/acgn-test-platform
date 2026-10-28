@@ -276,7 +276,7 @@ def test_browse_history_not_used_for_recommendation(home_env):
 
 
 def test_logged_in_module_expands_to_max(home_env):
-    """登录路径同样铺满模块：101 部库 - 1 部已收藏 = 100 部推荐，40 部收起。"""
+    """登录路径同样铺满模块：101 部库 - 1 部已收藏 = 100 部推荐，手机折叠到前 10 部、90 部收起。"""
     factory = home_env.session_factory
     ids = _add_works(
         factory,
@@ -287,5 +287,5 @@ def test_logged_in_module_expands_to_max(home_env):
     titles = _titles(html)
     assert len(titles) == 100                       # 101 - 1 部已收藏
     assert titles[0] == "机战番001"                  # 已收藏的 000 不占推荐位
-    assert html.count('class="work-card home-top-extra"') == 40  # 100 - 60：收起态
-    assert "还有 40 部" in html                      # 展开按钮
+    assert html.count('work-card--card home-top-extra"') == 90  # 100 - 10：收起态（卡片统一走 _work_card.html）
+    assert "还有 90 部" in html                      # 展开按钮

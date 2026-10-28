@@ -1,0 +1,76 @@
+{# ======================================================================
+   作品海报卡（全站共用一套结构与信息层级）
+   ----------------------------------------------------------------------
+   mode='tile'  作品库网格：紧凑，无卡身底色，封面 + 类型签 + 标题 + 元信息行
+   mode='card'  作品库卡片：同一套骨架，卡身留白更大，额外展示题材 chips 与摘要
+   首页推荐 / 作者页 / 收藏页直接用裸 .work-card（卡片形态），并各自传所需字段。
+
+   信息层级固定：封面（左上类型签）→ 作品名（最多两行）→ 元信息行。
+   元信息一律「有数据才渲染」：评分 0 不显示，收藏 0 不显示，无年份不显示，
+   因此不会出现空标签、空行或占位文字。
+
+   persona=[(标签, [值…]), …]：人物关系页专用行（声优页的「配音 / 职责」、
+   staff 作品页的「职责」），渲染在元信息行下方。传了 persona 就不再渲染
+   摘要——在这类页面里「他在这部作品里扮演什么角色」比通用简介重要，
+   且能压住卡高，保证网格整齐。
+
+   本文件以 `with context` 导入，可直接用调用页的 type_labels / thumb_src。
+   ====================================================================== #}
+
+{% macro fmt_count(n) %}{% if n >= 10000 %}{{ '%.1f' % (n / 10000) }}万{% else %}{{ n }}{% endif %}{% endmacro %}
+
+{% macro poster_card(item, mode='tile', tags=None, favorites=None, strong=None, rank=None, extra_class='', persona=None) %}
+{% set kind_class = 'work-card' ~ (' work-card--' ~ mode if mode in ('tile', 'card') else '') %}
+<a class="{{ kind_class }}{% if extra_class %} {{ extra_class }}{% endif %}" href="/contents/{{ item.id }}" title="{{ item.title }}">
+    <span class="work-cover-box">
+        {% if rank %}
+        <span class="work-cover-rank{{ ' work-rank-top' if rank <= 3 else '' }}" aria-hidden="true">{{ rank }}</span>
+        {% endif %}
+        <span class="work-cover" aria-hidden="true">{{ item.title[:1] }}</span>
+        {% if item.image_url %}
+        <img class="work-cover" src="{{ thumb_src(item.image_url) }}" alt="{{ item.title }}封面" loading="lazy" width="400" height="600" decoding="async" onerror="this.style.display='none'">
+        {% endif %}
+        {# 封面只放分类签（+ 轻小说的「文学」细分标），不放标题/评分/年份 #}
+        {% set type_label = type_labels.get(item.type) if item.type else None %}
+        {% if type_label or item.book_kind == 'literature' %}
+        <span class="work-badges{% if rank %} work-badges--offset{% endif %}">
+            {% if type_label %}<span class="work-type" data-type="{{ item.type }}">{{ type_label }}</span>{% endif %}
+            {% if item.book_kind == 'literature' %}
+            <span class="work-kind detail-kind-badge" title="日本普通小说：与文库出身的轻小说同区，但不属于轻小说">文学</span>
+            {% endif %}
+        </span>
+        {% endif %}
+    </span>
+    <span class="work-card-body">
+        <span class="work-card-title">{{ item.title }}</span>
+        {# 元信息：默认 评分 → 收藏 → 年份；按当前排序把被排序的字段前置加粗 #}
+        {% set order = ['rating', 'favorites', 'year'] %}
+        {% if strong == 'favorites' %}{% set order = ['favorites', 'rating', 'year'] %}
+        {% elif strong == 'year' %}{% set order = ['year', 'rating', 'favorites'] %}{% endif %}
+        {% if item.rating > 0 or item.year or (favorites and favorites > 0) %}
+        <span class="work-card-meta">
+            {% for key in order %}
+            {% set _rd = rating_display(item.rating, item.rating_count) %}{% if key == 'rating' and item.rating and item.rating > 0 %}{% if _rd == '--' %}<span class="work-meta-rating work-meta-rating--unknown{% if strong == 'rating' %} is-strong{% endif %}" title="评分人数太少，暂不显示">--</span>{% elif _rd %}<span class="work-meta-rating{% if strong == 'rating' %} is-strong{% endif %}">★ {{ _rd }}</span>{% endif %}{% elif key == 'favorites' and favorites %}
+            <span class="work-meta-fav{% if strong == 'favorites' %} is-strong{% endif %}">♥ {{ fmt_count(favorites) }}</span>
+            {% elif key == 'year' and item.year %}
+            <span class="work-meta-year{% if strong == 'year' %} is-strong{% endif %}">{{ item.year }}</span>
+            {% endif %}
+            {% endfor %}
+        </span>
+        {% endif %}
+        {% if mode == 'card' and tags %}
+        <span class="work-card-tags">
+            {% for name in tags[:2] %}<span class="work-card-tag">{{ name }}</span>{% endfor %}
+        </span>
+        {% endif %}
+        {% if persona %}
+        <span class="work-card-persona">
+            {% for label, values in persona %}<span class="work-card-persona-item"><span class="work-card-persona-label">{{ label }}</span>{{ values|join(' / ') }}</span>{% if not loop.last %}<span class="work-card-persona-sep" aria-hidden="true">·</span>{% endif %}{% endfor %}
+        </span>
+        {% endif %}
+        {% if mode == 'card' and item.summary and not persona %}
+        <span class="text-secondary work-card-summary">{{ item.summary[:60] }}{% if item.summary|length > 60 %}…{% endif %}</span>
+        {% endif %}
+    </span>
+</a>
+{% endmacro %}

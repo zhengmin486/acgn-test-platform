@@ -263,6 +263,84 @@ def is_galge_payload(payload: dict) -> bool:
     return any(GALGAME_TAG_RE.search(name) for name in _tag_names(payload))
 
 
+# ---------- 游戏收录口径 v3（2026-10-23 定稿） ----------
+# 本站游戏区只收 ACGN 向游戏，按优先级分五类：
+#   1) galge / 视觉小说（GALGAME_TAG_RE 命中，只读 tags）；
+#   2) 改编 / 联动：选品端确认有动画/漫画/轻小说原作关联（``_site_related_ip``
+#      标记）或标签带 改编/原作/漫画化/动画化/小说原作/游戏化/联动/コラボ；
+#   3) 二游 / 动漫风：标签带 手游/二次元/动漫/美少女/乙女/女性向/BL/恋爱/ADV；
+#   4) 日式 RPG / 同人独立：标签带 RPG/角色扮演/日式/日系/JRPG/冒险/奇幻/科幻
+#      或 同人/独立游戏，且带日系信号（日文假名 / 日式/日系/日本）；
+#   5) 少量宽泛兜底：标签带宽泛 ACGN 信号（日本/同人/社团/独立/萌/悬疑/音乐…）
+#      且 rank 靠前（MARGIN_MAX_RANK 以内），避免漏掉头部 ACGN 边缘作品。
+# 该口径同时是选品端（apply_ingest_policy）与服务器总闸（map_subject）的唯一
+# 真相来源，标记不可伪造绕过业务约束之外的场景。
+ANIME_TYPE = 2  # Bangumi 动画；关联条目 type 命中即算原作关联
+NOVEL_TYPE = 1  # 轻小说（书籍区）；游戏改编自轻小说也算「有明确原作关联」
+ADAPTATION_TAG_RE = re.compile(
+    r"改编|原作|漫画化|动画化|小说原作|游戏化|联动|コラボ|コラボレーション",
+    re.IGNORECASE,
+)
+ANIME_STYLE_TAG_RE = re.compile(
+    r"手游|手机游戏|二次元|动漫|美少女|乙女|女性向|BL游戏|恋爱|ADV",
+    re.IGNORECASE,
+)
+JRPG_TAG_RE = re.compile(
+    r"RPG|角色扮演|日式|日系|JRPG|冒险|奇幻|科幻",
+    re.IGNORECASE,
+)
+INDIE_TAG_RE = re.compile(r"同人|独立游戏|サークル|社团", re.IGNORECASE)
+# 宽泛兜底：明显 ACGN 向但没命中上面具体分类的标签信号
+MARGIN_TAG_RE = re.compile(
+    r"日本|同人|社团|独立|萌|悬疑|恐怖|音乐|节奏|格斗|射击|策略|模拟|养成|经营|建造|解谜|像素|治愈|校园|奇幻",
+    re.IGNORECASE,
+)
+# 兜底只放行 rank 靠前的少量作品（rank 越小越热门）；上线后据实可调小
+MARGIN_MAX_RANK = 1000
+
+JP_SIGNAL_RE = re.compile(
+    r"[\u3041-\u3096\u30a1-\u30fa]|日式|日系|日本|ジャパン|Japan",
+    re.IGNORECASE,
+)
+
+
+def _japanese_signal(payload: dict) -> bool:
+    """作品是否带日系信号：标签 / 原名 / 译名里出现日文假名或「日式/日系/日本」。"""
+    text = " ".join(_tag_names(payload))
+    name = f"{payload.get('name') or ''} {payload.get('name_cn') or ''}"
+    return bool(JP_SIGNAL_RE.search(f"{text} {name}"))
+
+
+def is_acgn_game_payload(payload: dict) -> tuple[bool, str]:
+    """游戏条目是否本站收录（ACGN 向），返回 ``(是否收录, 命中分类文案)``。
+
+    纯标签 / 标记判定，不联网；优先级见上方常量说明。选品端
+    （scripts.select_from_archive.apply_ingest_policy）先用它做免联网预过滤，
+    未命中再联网查原作关联并打 ``_site_related_ip`` 标记；服务端 map_subject
+    的总闸同样调用本函数，两端口径完全一致，标记不可伪造绕过。
+    """
+    tags_joined = " ".join(_tag_names(payload))
+    if GALGAME_TAG_RE.search(tags_joined):
+        return True, "galge/视觉小说"
+    if payload.get("_site_related_ip") is True:
+        return True, "原作关联(选品标记)"
+    if ADAPTATION_TAG_RE.search(tags_joined):
+        return True, "改编/联动"
+    if ANIME_STYLE_TAG_RE.search(tags_joined):
+        return True, "二游/动漫风"
+    if (JRPG_TAG_RE.search(tags_joined) or INDIE_TAG_RE.search(tags_joined)) and _japanese_signal(payload):
+        return True, "日式RPG/同人独立"
+    rank = (payload.get("rating") or {}).get("rank")
+    if (
+        MARGIN_TAG_RE.search(tags_joined)
+        and isinstance(rank, int)
+        and not isinstance(rank, bool)
+        and 0 < rank <= MARGIN_MAX_RANK
+    ):
+        return True, "宽泛兜底(高rank)"
+    return False, "非ACGN向游戏"
+
+
 def resolve_book(payload: dict) -> tuple[str | None, str | None]:
     """从条目 payload 解析 ``(content_type, book_kind)``。
 
@@ -504,6 +582,9 @@ class MappedSubject:
     summary: str
     rating: float
     source_url: str
+    # 评分人数（Bangumi 的 rating.total）：分数有没有参考价值全看它。
+    # None = 这一条没问到人数（「未知」，不等于「人数少」），口径见 app/rating.py。
+    rating_count: int | None = None
     tags: list[str] = field(default_factory=list)
     studios: list[str] = field(default_factory=list)
     year: int | None = None
@@ -1284,9 +1365,10 @@ def map_subject(payload: dict, *, summary_fallback: str | None = None) -> Mapped
     - type=2 -> anime，type=4 -> game；type=1 书籍按 platform 拆分（1001/"漫画" ->
       comic，1002/"小说" -> novel 且经 ``classify_book`` 给出 book_kind 标注；
       非日本语种的小说直接跳过）；音乐（3）与三次元/真人（5、6）跳过；
-    - 收录口径（2026-10-21）：小说只收轻小说（文学不收）；游戏只收 galge
-      （tags 判定）或带 ``_site_related_ip`` 标记（选品端确认有动画/漫画
-      相关）的条目；其余游戏跳过；
+    - 收录口径（2026-10-23 v3）：小说只收轻小说（文学不收）；游戏只收 ACGN 向——
+      galge/视觉小说、动画/漫画/轻小说改编与联动、二游/动漫风、日式RPG/同人
+      独立、以及少量宽泛兜底（详见 ``is_acgn_game_payload``）。两端口径统一，
+      选品端预过滤与服务端总闸一致；
     - tags 只留题材（``extract_tags``，经 app.tagging 归一）；公司进 studios、
       年份进 year，各自有结构化位置；书籍条目另从 infobox 派生文库标签
       （``extract_book_tags``）。
@@ -1317,11 +1399,10 @@ def map_subject(payload: dict, *, summary_fallback: str | None = None) -> Mapped
     # 漫画相关」并打上 payload["_site_related_ip"]=True 标记的条目
     # （scripts/select_from_archive.apply_ingest_policy 负责）。标记缺失的
     # 非 galge 游戏（随机导入、手动 run_sync 等）一律拦下。
-    if content_type == "game" and not (
-        is_galge_payload(payload) or payload.get("_site_related_ip") is True
-    ):
+    if content_type == "game" and not is_acgn_game_payload(payload)[0]:
         raise SubjectMappingError(
-            "普通游戏不收录（本站游戏区只收 galge 或有动画/漫画相关的游戏）"
+            "非ACGN向游戏不收录（本站游戏区只收 galge/视觉小说、动画/漫画/轻小说"
+            "改编、二游/动漫风、日式RPG/同人独立及少量宽泛兜底）"
         )
 
     title = (payload.get("name_cn") or "").strip() or (payload.get("name") or "").strip()
@@ -1348,12 +1429,24 @@ def map_subject(payload: dict, *, summary_fallback: str | None = None) -> Mapped
             f"缺少有效评分（rating.score 实际值：{score!r}，本站 rating 为必填且不伪造评分）"
         )
 
+    # 评分人数单独留档：Bangumi 的 score 就是「评分的原始均值」，人数极少时
+    # （例如只有 1 个人打了 10 分）score 会如实变成 10.0，只盯分数拦不住。
+    # 展示端按人数判定要不要显示这个分数（见 app/rating.py）。
+    # 取不到就留 None「未知」，不伪造 —— 未知不会改变既有展示行为。
+    raw_total = (payload.get("rating") or {}).get("total")
+    rating_count = (
+        raw_total
+        if isinstance(raw_total, int) and not isinstance(raw_total, bool) and raw_total >= 0
+        else None
+    )
+
     return MappedSubject(
         bangumi_id=bangumi_id,
         title=title,
         type=content_type,
         summary=summary,
         rating=float(score),
+        rating_count=rating_count,
         source_url=SOURCE_URL_TEMPLATE.format(subject_id=bangumi_id),
         tags=_subject_tags(payload, content_type, exclude=_build_tag_exclude(payload)),
         studios=extract_studios(payload),
@@ -1501,6 +1594,7 @@ def _map_and_store(
             type=subject.type,
             summary=subject.summary,
             rating=subject.rating,
+            rating_count=subject.rating_count,
             bangumi_id=subject.bangumi_id,
             source_url=subject.source_url,
             year=subject.year,

@@ -41,8 +41,38 @@ ENTITY_ROLE_MAP = {
     "动画制作": ("动画制作", "company"),
 }
 
-# 实体体系没有覆盖、但读者会关心的职位，放 content_credits（只展示，不做索引）。
-EXTRA_ROLES = ("副导演", "脚本", "美术监督", "音响监督")
+# 首屏（main）：每部作品只有个位数的一把手职位。分镜 / 演出 / 作画监督
+# 这类按集数换人的职位虽然在专业读者眼里很重要，但一部 TV 动辄几十条，
+# 全塞首屏轨道会把「查看全部」撑成一堵墙——它们进折叠区（long）。
+STAFF_MAIN_ROLES = frozenset(
+    {
+        "导演",
+        "副导演",
+        "系列构成",
+        "脚本",
+        "剧本",
+        "原作",
+        "原案",
+        "人物原案",
+        "人物设定",
+        "总作画监督",
+        "音乐",
+        "美术监督",
+        "色彩设计",
+        "摄影监督",
+        "剪辑",
+        "音响监督",
+        "主题歌演出",
+        "制片人",
+        "动画制片人",
+        "制作人",
+        "制作总指挥",
+        "企画",
+        "程序",
+        "美工",
+        "游戏设计师",
+    }
+)
 
 # 长尾职位（来自 persons 接口）：只收知名 / 有作品积累的人。
 LONG_ROLES = (
@@ -55,13 +85,164 @@ LONG_ROLES = (
     "演出",
 )
 
+# ---- Staff 表：infobox 里的全部人事键 ----
+#
+# 为什么要全收：infobox 才是 Bangumi 条目页真正展示的职员表（导演 / 系列构成 /
+# 脚本 / 人物设定 / 音乐 / 美术监督 … 一直到录音助理），而 persons 接口只有
+# 原画级别的长尾。旧实现只把 4 个「额外职位」写进 credits，核心主创被塞进
+# 实体关系区，于是详情页 Staff 常年只剩两三条、甚至为空。
+#
+# 三个键集分工：
+# - STAFF_COMPANY_KEYS：公司/组织，交给「制作」行与实体关系（person 之外）；
+# - STAFF_SKIP_KEYS：客观事实（话数 / 放送 / 平台 / 售价 …），只进 content_facts；
+# - 其余键一律视为人事职位，按 STAFF_ROLE_ORDER 的顺序落 content_credits。
+STAFF_COMPANY_KEYS = frozenset(
+    {
+        "动画制作",
+        "製作",
+        "制作",
+        "开发",
+        "发行",
+        "出版社",
+        "音乐制作",
+        "3DCG",
+        "录音工作室",
+        "摄影工作室",
+        "动画工作室",
+        "制作会社",
+    }
+)
+
+STAFF_SKIP_KEYS = frozenset(
+    {
+        "中文名",
+        "平台",
+        "游戏类型",
+        "游玩人数",
+        "发行日期",
+        "售价",
+        "发售日期",
+        "价格",
+        "播放时长",
+        "碟片数量",
+        "website",
+        "Website",
+        "官方网站",
+        "话数",
+        "放送开始",
+        "放送星期",
+        "播放电视台",
+        "其他电视台",
+        "播放结束",
+        "Copyright",
+        "别名",
+        "版本",
+        "商品编号",
+        "ASIN",
+        "ISBN",
+        "页数",
+        "定价",
+        "出版社",
+        "又名",
+    }
+)
+
+# 「原作」键既可能是人名（はまじあき），也可能只是载体（漫画 / 游戏 / 原创）。
+# 后者由 contents.source_material 承载，不该在 Staff 表里出现一个叫「漫画」的人。
+STAFF_NON_PERSON_VALUES = frozenset(
+    {"漫画", "轻小说", "小说", "游戏", "原创", "动画", "同人", "画集", "音乐"}
+)
+
+# 展示顺序（参考 Bangumi 条目页信息卡 / MAL Staff 段）：核心主创在前，
+# 制作执行类在后。未列出的职位按 infobox 原始顺序排在最后。
+STAFF_ROLE_ORDER = (
+    "导演",
+    "副导演",
+    "系列构成",
+    "副系列构成",
+    "脚本",
+    "剧本",
+    "分镜",
+    "演出",
+    "原作",
+    "原案",
+    "人物原案",
+    "人物设定",
+    "副人物设定",
+    "总作画监督",
+    "作画监督",
+    "作画监督助理",
+    "主动画师",
+    "原画",
+    "机械设定",
+    "概念设计",
+    "道具设计",
+    "美术监督",
+    "美术设计",
+    "美术板",
+    "色彩设计",
+    "色彩设计助理",
+    "摄影监督",
+    "CG 导演",
+    "剪辑",
+    "音响监督",
+    "音效",
+    "音乐",
+    "音乐制作人",
+    "音乐监督",
+    "主题歌演出",
+    "插入歌演出",
+    "主题歌作词",
+    "主题歌作曲",
+    "主题歌编曲",
+    "OP・ED 分镜",
+    "OP・ED 演出",
+    "制片人",
+    "动画制片人",
+    "副制片人",
+    "助理制片人",
+    "制作人",
+    "制作总指挥",
+    "企画",
+    "制作统括",
+    "制作管理",
+    "制作进行",
+    "设定制作",
+    "文艺制作",
+    "宣传",
+    "宣传制片人",
+    "录音",
+    "录音助理",
+    "音响制作担当",
+    "设定",
+    "设定协力",
+    "特效",
+    "程序",
+    "美工",
+    "游戏设计师",
+    "制作事务",
+    "制作协力",
+    "企画协力",
+    "原作协力",
+    "CG 制作进行",
+    "制作管理助理",
+)
+STAFF_ROLE_RANK = {role: index for index, role in enumerate(STAFF_ROLE_ORDER)}
+
+# 角色重要度：Bangumi characters 接口的 relation 字段。接口返回顺序不是
+# 重要度序（旁白 / 闲角常常排在最前），必须自己排——否则主角被挤出首屏。
+CAST_RELATION_RANK = {"主角": 0, "配角": 1, "客串": 2, "旁白": 3, "闲角": 4}
+# 单部作品保存的配音关系上限：主角 + 主要配角足够，长尾留库但也别无限堆。
+CAST_MAX_ROWS = 60
+
 # 长尾职员转正门槛：在本站累计出现 ≥10 部作品才展示（数据驱动，不维护名单）。
 LONG_TIER_MIN_WORKS = 10
 # 原文简介入库上限（Bangumi 个别条目简介极长，避免把整页撑爆）
 SUMMARY_MAX_LEN = 4000
 
 # 客观信息里值得展示的键（其余 infobox 一律丢弃，避免「没人关心的信息占服务器」）。
-FACT_KEYS = ("放送星期", "播放结束", "放送开始", "官方网站", "别名", "制作", "企画")
+# 「企画」不在此列：它是人名，归 Staff 表；「制作」是委员会（公司），留在补充资料。
+FACT_KEYS = ("放送星期", "播放结束", "放送开始", "官方网站", "别名", "制作")
 
 _SOURCE_RULES = (
     ("漫画", "漫画原作"),
@@ -148,6 +329,114 @@ def clean_summary(raw) -> str:
     return text[:SUMMARY_MAX_LEN]
 
 
+def _staff_tier(role: str) -> str:
+    """职位分档：一把手的少数职位进首屏，其余（按集换人的、执行 / 助理类）进折叠区。"""
+    return "main" if role in STAFF_MAIN_ROLES else "long"
+
+
+def _merge_split_brackets(values: list[str]) -> list[str]:
+    """把被分隔符切碎的括号项拼回去。
+
+    infobox_map 按「、」切分值，但「主題歌演出 = 結束バンド (青山吉能、長谷川育美…)」
+    这种括号里带顿号的会被切成四段，前两段括号还不闭合。这里按括号是否配平
+    把相邻碎片合回一项，再做姓名清洗。
+    """
+    merged: list[str] = []
+    buffer = ""
+    for value in values:
+        buffer = f"{buffer}、{value}" if buffer else value
+        if buffer.count("(") == buffer.count(")") and buffer.count("（") == buffer.count("）"):
+            merged.append(buffer)
+            buffer = ""
+    if buffer:
+        merged.append(buffer)
+    return merged
+
+
+def build_staff_rows(info: dict[str, list[str]]) -> list[dict]:
+    """把 infobox 里全部人事键摊成 Staff 表行（纯函数，便于测试）。
+
+    - 公司/组织键（动画制作 / 发行 / 开发 …）与客观事实键跳过，它们各有归属；
+    - 已知职位按 STAFF_ROLE_ORDER 排序，未知职位保留 infobox 原序排在后面；
+    - 同一 (职位, 人名) 只留一条——infobox 偶有同名键重复。
+    """
+    pairs: list[tuple[str, str]] = []
+    for key, values in info.items():
+        if key in STAFF_SKIP_KEYS or key in STAFF_COMPANY_KEYS or key.startswith("平台:"):
+            continue
+        for raw_name in _merge_split_brackets(values):
+            name = _clean_name(raw_name)
+            if not name or len(name) > 100:
+                continue
+            if key == "原作" and name in STAFF_NON_PERSON_VALUES:
+                continue
+            pairs.append((key, name))
+
+    indexed = list(enumerate(pairs))
+    indexed.sort(
+        key=lambda pair: (STAFF_ROLE_RANK.get(pair[1][0], len(STAFF_ROLE_RANK)), pair[0])
+    )
+
+    rows: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for order, (_index, (role, name)) in enumerate(indexed):
+        if (role, name) in seen:
+            continue
+        seen.add((role, name))
+        rows.append(
+            {
+                "person_id": None,
+                "role": role[:30],
+                "name": name,
+                "detail": None,
+                "sort_order": order,
+                "tier": _staff_tier(role),
+            }
+        )
+    return rows
+
+
+def build_cast_rows(characters: list | None) -> list[dict]:
+    """角色-声优行：只取原版配音，按 Bangumi 的 relation（主角 > 配角 > …）排序。
+
+    characters 接口的返回顺序**不是**重要度序：旁白 / 闲角常排在最前面，
+    直接截前 N 条会把主角挤掉（实测「孤独摇滚」主角排在第 5 位之后）。
+    """
+    rows: list[dict] = []
+    for index, character in enumerate(characters or []):
+        if not isinstance(character, dict):
+            continue
+        actors = character.get("actors") or []
+        if not actors:
+            continue
+        primary = actors[0] if isinstance(actors[0], dict) else {}
+        actor = str(primary.get("name") or "").strip()
+        character_name = str(character.get("name") or "").strip()
+        if not actor or not character_name:
+            continue
+        relation = str(character.get("relation") or "").strip()[:10]
+        rows.append(
+            {
+                "character": character_name[:100],
+                "character_id": character.get("id"),
+                "person_id": primary.get("id"),
+                "actor": actor[:100],
+                "relation": relation,
+                "sort_order": index,
+                "_rank": CAST_RELATION_RANK.get(relation, 2),
+                "_index": index,
+            }
+        )
+
+    rows.sort(key=lambda item: (item["_rank"], item["_index"]))
+    rows = rows[:CAST_MAX_ROWS]
+    for order, row in enumerate(rows):
+        row["sort_order"] = order
+        row.pop("_rank", None)
+        row.pop("_index", None)
+    return rows
+
+
 def build_meta(
     subject: dict,
     characters: list | None = None,
@@ -166,19 +455,9 @@ def build_meta(
                     {"role": role, "name": name[:120], "entity_type": entity_type}
                 )
 
-    # 实体体系未覆盖的职位 -> content_credits（只展示）
-    credits: list[dict] = []
-    order = 0
-    for role in EXTRA_ROLES:
-        for raw_name in info.get(role, []):
-            name = _clean_name(raw_name)
-            if not name:
-                continue
-            credits.append(
-                {"person_id": None, "role": role, "name": name, "detail": None,
-                 "sort_order": order, "tier": "main"}
-            )
-            order += 1
+    # Staff 表：infobox 的全部人事键（核心主创 + 制作执行）
+    credits: list[dict] = build_staff_rows(info)
+    order = len(credits)
 
     for person in persons or []:
         if not isinstance(person, dict):
@@ -200,29 +479,7 @@ def build_meta(
         )
         order += 1
 
-    cast: list[dict] = []
-    for index, character in enumerate(characters or []):
-        if not isinstance(character, dict):
-            continue
-        actors = character.get("actors") or []
-        if not actors:
-            continue
-        primary = actors[0] if isinstance(actors[0], dict) else {}
-        actor = str(primary.get("name") or "").strip()
-        character_name = str(character.get("name") or "").strip()
-        if not actor or not character_name:
-            continue
-        cast.append(
-            {
-                "character": character_name[:100],
-                "character_id": character.get("id"),
-                "person_id": primary.get("id"),
-                "actor": actor[:100],
-                "sort_order": index,
-            }
-        )
-        if len(cast) >= 12:  # 详情页只展示前几位，多存无益
-            break
+    cast = build_cast_rows(characters)
 
     studios = [name for name in info.get("动画制作", []) if name][:3]
 
@@ -272,14 +529,20 @@ def _api_get(path: str, *, proxy: str = "", timeout: float = 12.0,
 
 
 def fetch_subject_meta(bangumi_id: int, *, proxy: str = "", timeout: float = 12.0,
-                       retries: int = 2, sleep=time.sleep) -> dict:
-    """拉一部作品的客观信息 + 制作人员 + 角色声优（2 次请求）。"""
+                       retries: int = 2, sleep=time.sleep, with_persons: bool = True) -> dict:
+    """拉一部作品的客观信息 + 制作人员 + 角色声优（3 次请求）。
+
+    ``with_persons=False`` 时跳过 /persons 长尾职员表：批量回填 Staff 主创时
+    这一步只产候选（要累计 10 部作品才转正），省掉 1/3 的请求时间。
+    """
     subject = _api_get(f"/v0/subjects/{bangumi_id}", proxy=proxy, timeout=timeout,
                        retries=retries, sleep=sleep)
     characters = _api_get(f"/v0/subjects/{bangumi_id}/characters", proxy=proxy,
                           timeout=timeout, retries=retries, sleep=sleep)
-    persons = _api_get(f"/v0/subjects/{bangumi_id}/persons", proxy=proxy,
-                       timeout=timeout, retries=retries, sleep=sleep)
+    persons: list = []
+    if with_persons:
+        persons = _api_get(f"/v0/subjects/{bangumi_id}/persons", proxy=proxy,
+                           timeout=timeout, retries=retries, sleep=sleep)
     return {"subject": subject, "characters": characters, "persons": persons}
 
 
@@ -325,12 +588,14 @@ def sync_content_meta(
     retries: int = 2,
     sleep=time.sleep,
     payload: dict | None = None,
+    with_persons: bool = True,
 ) -> dict:
     """补全一部作品并写入；payload 可注入（测试 / 脚本复用已拉数据）。"""
     if content.bangumi_id is None:
         return {}
     raw = payload or fetch_subject_meta(
-        int(content.bangumi_id), proxy=proxy, timeout=timeout, retries=retries, sleep=sleep
+        int(content.bangumi_id), proxy=proxy, timeout=timeout, retries=retries,
+        sleep=sleep, with_persons=with_persons,
     )
     persons = raw.get("persons") or []
     meta = build_meta(
@@ -363,8 +628,10 @@ def sync_content_meta(
     db.commit()
 
     crud.replace_content_studios(db, content.id, meta["studios"])
-    # 主创补进现有实体体系；已有关联的作品不动（避免覆盖手工维护的关联）
-    if not crud.has_content_entity_recognition(db, content.id):
+    # 主创补进现有实体体系；已有关联的作品不动（避免覆盖手工维护的关联）。
+    # 注意这里只认「实体关联」本身：旧实现用 has_content_entity_recognition，
+    # 它把「有同系列」也算作已识别，于是系列作品的导演 / 音乐永远不会入库。
+    if crud.count_content_entity_links(db, content.id) == 0:
         for item in meta["entity_roles"]:
             crud.add_content_entity_link(
                 db, content.id, item["name"], item["role"], item["entity_type"]

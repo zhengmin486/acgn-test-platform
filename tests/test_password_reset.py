@@ -30,7 +30,13 @@ from app.config import settings
 from app.database import Base, get_db
 from app.main import app
 from app.models import PasswordResetToken, User
-from auth_helpers import ADMIN_USERNAME, ADMIN_PASSWORD, create_accounts, login
+from auth_helpers import (
+    ADMIN_PASSWORD,
+    ADMIN_USERNAME,
+    create_accounts,
+    login,
+    register as submit_registration,
+)
 
 RESET_TOKEN_PATTERN = re.compile(r"/reset-password\?token=([A-Za-z0-9_\-]+)")
 
@@ -80,9 +86,8 @@ def env(tmp_path):
 
 def _register(client, username: str, email: str = MAIL,
               password: str = "pw-123456", **extra):
-    data = {"username": username, "password": password, "confirm": password, "email": email}
-    data.update(extra)
-    return client.post("/register", data=data, follow_redirects=False)
+    """按新流程注册（先取邮箱验证码再提交），建号即「邮箱已验证」。"""
+    return submit_registration(client, username, password, email=email, **extra)
 
 
 def _request_reset(client, email: str, next_url: str = "/"):
@@ -288,6 +293,7 @@ class TestResetPassword:
     def test_expired_token_is_rejected(self, env):
         """先取链接再让它过期：重发会签发新令牌，顺序反了就测不到过期。"""
         _register(env.client, "pwexpire", email=MAIL)
+        _request_reset(env.client, MAIL)
         url = _reset_link(env.client)
         token = RESET_TOKEN_PATTERN.search(url).group(1)
         _expire_tokens(env)
@@ -323,8 +329,18 @@ class TestResetPassword:
         assert "pwkick" not in env.client.get("/").text
 
     def test_resetting_also_verifies_email(self, env):
-        """能收到重置邮件即证明邮箱可控，顺带完成邮箱验证。"""
-        _register(env.client, "pwverify", email=MAIL)
+        """能收到重置邮件即证明邮箱可控，顺带完成邮箱验证。
+
+        新注册流程建号即已验证，这里直接建一个「未验证」账号来还原该场景。
+        """
+        db = env.session_factory()
+        try:
+            crud.create_user(
+                db, username="pwverify", password="pw-123456",
+                role=crud.ROLE_USER, email=MAIL, require_verification=True,
+            )
+        finally:
+            db.close()
         assert _user_by_name(env, "pwverify").email_verified is False
 
         _request_reset(env.client, MAIL)
@@ -381,11 +397,13 @@ class TestResetPassword:
 class TestResetLinkFallback:
     def test_link_is_generated_without_smtp(self, env):
         _register(env.client, "fallback", email=MAIL)
+        _request_reset(env.client, MAIL)
         url = _reset_link(env.client, next_url="/articles")
         assert "/reset-password?token=" in url
 
     def test_generated_link_works(self, env):
         _register(env.client, "fallbackwork", email=MAIL)
+        _request_reset(env.client, MAIL)
         url = _reset_link(env.client)
         resp = env.client.get(url, follow_redirects=False)
         assert resp.status_code == 200

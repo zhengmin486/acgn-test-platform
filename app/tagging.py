@@ -30,6 +30,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from collections.abc import Iterable
+from functools import lru_cache
 
 TAG_GENRE = "genre"
 TAG_STUDIO = "studio"
@@ -413,12 +414,33 @@ _STUDIO_BRAND_BLOCKLIST = (
 _STUDIO_BRAND_BLOCKLIST_NORM = {_loose_key(name) for name in _STUDIO_BRAND_BLOCKLIST}
 
 
+@lru_cache(maxsize=8192)
 def canonical_genre(name: str) -> str | None:
-    """题材规范名：命中同义词表返回规范名（SF -> 科幻），否则 None。"""
+    """题材规范名：命中同义词表返回规范名（SF -> 科幻），否则 None。
+
+    纯函数（查表 + 字符串归一），故缓存结果：首页推荐要扫「作品 × 标签」的
+    十几万行，标签名实际只有几百种，未缓存时这里独占约 0.16s/次（2026-10-26）。
+    词表是模块级常量、运行期不变，缓存不会读到过期结果。
+    """
     key = _norm_key(name)
     if not key:
         return None
     return _GENRE_LOOKUP.get(key)
+
+
+@lru_cache(maxsize=8192)
+def canonical_studio(name: str) -> str | None:
+    """公司 / 工作室规范名：命中别名表返回规范名（京阿尼 -> 京都动画），否则 None。
+
+    与 canonical_genre 同款：词表是模块级常量，归一（NFKC + casefold）后一次查表，
+    结果可缓存。此前调用方是「逐部作品 × 逐标签 × 遍历全部厂商别名」的三重循环，
+    STUDIO_ALIASES 有三十余家、每家若干别名，一部作品几十个标签时开销可观；
+    换表后归一口径还顺带让全角写法（ＭＡＰＰＡ）与更多大小写变体一并命中。
+    """
+    key = _norm_key(name)
+    if not key:
+        return None
+    return _STUDIO_LOOKUP.get(key)
 
 
 def is_genre_tag(tag: str) -> bool:

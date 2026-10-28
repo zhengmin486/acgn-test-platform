@@ -2,87 +2,397 @@
 {% from "_brand.html" import wordmark %}
 {% block title %}注册{% endblock %}
 {% block content %}
-<div class="row justify-content-center">
-    <div class="col-12 col-md-8 col-lg-5">
-        <div class="card app-card auth-card mt-4">
-            <div class="card-body p-4">
-                <div class="auth-band mb-4">
-                    {{ wordmark("brand-lockup-lg") }}
-                    <h1 class="h4 mb-1">注册普通用户</h1>
-                    <p class="small mb-0" style="color: rgba(255,255,255,.85);">
-                        {% if invite_required %}本站已关闭公开注册，需有效邀请码{% endif %}{% if invite_required and require_email %}；{% endif %}{% if require_email %}注册后需验证邮箱才能登录{% if not invite_required %}；{% endif %}{% else %}{% if not invite_required %}注册后即可使用 ACGN 内容平台{% endif %}{% endif %}
-                    </p>
+{# 方案 A：左品牌面板 + 右表单。≥992 左右分栏，<992 折叠成「顶部品牌条 + 单列表单」。
+   左面板只承载身份：字标 + 四大品类（沿用页脚口径的既有措辞）+ 未登录可浏览说明；
+   右侧照主流注册表单来（顶标签 / 聚焦环 / 行内校验 / 密码可见 / 发码倒计时）。 #}
+<div class="auth-shell">
+    <aside class="auth-aside">
+        <div class="auth-aside-inner">
+            {{ wordmark("brand-lockup-lg") }}
+            <ul class="auth-aside-cat">
+                <li class="auth-aside-chip">动画</li>
+                <li class="auth-aside-chip">漫画</li>
+                <li class="auth-aside-chip">游戏</li>
+                <li class="auth-aside-chip">轻小说</li>
+            </ul>
+            <p class="auth-aside-note">未登录也可正常浏览内容平台（首页 / ACGN 资讯 / 新番档期）。</p>
+        </div>
+    </aside>
+
+    <section class="auth-panel">
+        <h1 class="auth-title">{% if invite_role == 'admin' %}注册为管理员{% else %}注册{% endif %}</h1>
+        <p class="auth-subtitle">
+            {% if invite_role == 'admin' %}你持有站长发放的管理员邀请码，注册成功即获管理员权限
+            {% elif require_email %}先设置用户名和密码，再用邮箱验证码完成注册
+            {% else %}注册后即可使用 ACGN 内容平台{% endif %}
+        </p>
+
+        {% if invite_role == 'admin' %}
+        <div class="alert alert-info py-2 mb-3">
+            <strong>将以管理员身份注册。</strong>该邀请码由站长发放，注册成功即可使用测试管理平台与内容管理功能。
+        </div>
+        {% endif %}
+
+        {# AJAX 发码的结果落在这三格；下面三个整页 alert 供无 JS / 回退路径使用 #}
+        <div class="alert alert-danger py-2 mb-3 d-none" id="register-alert"></div>
+        <div class="alert alert-success py-2 mb-3 d-none" id="register-notice"></div>
+        <div class="alert alert-warning py-2 mb-3 d-none" id="register-dev"></div>
+
+        {% if error %}<div class="alert alert-danger py-2 mb-3">{{ error }}</div>{% endif %}
+        {% if notice %}<div class="alert alert-success py-2 mb-3">{{ notice }}</div>{% endif %}
+        {% if dev_code %}
+        <div class="alert alert-warning py-2 mb-3">
+            当前<strong>未配置邮件服务</strong>（SMTP 未配置），本次验证码：<code>{{ dev_code }}</code>
+            ——仅用于本地联调，配置真实邮件服务后不会在页面显示。
+        </div>
+        {% endif %}
+
+        <form method="post" action="/register" id="register-form"
+              data-min-user="{{ min_username_length }}" data-max-user="{{ max_username_length }}"
+              data-min-pwd="{{ min_password_length }}" data-max-pwd="{{ max_password_length }}">
+            <input type="hidden" name="next" value="{{ next }}">
+
+            {# ---- 1) 账号信息（先写） ---- #}
+            <div class="auth-group">
+                <p class="auth-group-label">账号信息</p>
+                <div class="mb-3">
+                    <label class="form-label" for="register-username">用户名</label>
+                    <input class="form-control auth-control" id="register-username" name="username"
+                           value="{{ username }}" required autofocus autocomplete="username"
+                           minlength="{{ min_username_length }}" maxlength="{{ max_username_length }}">
+                    <div class="auth-feedback" id="register-username-msg" aria-live="polite"></div>
+                    <div class="form-text">
+                        {{ min_username_length }}-{{ max_username_length }} 个字符，可使用字母、数字、下划线和连字符。
+                    </div>
                 </div>
-
-                {% if error %}<div class="alert alert-danger py-2 mb-3">{{ error }}</div>{% endif %}
-
-                <form method="post" action="/register">
-                    <input type="hidden" name="next" value="{{ next }}">
-                    {% if invite_required %}
-                    <div class="mb-3">
-                        <label class="form-label" for="register-invite">邀请码</label>
-                        <input class="form-control" id="register-invite" name="invite_code"
-                               value="{{ invite_code }}" required autofocus autocomplete="off"
-                               maxlength="32" placeholder="8 位邀请码">
-                        <div class="form-text">
-                            公开注册已关闭，需填写管理员发放的邀请码（<a href="/admin/invites">管理员生成入口</a>）。
-                        </div>
-                    </div>
-                    {% endif %}
-                    <div class="mb-3">
-                        <label class="form-label" for="register-username">用户名</label>
-                        <input class="form-control" id="register-username" name="username"
-                               value="{{ username }}" required autofocus autocomplete="username"
-                               minlength="{{ min_username_length }}" maxlength="{{ max_username_length }}">
-                        <div class="form-text">
-                            {{ min_username_length }}-{{ max_username_length }} 个字符，可使用字母、数字、下划线和连字符。
-                        </div>
-                    </div>
-                    {% if require_email %}
-                    <div class="mb-3">
-                        <label class="form-label" for="register-email">邮箱</label>
-                        <input class="form-control" id="register-email" name="email"
-                               type="email" value="{{ email }}" required autocomplete="email"
-                               maxlength="{{ max_email_length }}">
-                        <div class="form-text">用于接收验证邮件，一个邮箱只能注册一个账号。</div>
-                    </div>
-                    {% endif %}
-                    <div class="mb-3">
-                        <label class="form-label" for="register-password">密码</label>
-                        <input class="form-control" id="register-password" name="password"
+                <div class="mb-3">
+                    <label class="form-label" for="register-password">密码</label>
+                    <div class="auth-field">
+                        <input class="form-control auth-control" id="register-password" name="password"
                                type="password" required autocomplete="new-password"
                                minlength="{{ min_password_length }}" maxlength="{{ max_password_length }}">
-                        <div class="form-text">至少 {{ min_password_length }} 位。</div>
+                        <button class="auth-reveal" type="button" data-auth-reveal="register-password"
+                                aria-pressed="false">显示</button>
                     </div>
-                    <div class="mb-3">
-                        <label class="form-label" for="register-confirm">确认密码</label>
-                        <input class="form-control" id="register-confirm" name="confirm"
+                    <ul class="auth-rules" id="register-rules">
+                        <li id="rule-len">{{ min_password_length }}-{{ max_password_length }} 位</li>
+                        <li id="rule-same">两次输入的密码一致</li>
+                    </ul>
+                </div>
+                <div class="mb-0">
+                    <label class="form-label" for="register-confirm">确认密码</label>
+                    <div class="auth-field">
+                        <input class="form-control auth-control" id="register-confirm" name="confirm"
                                type="password" required autocomplete="new-password"
                                minlength="{{ min_password_length }}" maxlength="{{ max_password_length }}">
+                        <button class="auth-reveal" type="button" data-auth-reveal="register-confirm"
+                                aria-pressed="false">显示</button>
                     </div>
-                    <div class="d-grid">
-                        <button class="btn btn-primary" type="submit">
-                            {% if require_email %}注册并发送验证邮件{% else %}注册并登录{% endif %}
+                    <div class="auth-feedback" id="register-confirm-msg" aria-live="polite"></div>
+                </div>
+                {% if not require_email %}
+                <div class="mb-0 mt-3">
+                    <label class="form-label" for="register-email">邮箱（可选）</label>
+                    <input class="form-control auth-control" id="register-email" name="email"
+                           type="email" value="{{ email }}" autocomplete="email"
+                           maxlength="{{ max_email_length }}">
+                </div>
+                {% endif %}
+            </div>
+
+            {% if require_email %}
+            {# ---- 2) 邮箱验证（后验证） ---- #}
+            <div class="auth-group">
+                <p class="auth-group-label">邮箱验证</p>
+                <div class="mb-3">
+                    <label class="form-label" for="register-email">邮箱</label>
+                    <div class="input-group">
+                        <input class="form-control auth-control" id="register-email" name="email"
+                               type="email" value="{{ email }}" required
+                               {% if code_sent %}readonly{% endif %} autocomplete="email"
+                               maxlength="{{ max_email_length }}" placeholder="you@example.com">
+                        <button class="btn btn-outline-secondary" type="submit" id="register-send"
+                                formaction="/register/code" formnovalidate
+                                data-label="{% if code_sent %}重新发送{% else %}发送验证码{% endif %}"
+                                data-cooldown="{{ cooldown }}">
+                            {% if code_sent %}重新发送{% else %}发送验证码{% endif %}
                         </button>
                     </div>
-                </form>
-
-                <hr class="my-4">
-                <p class="small text-muted mb-0">
-                    注册账号固定为<strong>普通用户</strong>，仅能浏览内容平台；
-                    管理员账号需由现有管理员通过 <code>scripts/create_user.py --role admin</code> 创建。<br>
-                    未登录也可正常浏览内容平台（首页 / ACGN 资讯 / 新番档期）。
-                    {% if require_email %}<br>验证邮件未收到时，可前往
-                    <a href="/verify/resend">重新发送</a>。{% endif %}
-                </p>
-                <p class="text-center mt-3 mb-0">
-                    <a class="small" href="/login{% if next and next != '/' %}?next={{ next }}{% endif %}">已有账号？去登录</a>
-                </p>
+                    <div class="auth-feedback" id="register-email-msg" aria-live="polite"></div>
+                    <div class="form-text">
+                        {% if code_sent %}
+                        验证码已发送至该邮箱，{{ code_ttl_minutes }} 分钟内有效。
+                        {% else %}
+                        一个邮箱只能注册一个账号；先收验证码再完成注册。
+                        {% endif %}
+                    </div>
+                </div>
+                <div class="mb-0">
+                    <label class="form-label" for="register-code">邮箱验证码</label>
+                    <input class="form-control auth-control" id="register-code" name="code"
+                           value="" required autocomplete="one-time-code"
+                           inputmode="numeric" maxlength="6" placeholder="6 位数字">
+                    <div class="form-text">点击上方「发送验证码」后查收邮件，把 6 位数字填在这里。</div>
+                </div>
             </div>
-        </div>
-        <div class="text-center mt-3 mb-4">
+            {% endif %}
+
+            {% if invite_field_visible %}
+            {# ---- 3) 邀请码：管理员注册需求不大，默认折叠 ---- #}
+            <details class="auth-more" {% if invite_required or invite_code %}open{% endif %}>
+                <summary>{% if invite_required %}邀请码{% else %}邀请码（可选）{% endif %}</summary>
+                <div class="auth-more-body">
+                    <label class="form-label" for="register-invite">邀请码</label>
+                    <input class="form-control" id="register-invite" name="invite_code"
+                           value="{{ invite_code }}" autocomplete="off"
+                           maxlength="32" placeholder="{% if invite_required %}必填{% else %}没有可留空{% endif %}">
+                    <div class="form-text">
+                        {% if invite_required %}本站需填写管理员发放的邀请码{% else %}可以留空直接注册；填了则必须是有效邀请码{% endif %}
+                    </div>
+                </div>
+            </details>
+            {% endif %}
+
+            <div class="d-grid auth-actions">
+                <button class="btn btn-primary auth-submit" type="submit">完成注册</button>
+            </div>
+        </form>
+
+        <p class="auth-footnote">
+            {% if invite_role == 'admin' %}
+            你正在使用<strong>管理员邀请码</strong>注册，注册成功后账号即为管理员，可使用测试管理平台与内容管理功能。
+            {% else %}
+            注册账号为<strong>普通用户</strong>，仅能浏览内容平台；若需管理员权限，请向站长索取管理员邀请码。
+            {% endif %}
+        </p>
+        <div class="auth-links">
+            <a class="small" href="/login{% if next and next != '/' %}?next={{ next }}{% endif %}">已有账号？去登录</a>
             <a class="small" href="/">&larr; 返回内容平台首页</a>
         </div>
-    </div>
+    </section>
 </div>
+{# 交互增强（渐进增强）：有 JS 才生效，禁用后与改造前一致（整页提交，服务端照常校验）。
+   1) 发码改 fetch：注册页已改成「先填账号信息、再点发送验证码」，整页刷新会把已输入的
+      用户名 / 密码清掉；AJAX 不刷新就不丢。fetch 失败即退回整页表单提交（后端已回填 username）。
+   2) 倒计时禁用：真实秒数由服务端 cooldown 给出，不是静态文字。
+   3) 行内校验 + 密码规则清单：错误文案逐字取自 auth.py，前后端口径不会打架。 #}
+<script>
+(function () {
+    "use strict";
+    var form = document.getElementById("register-form");
+    if (!form) return;
+
+    var NAME_RE = /^[\w-]+$/;
+    var MAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+    var minUser = Number(form.dataset.minUser), maxUser = Number(form.dataset.maxUser);
+    var minPwd = Number(form.dataset.minPwd), maxPwd = Number(form.dataset.maxPwd);
+
+    function el(id) { return document.getElementById(id); }
+
+    function mark(inputId, msgId, err) {
+        var input = el(inputId), msg = msgId ? el(msgId) : null;
+        if (!input) return;
+        input.classList.toggle("is-error", !!err);
+        input.classList.toggle("is-ok", !err);
+        if (!msg) return;
+        msg.textContent = err || "";
+        msg.classList.toggle("is-shown", !!err);
+        msg.classList.toggle("is-error", !!err);
+    }
+
+    function boxer(box) {
+        if (!box) return function () {};
+        return function (text, kind) {
+            if (!text) { box.classList.add("d-none"); box.textContent = ""; return; }
+            box.textContent = text;
+            box.classList.remove("d-none");
+            box.classList.toggle("alert-danger", kind === "err");
+            box.classList.toggle("alert-success", kind !== "err");
+        };
+    }
+    var showAlert = boxer(el("register-alert"));
+    var showNotice = boxer(el("register-notice"));
+    var showDev = boxer(el("register-dev"));
+
+    function checkUsername() {
+        var input = el("register-username");
+        if (!input) return "";
+        var v = input.value.trim();
+        if (!v) return "用户名不能为空";
+        if (v.length < minUser || v.length > maxUser) return "用户名长度需为 " + minUser + "-" + maxUser + " 个字符";
+        if (!NAME_RE.test(v)) return "用户名只能包含字母、数字、下划线和连字符";
+        return "";
+    }
+
+    function checkPassword() {
+        var input = el("register-password");
+        if (!input) return "";
+        var v = input.value;
+        if (!v) return "密码不能为空";
+        if (v.length < minPwd || v.length > maxPwd) return "密码长度需为 " + minPwd + "-" + maxPwd + " 位";
+        return "";
+    }
+
+    function checkConfirm() {
+        var pwd = el("register-password"), cfm = el("register-confirm");
+        if (!pwd || !cfm || !cfm.value) return "";
+        return pwd.value === cfm.value ? "" : "两次输入的密码不一致";
+    }
+
+    function checkEmail() {
+        var input = el("register-email");
+        if (!input || !el("register-send")) return "";
+        var v = input.value.trim();
+        if (!v) return "";
+        return MAIL_RE.test(v) ? "" : "邮箱格式不正确";
+    }
+
+    /* 规则清单只有两条，且与服务端 validate_password 一一对应，不发明多余规则 */
+    function syncRules() {
+        var pwd = el("register-password"), cfm = el("register-confirm");
+        if (!pwd) return;
+        var lenRule = el("rule-len"), sameRule = el("rule-same");
+        if (lenRule) lenRule.classList.toggle("is-met", pwd.value.length >= minPwd && pwd.value.length <= maxPwd);
+        if (sameRule) sameRule.classList.toggle("is-met", pwd.value.length > 0 && pwd.value === (cfm && cfm.value));
+    }
+
+    function bind(inputId, msgId, checker) {
+        var input = el(inputId);
+        if (!input) return;
+        input.addEventListener("input", function () {
+            syncRules();
+            /* 打字过程中只刷新「已经判过」的字段，避免边输入边闪红 */
+            if (input.classList.contains("is-error") || input.classList.contains("is-ok")) mark(inputId, msgId, checker());
+        });
+        input.addEventListener("blur", function () {
+            syncRules();
+            mark(inputId, msgId, input.value ? checker() : "");
+        });
+    }
+
+    bind("register-username", "register-username-msg", checkUsername);
+    bind("register-password", null, checkPassword);
+    bind("register-confirm", "register-confirm-msg", checkConfirm);
+    bind("register-email", "register-email-msg", checkEmail);
+    syncRules();
+
+    /* ---- 密码显示 / 隐藏 ---- */
+    Array.prototype.forEach.call(form.querySelectorAll("[data-auth-reveal]"), function (btn) {
+        btn.addEventListener("click", function () {
+            var target = el(btn.getAttribute("data-auth-reveal"));
+            if (!target) return;
+            var shown = target.type === "text";
+            target.type = shown ? "password" : "text";
+            btn.textContent = shown ? "显示" : "隐藏";
+            btn.setAttribute("aria-pressed", String(!shown));
+        });
+    });
+
+    /* ---- 发送验证码：fetch 免刷新 + 真实倒计时 ---- */
+    var sendBtn = el("register-send");
+    var emailEl = el("register-email");
+    var timer = null;
+
+    function startCountdown(seconds) {
+        if (!sendBtn) return;
+        var left = Number(seconds) || 0;
+        if (left <= 0) return;
+        var label = sendBtn.dataset.label || "重新发送";
+        sendBtn.disabled = true;
+        var run = function () {
+            if (left <= 0) {
+                clearInterval(timer);
+                sendBtn.disabled = false;
+                sendBtn.textContent = label;
+                return;
+            }
+            sendBtn.textContent = left + " 秒后可重新发送";
+            left -= 1;
+        };
+        run();
+        timer = setInterval(run, 1000);
+    }
+
+    if (sendBtn && Number(sendBtn.dataset.cooldown) > 0) startCountdown(sendBtn.dataset.cooldown);
+
+    if (sendBtn && emailEl) {
+        sendBtn.addEventListener("click", function (event) {
+            event.preventDefault();
+            if (sendBtn.disabled) return;
+            showAlert(""); showNotice(""); showDev("");
+
+            var mailV = emailEl.value.trim();
+            if (!mailV) { mark("register-email", "register-email-msg", "邮箱不能为空"); emailEl.focus(); return; }
+            var mailErr = checkEmail();
+            if (mailErr) { mark("register-email", "register-email-msg", mailErr); emailEl.focus(); return; }
+
+            var usernameEl = el("register-username"), inviteEl = el("register-invite");
+            var body = {
+                email: mailV,
+                username: usernameEl ? usernameEl.value : "",
+                invite_code: inviteEl ? inviteEl.value : "",
+                next: (form.querySelector('input[name="next"]') || {}).value || "/"
+            };
+            sendBtn.disabled = true;
+            fetch("/register/code", {
+                method: "POST",
+                headers: { "X-Requested-With": "fetch" },
+                body: new URLSearchParams(body),
+                credentials: "same-origin"
+            }).then(function (resp) {
+                return resp.json().then(function (data) { return data || {}; });
+            }).then(function (data) {
+                if (data.error) {
+                    showAlert(data.error, "err");
+                } else {
+                    showNotice(data.notice || "验证码已发送，请查收邮件。", "ok");
+                    /* 验证码与邮箱绑定，发码后锁住邮箱——与服务端渲染时的 readonly 同一口径 */
+                    emailEl.readOnly = true;
+                    if (data.dev_code) {
+                        showDev("当前未配置邮件服务（SMTP 未配置），本次验证码：" + data.dev_code
+                            + " ——仅用于本地联调，配置真实邮件服务后不会在页面显示。", "warn");
+                    }
+                }
+                startCountdown(data.cooldown);
+            }).catch(function () {
+                /* fetch 不可用 / 网关异常：退回整页提交，后端会把 username 回填 */
+                sendBtn.disabled = false;
+                var tmp = document.createElement("form");
+                tmp.method = "post";
+                tmp.action = "/register/code";
+                tmp.style.display = "none";
+                Object.keys(body).forEach(function (key) {
+                    var input = document.createElement("input");
+                    input.type = "hidden";
+                    input.name = key;
+                    input.value = body[key];
+                    tmp.appendChild(input);
+                });
+                document.body.appendChild(tmp);
+                tmp.submit();
+            });
+        });
+    }
+
+    /* ---- 提交前本机过一遍，省一次往返（服务端仍是最终裁判） ---- */
+    form.addEventListener("submit", function (event) {
+        var checks = [
+            ["register-username", "register-username-msg", checkUsername()],
+            ["register-password", null, checkPassword()],
+            ["register-confirm", "register-confirm-msg", checkConfirm()]
+        ];
+        if (emailEl && sendBtn) checks.push(["register-email", "register-email-msg", checkEmail()]);
+        var firstBad = null;
+        checks.forEach(function (item) {
+            if (!item[2]) return;
+            mark(item[0], item[1], item[2]);
+            if (!firstBad) firstBad = el(item[0]);
+        });
+        if (firstBad) {
+            event.preventDefault();
+            firstBad.focus();
+        }
+    });
+})();
+</script>
 {% endblock %}

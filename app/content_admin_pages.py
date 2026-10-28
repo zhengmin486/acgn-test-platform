@@ -320,20 +320,22 @@ def add_entity_link_page(
 
 
 @router.post("/manage/entities/link/delete")
-def delete_entity_link_page(
-    request: Request,
-    db: DbSession,
-    link_id: int = Form(...),
-    q: str = Form(""),
-    page: str = Form("1"),
-):
-    """删除一条作品-实体关联（手工纠错；关联不存在时仅提示，不报错）。"""
-    if crud.delete_content_entity_link(db, link_id):
-        note = "removed"
-    else:
-        note = "link_missing"
+async def delete_entity_link_page(request: Request, db: DbSession):
+    """删除作品-实体关联：单条与多选共用同一入口。
+
+    表单以重复的 link_id 字段提交（单条按 χ 按钮携带一个，多选按勾选框携带多个），
+    这里用 form.getlist 全部取出；一条都没删掉时提示「关联不存在」。
+    """
+    form = await request.form()
+    removed = crud.delete_content_entity_links(db, _collect_ids(form.getlist("link_id")))
     return RedirectResponse(
-        _url("/manage/entities", q=q, page=_page_param(page), note=note),
+        _url(
+            "/manage/entities",
+            q=_form_text(form, "q"),
+            page=_page_param(_form_text(form, "page")),
+            note="removed" if removed else "link_missing",
+            deleted=removed,
+        ),
         status_code=303,
     )
 
@@ -387,6 +389,26 @@ def articles_page(
             "q": q,
             "deleted": deleted,
         },
+    )
+
+
+@router.post("/manage/articles/delete")
+async def delete_articles_bulk(request: Request, db: DbSession):
+    """批量删除资讯（勾选框提交的 ids 列表；单条删除走下面的按 id 路由）。
+
+    与作品数据同一口径：未勾选时删除 0 条，重定向仍带 deleted=0，
+    前端据此提示「没有可删除的条目」，不报错。
+    """
+    form = await request.form()
+    deleted = crud.delete_articles(db, _collect_ids(form.getlist("ids")))
+    return RedirectResponse(
+        _url(
+            "/manage/articles",
+            q=_form_text(form, "q"),
+            page=_page_param(_form_text(form, "page")),
+            deleted=deleted,
+        ),
+        status_code=303,
     )
 
 
@@ -474,6 +496,24 @@ def schedules_page(
             "resync_failed": failed,
             "resync_reason": reason,
         },
+    )
+
+
+@router.post("/manage/schedules/delete")
+async def delete_schedules_bulk(request: Request, db: DbSession):
+    """批量删除档期作品（只清理本地记录，与单条删除同口径）。"""
+    form = await request.form()
+    deleted = crud.delete_schedules(db, _collect_ids(form.getlist("ids")))
+    return RedirectResponse(
+        _url(
+            "/manage/schedules",
+            season=_form_text(form, "season"),
+            category=_form_text(form, "category"),
+            q=_form_text(form, "q"),
+            page=_page_param(_form_text(form, "page")),
+            deleted=deleted,
+        ),
+        status_code=303,
     )
 
 
@@ -897,6 +937,8 @@ def submissions_page(
     page: int = Query(default=1, ge=1),
     decided: str = Query(default=""),
     reason: str = Query(default=""),
+    done: int | None = Query(default=None),
+    failed: int | None = Query(default=None),
 ):
     """作品审核：按状态筛选的申请列表，支持直接通过 / 驳回。"""
     status_filter = status if status in crud.SUBMISSION_STATUSES else None
@@ -951,11 +993,79 @@ def submissions_page(
             ),
             "decided": decided,
             "reason": reason,
+            "done": done,
+            "failed": failed,
             "status_labels": crud.SUBMISSION_STATUS_LABELS,
             "kind_labels": crud.SUBMISSION_KIND_LABELS,
             "type_labels": CONTENT_TYPE_LABELS,
         },
     )
+
+
+@router.post("/manage/submissions/approve")
+async def approve_submissions_bulk(request: Request, db: DbSession):
+    """批量通过作品申请（勾选框提交的 ids 列表）。
+
+    逐条处理、逐条提交：单条失败（已被处理过 / 已被删除）不影响其它条，
+    成功与失败分别计数回显，不让一条卡住把整批吞掉。
+    """
+    form = await request.form()
+    reviewer = getattr(request.state, "current_user", None)
+    done, failed = _decide_many(
+        db,
+        _collect_ids(form.getlist("ids")),
+        approve=True,
+        reviewer_id=reviewer.id if reviewer else 0,
+    )
+    return RedirectResponse(
+        _url("/manage/submissions", status="approved", done=done, failed=failed),
+        status_code=303,
+    )
+
+
+@router.post("/manage/submissions/reject")
+async def reject_submissions_bulk(request: Request, db: DbSession):
+    """批量驳回作品申请（可附一句统一说明）。"""
+    form = await request.form()
+    note = str(form.get("note", "")).strip()
+    reviewer = getattr(request.state, "current_user", None)
+    done, failed = _decide_many(
+        db,
+        _collect_ids(form.getlist("ids")),
+        approve=False,
+        reviewer_id=reviewer.id if reviewer else 0,
+        note=note,
+    )
+    return RedirectResponse(
+        _url("/manage/submissions", status="rejected", done=done, failed=failed),
+        status_code=303,
+    )
+
+
+def _decide_many(
+    db: DbSession,
+    ids: list[int],
+    *,
+    approve: bool,
+    reviewer_id: int,
+    note: str = "",
+) -> tuple[int, int]:
+    """批量审核；返回 (成功数, 失败数)。"""
+    done = 0
+    failed = 0
+    for submission_id in ids:
+        _submission, error = crud.decide_content_submission(
+            db,
+            submission_id,
+            approve=approve,
+            reviewer_id=reviewer_id,
+            note=note,
+        )
+        if error is None:
+            done += 1
+        else:
+            failed += 1
+    return done, failed
 
 
 @router.post("/manage/submissions/{submission_id}/approve")

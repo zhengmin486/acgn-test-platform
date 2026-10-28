@@ -22,9 +22,14 @@
            aria-label="{{ site_name }} 测试管理平台（返回用例列表）">
             {{ wordmark() }}<span class="admin-brand-badge">测试</span><span class="admin-brand-name">测试管理平台</span>
         </a>
-        <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#admin-nav"
+        {# 汉堡同上：三条实体横线展开转 X；与内容站共用一套 .nav-burger 组件 #}
+        <button class="navbar-toggler nav-burger" type="button" data-bs-toggle="collapse" data-bs-target="#admin-nav"
                 aria-controls="admin-nav" aria-expanded="false" aria-label="切换导航">
-            <span class="navbar-toggler-icon"></span>
+            <span class="nav-burger-box" aria-hidden="true">
+                <span class="nav-burger-bar"></span>
+                <span class="nav-burger-bar"></span>
+                <span class="nav-burger-bar"></span>
+            </span>
         </button>
         <div class="collapse navbar-collapse" id="admin-nav">
             <ul class="navbar-nav flex-grow-1">

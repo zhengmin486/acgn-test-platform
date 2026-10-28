@@ -1,0 +1,277 @@
+{% extends "base_content.html" %}
+{% from "_pager.html" import pager %}
+{# 首页海报轮播管理：全站名单的更新模式 / 频率、手动指定与排序、当前名单。
+   与「页面内左右切换」是两个独立功能：这里改的是服务端那份全站名单，
+   访客在首页上的手动浏览不影响任何配置。 #}
+{% block title %}首页海报{% endblock %}
+{% block content %}
+<div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-1">
+    <div>
+        <h1 class="h3 mb-1 section-heading">首页海报</h1>
+        <p class="text-muted small mb-0">
+            首页 hero 的海报轮播名单。同一份名单对全部访客生效；访客在页面内的左右切换不写库。
+        </p>
+    </div>
+</div>
+{% include "_manage_nav.html" %}
+
+{% if saved == 'auto' %}
+<div class="alert alert-success py-2">已切换为自动更新，并已立即执行一次（首页名单已生效）。</div>
+{% elif saved == 'off' %}
+<div class="alert alert-success py-2">已关闭自动更新：当前名单与排序原样保留，定时任务不再替换。</div>
+{% elif saved == 'manual' %}
+<div class="alert alert-success py-2">
+    {% if notice %}{{ notice }}。{% elif removed %}已移除 1 张海报。{% elif added %}已加入 {{ added }} 张海报：可继续从下方候选池添加，或到上方名单里调整顺序。{% else %}已保存名单：定时任务不会再覆盖，只有再次修改才会变化。{% endif %}
+</div>
+{% endif %}
+{% if error %}
+<div class="alert alert-danger py-2">{{ error }}</div>
+{% endif %}
+{% if ran == '1' %}
+<div class="alert alert-success py-2">已执行一次自动更新，生成 {{ ran_count }} 张海报。</div>
+{% endif %}
+
+{# ===== 当前状态 ===== #}
+<div class="card app-card mb-4">
+    <div class="card-body">
+        <div class="row g-3 align-items-center">
+            <div class="col-sm-6 col-lg-3">
+                <div class="small text-muted">当前模式</div>
+                <div class="fw-semibold">
+                    <span class="badge text-bg-{{ 'success' if config.mode == 'auto' else ('primary' if config.mode == 'manual' else 'secondary') }}">
+                        {{ mode_labels.get(config.mode, config.mode) }}
+                    </span>
+                    {% if config.mode == 'auto' %}
+                    <span class="ms-1">{{ freq_labels.get(config.frequency, config.frequency) }}更新</span>
+                    {% endif %}
+                </div>
+            </div>
+            <div class="col-sm-6 col-lg-3">
+                <div class="small text-muted">最近一次成功更新</div>
+                <div class="fw-semibold">
+                    {{ config.last_run_at.strftime('%Y-%m-%d %H:%M') if config.last_run_at else '从未执行' }}
+                </div>
+            </div>
+            <div class="col-sm-6 col-lg-3">
+                <div class="small text-muted">当前生效名单</div>
+                <div class="fw-semibold">{{ active_posters|length }} 张</div>
+            </div>
+            <div class="col-sm-6 col-lg-3">
+                <div class="small text-muted">最近一次执行状态</div>
+                <div class="fw-semibold">
+                    {% if config.last_status == 'ok' %}成功{% elif config.last_status == 'failed' %}<span class="text-danger">失败（已保留旧名单）</span>{% elif config.last_status == 'manual' %}手动指定{% else %}未执行过{% endif %}
+                    {% if config.last_error %}<div class="small text-danger fw-normal text-truncate" title="{{ config.last_error }}">{{ config.last_error }}</div>{% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+{# ===== 更新模式 ===== #}
+<div class="card app-card mb-4">
+    <div class="card-body">
+        <h2 class="h6 mb-3">更新模式</h2>
+        <form method="post" action="/manage/posters/mode" id="poster-mode-form">
+            <div class="row g-3">
+                <div class="col-md-8">
+                    <div class="form-check">
+                        <input class="form-check-input" type="radio" name="mode" id="mode-off" value="off"
+                               {% if config.mode == 'off' %}checked{% endif %}>
+                        <label class="form-check-label" for="mode-off">
+                            <span class="fw-semibold">关闭自动更新</span>
+                            <span class="d-block small text-muted">定时任务不跑；保留当前名单与排序，首页照常展示，页面内手动浏览不受影响。</span>
+                        </label>
+                    </div>
+                    <div class="form-check mt-2">
+                        <input class="form-check-input" type="radio" name="mode" id="mode-auto" value="auto"
+                               {% if config.mode == 'auto' %}checked{% endif %}>
+                        <label class="form-check-label" for="mode-auto">
+                            <span class="fw-semibold">自动更新</span>
+                            <span class="d-block small text-muted">从当季新番候选里按稳定排序轮转生成全站名单；生成或校验失败时保留旧名单，不会把首页换成空白。</span>
+                        </label>
+                    </div>
+                    <div class="form-check mt-2">
+                        <input class="form-check-input" type="radio" name="mode" id="mode-manual" value="manual"
+                               {% if config.mode == 'manual' %}checked{% endif %}>
+                        <label class="form-check-label" for="mode-manual">
+                            <span class="fw-semibold">手动指定</span>
+                            <span class="d-block small text-muted">从下方全站候选池里加入作品并排序；保存后定时任务一律不碰，只有再次修改才变化。</span>
+                        </label>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="small text-muted mb-1">自动更新频率（仅「自动更新」生效）</div>
+                    <div class="form-check">
+                        <input class="form-check-input" type="radio" name="frequency" id="freq-daily" value="daily"
+                               {% if config.frequency == 'daily' %}checked{% endif %}>
+                        <label class="form-check-label" for="freq-daily">每日（每天 06:00 后执行一次）</label>
+                    </div>
+                    <div class="form-check">
+                        <input class="form-check-input" type="radio" name="frequency" id="freq-weekly" value="weekly"
+                               {% if config.frequency == 'weekly' %}checked{% endif %}>
+                        <label class="form-check-label" for="freq-weekly">每周（每周一 06:00 后执行一次）</label>
+                    </div>
+                </div>
+            </div>
+            <div class="mt-3 d-flex flex-wrap gap-2">
+                <button class="btn btn-primary btn-sm" type="submit">保存模式</button>
+                {% if config.mode == 'auto' or config.mode == 'off' %}
+                <button class="btn btn-outline-primary btn-sm" type="submit" form="poster-run-now">立即执行一次更新</button>
+                {% endif %}
+            </div>
+        </form>
+        {% if config.mode != 'manual' %}
+        <form id="poster-run-now" method="post" action="/manage/posters/run-now"></form>
+        <p class="small text-muted mt-2 mb-0">
+            立即执行：按当季候选重新生成名单并立即生效（不改变当前模式）。
+            {% if config.mode == 'off' %}当前为「关闭自动更新」，执行后定时任务仍然不会自动替换。{% endif %}
+        </p>
+        {% else %}
+        <p class="small text-muted mt-2 mb-0">当前为「手动指定」：名单不会被定时任务替换，此处不提供批量执行入口，避免覆盖手动排序。</p>
+        {% endif %}
+    </div>
+</div>
+
+{# ===== 当前生效名单（可排序 / 移除；保存即切「手动指定」） ===== #}
+<div class="card app-card mb-4">
+    <div class="card-body">
+        <h2 class="h6 mb-3">当前生效名单（{{ active_posters|length }} 张，按展示顺序）</h2>
+        {% if active_posters %}
+        <form method="post" action="/manage/posters/manual">
+            <p class="small text-muted">排序号填 1 在最前，未填的保持当前顺序；点「移除」把单张从名单删掉。保存排序或移除都会把模式切为「手动指定」，定时任务不再替换。</p>
+            <div class="table-responsive">
+                <table class="table table-sm align-middle mb-3">
+                    <thead>
+                        <tr>
+                            <th scope="col" style="width:3rem">序</th>
+                            <th scope="col" style="width:4.5rem">海报</th>
+                            <th scope="col">作品</th>
+                            <th scope="col" style="width:6rem">排序</th>
+                            <th scope="col" style="width:4rem"></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for item in active_posters %}
+                        <tr>
+                            <td class="text-muted">{{ loop.index }}</td>
+                            <td>
+                                <img class="poster-admin-cover" src="{{ thumb_src(item.image_url) }}" alt="" width="60" height="90" loading="lazy" decoding="async">
+                            </td>
+                            <td>
+                                <a class="fw-semibold" href="{{ item.href }}" target="_blank" rel="noopener">{{ item.title }}</a>
+                                <div class="small text-muted">
+                                    {{ type_labels.get(item.type, item.type) }}
+                                    {% if item.rating > 0 %} · 评分 {{ '%.1f' % item.rating }}{% endif %}
+                                    · {{ '自动轮转' if item.source == 'auto' else '手动指定' }}
+                                </div>
+                            </td>
+                            <td>
+                                <input class="form-control form-control-sm" type="number" min="1" max="999" style="width:5rem"
+                                       name="order_{{ item.content_id }}" value="{{ loop.index }}" placeholder="—">
+                            </td>
+                            <td>
+                                <input type="hidden" name="content_ids" value="{{ item.content_id }}">
+                                {# 移除按钮与保存排序同一个表单：靠按钮 name/value 区分动作
+                                   （formaction + 脚本 click 时按钮数据不序列化，故不走那条路） #}
+                                <button class="btn btn-outline-danger btn-sm" type="submit"
+                                        name="remove_id" value="{{ item.content_id }}">移除</button>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            <button class="btn btn-primary btn-sm" type="submit">保存排序</button>
+        </form>
+        {% else %}
+        <p class="text-muted small mb-0">暂无生效名单。首页将展示当季新番实时候选（不改变全站名单）；从下方候选池加入作品后，此处即显示固定名单。</p>
+        {% endif %}
+    </div>
+</div>
+
+{# ===== 手动指定：全站候选池（搜索 / 类型 / 分页 / 加入） ===== #}
+<div class="card app-card mb-4">
+    <div class="card-body">
+        <div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-3">
+            <h2 class="h6 mb-0">候选池（全站带封面作品，共 {{ candidate_total }} 部）</h2>
+            {% if keyword or type_filter %}
+            <span class="small text-muted">
+                当前筛选：{% if keyword %}关键词「{{ keyword }}」{% endif %}{% if keyword and type_filter %} · {% endif %}{% if type_filter %}{{ type_labels.get(type_filter, type_filter) }}{% endif %}
+            </span>
+            {% endif %}
+        </div>
+        <form method="get" action="/manage/posters" class="row g-2 align-items-end mb-3">
+            <div class="col-sm-5 col-md-4">
+                <label class="form-label small mb-1" for="poster-q">搜索作品（标题 / 日文原名 / 作品 ID）</label>
+                <input class="form-control form-control-sm" type="search" name="q" id="poster-q"
+                       value="{{ keyword }}" placeholder="输入关键词，如：刀剑神域">
+            </div>
+            <div class="col-sm-4 col-md-3">
+                <label class="form-label small mb-1" for="poster-type">类型</label>
+                <select class="form-select form-select-sm" name="type" id="poster-type">
+                    <option value="">全部类型</option>
+                    {% for value, label in type_labels.items() %}
+                    <option value="{{ value }}" {% if type_filter == value %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-sm-3 col-md-2 d-flex gap-1">
+                <button class="btn btn-outline-primary btn-sm" type="submit">搜索</button>
+                {% if keyword or type_filter %}
+                <a class="btn btn-outline-secondary btn-sm" href="/manage/posters">重置</a>
+                {% endif %}
+            </div>
+        </form>
+        {% if candidates %}
+        <form method="post" action="/manage/posters/add">
+            {# 翻页 / 搜索上下文：加入后回到原页 #}
+            <input type="hidden" name="q" value="{{ keyword }}">
+            <input type="hidden" name="type" value="{{ type_filter }}">
+            <input type="hidden" name="page" value="{{ candidate_page }}">
+            <p class="small text-muted">勾选作品后点「加入选中作品」——累加进上方名单，翻页搜索不会丢已选；顺序在上方名单里调。</p>
+            <div class="table-responsive">
+                <table class="table table-sm align-middle mb-3">
+                    <thead>
+                        <tr>
+                            <th scope="col" style="width:3rem">选</th>
+                            <th scope="col" style="width:4.5rem">海报</th>
+                            <th scope="col">作品</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for item in candidates %}
+                        <tr>
+                            <td>
+                                <input class="form-check-input" type="checkbox" name="content_ids" value="{{ item.content_id }}"
+                                       id="poster-cand-{{ item.content_id }}">
+                            </td>
+                            <td>
+                                <img class="poster-admin-cover" src="{{ thumb_src(item.image_url) }}" alt="" width="45" height="68" loading="lazy" decoding="async">
+                            </td>
+                            <td>
+                                <label class="fw-semibold mb-0" for="poster-cand-{{ item.content_id }}">{{ item.title }}</label>
+                                <div class="small text-muted">
+                                    {{ type_labels.get(item.type, item.type) }}
+                                    {% if item.rating > 0 %} · 评分 {{ '%.1f' % item.rating }}{% endif %}
+                                    · ID {{ item.content_id }}
+                                </div>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            <div class="d-flex flex-wrap justify-content-between align-items-center gap-2">
+                <button class="btn btn-primary btn-sm" type="submit">加入选中作品</button>
+                {% set qs = 'q=' ~ (keyword|urlencode) ~ '&type=' ~ (type_filter|urlencode) %}
+                {{ pager('/manage/posters?' ~ qs ~ '&', candidate_page, candidate_pages) }}
+            </div>
+        </form>
+        {% elif keyword or type_filter %}
+        <p class="text-muted small mb-0">没有符合筛选条件的作品（只列有封面的站内作品）。换个关键词，或<a href="/manage/posters">重置筛选</a>。</p>
+        {% else %}
+        <p class="text-muted small mb-0">站内还没有带封面的作品。先做数据同步 / 封面回填，再回来指定海报。</p>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

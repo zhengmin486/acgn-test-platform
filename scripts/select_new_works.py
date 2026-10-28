@@ -31,7 +31,11 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from scripts.import_bangumi import resolve_content_type  # noqa: E402
-from scripts.select_from_archive import build_payload, iter_subjects  # noqa: E402
+from scripts.select_from_archive import (  # noqa: E402
+    apply_ingest_policy,
+    build_payload,
+    iter_subjects,
+)
 
 DEFAULT_DUMP = PROJECT_ROOT / ".workbuddy/archive/dump.zip"
 
@@ -114,6 +118,12 @@ def main(argv=None) -> int:
     parser.add_argument("--novel", type=int, default=0)
     parser.add_argument("--max-rank", type=int, default=200_000)
     parser.add_argument(
+        "--request-interval",
+        type=float,
+        default=0.35,
+        help="联网查原作关联时每个请求前的间隔秒数（候选量大时避免触发镜像 429）",
+    )
+    parser.add_argument(
         "--out", default=str(PROJECT_ROOT / ".workbuddy/pilot/selection_new.json")
     )
     args = parser.parse_args(argv)
@@ -138,6 +148,25 @@ def main(argv=None) -> int:
     )
     print(f"扫描 {scanned} 行；各类选中：{counts}；合计 {len(payloads)} 条")
 
+    # 收录口径过滤（2026-10-23 v3）：小说只留轻小说；游戏只收 ACGN 向五类。
+    # 选品端先按标签免联网预过滤，未命中的游戏联网查动画/漫画/轻小说原作关联
+    # 并打 _site_related_ip 标记，供服务端 map_subject 放行。
+    payloads, policy_stats = apply_ingest_policy(
+        payloads, request_interval=args.request_interval
+    )
+    print(
+        "收录口径过滤：剔除文学小说 "
+        f"{policy_stats['novel_dropped']}、非ACGN游戏 {policy_stats['game_dropped']}"
+        f"（galge {policy_stats['game_galge']}、改编联动 {policy_stats['game_adaptation']}"
+        f"、二游动漫风 {policy_stats['game_anime_style']}、日式RPG独立 "
+        f"{policy_stats['game_jrpg_indie']}、宽泛兜底 {policy_stats['game_margin']}"
+        f"、关联标记 {policy_stats['game_related']}）"
+    )
+    if policy_stats["game_fetch_failed"]:
+        print(
+            f"  ⚠ {policy_stats['game_fetch_failed']} 个游戏关联条目查询失败，按「无原作关联」剔除"
+        )
+
     if len(payloads) < sum(per_type.values()):
         print(
             "⚠️ 选中数量不足配额——归档里该类型可净新增的条目不够，"
@@ -146,8 +175,12 @@ def main(argv=None) -> int:
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
-    # 去掉内部辅助字段再存（ingest 不需要）
-    clean = [{k: v for k, v in p.items() if not k.startswith("_")} for p in payloads]
+    # 去掉内部辅助字段再存（ingest 不需要）；但保留 _site_related_ip —— 服务端
+    # map_subject 据此放行「选品端联网确认的动画/漫画/轻小说原作关联」游戏。
+    clean = [
+        {k: v for k, v in p.items() if not k.startswith("_") or k == "_site_related_ip"}
+        for p in payloads
+    ]
     out.write_text(json.dumps(clean, ensure_ascii=False, indent=1), encoding="utf-8")
     print(f"已写出 {out}")
 

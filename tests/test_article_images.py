@@ -15,6 +15,8 @@
 from __future__ import annotations
 
 import random
+import urllib.error
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine, select
@@ -122,6 +124,33 @@ class TestBodyBlocks:
             {"kind": "media", "url": "https://v/1"},
             {"kind": "text", "text": "第二段"},
         ]
+
+    def test_parse_html_blocks(self):
+        """HTML 正文解析成结构块：标题层级 / 列表 / 引用 / 图注 / 表格。"""
+        html = (
+            "<h2>小标题</h2>"
+            "<p>正文<strong>强调</strong>与<a href=\"/n/1\">链接</a></p>"
+            "<ul><li>条目一</li><li>条目二</li></ul>"
+            "<figure><img src=\"/article-images/a.jpg\"><figcaption>图注</figcaption></figure>"
+            "<blockquote><p>引用</p></blockquote>"
+            "<table><tr><th>列</th></tr><tr><td>值</td></tr></table>"
+            "<p></p><p>   </p>"
+        )
+        blocks = article_body.parse_blocks(html, base_url="https://src.example/detail?id=1")
+        kinds = [block["kind"] for block in blocks]
+        assert kinds == ["heading", "para", "list", "image", "quote", "table"]
+        assert blocks[0]["level"] == 2 and blocks[0]["runs"][0]["text"] == "小标题"
+        assert blocks[1]["runs"][1] == {"text": "强调", "strong": True}
+        # 相对链接按原文地址补全，站内已本地化的图保持站内路径
+        assert blocks[1]["runs"][3]["href"] == "https://src.example/n/1"
+        assert blocks[2]["items"] == [[{"text": "条目一"}], [{"text": "条目二"}]]
+        # 图注紧贴对应图片，不单独成段
+        assert blocks[3]["url"] == "/article-images/a.jpg"
+        assert blocks[3]["caption"] == "图注"
+        assert blocks[4]["paras"] == [[{"text": "引用"}]]
+        assert blocks[5]["head_row"] is True
+        # 空段落（无效空节点）不产出块
+        assert len(blocks) == 6
 
 
 # ---------- 本地化 ----------
@@ -265,6 +294,18 @@ def page_env(tmp_path):
                 original_url=f"{SITE}/detail.html?id=1",
             )
         )
+        # 正文配图与封面不同：正文图仍要照常渲染成 article-figure
+        db.add(
+            Article(
+                title="多图资讯标题",
+                category="动漫资讯",
+                summary="摘要",
+                body="开场说明\n[图] /article-images/article_2_1.jpg\n后续说明\n[图] /article-images/article_2_2.jpg",
+                image_url="/covers/article_2.jpg",
+                source="ANIPLEX NEWS BOX",
+                original_url=f"{SITE}/detail.html?id=2",
+            )
+        )
         db.commit()
     finally:
         db.close()
@@ -289,9 +330,18 @@ class TestRendering:
         body = page_env.get("/articles/1").text
         assert 'src="/article-images/article_1_1.jpg"' in body
         assert 'class="article-hero"' in body
-        assert 'class="article-figure"' in body
+        # 正文首图与封面指向同一张图：只保留头图，不再在正文里重复渲染一次
+        assert 'class="article-figure"' not in body
+        assert body.count('src="/article-images/article_1_1.jpg"') == 1
         assert "[媒体]" in body and 'href="https://v.example/1"' in body
         assert "开场说明" in body
+
+    def test_detail_renders_each_body_image(self, page_env):
+        """正文配图与封面不同时，每张图各自渲染，顺序与正文一致。"""
+        body = page_env.get("/articles/2").text
+        assert 'class="article-hero"' in body
+        assert body.count('class="article-figure"') == 2
+        assert body.index("article_2_1.jpg") < body.index("article_2_2.jpg")
 
     def test_list_shows_thumbnail(self, page_env):
         body = page_env.get("/articles").text
@@ -422,3 +472,138 @@ class TestBackfill:
         exit_code = bai.main(["--article-id", "999", "--database-url", "sqlite://"])
         assert exit_code == bai.EXIT_NO_MATCH
         engine.dispose()
+
+
+# ---------- 2026-10-25：图片去重键 / 原图增强 / 抓取退避 ----------
+
+
+class TestImageKeyAndUpgrade:
+    def test_absolute_image_url_uses_given_base(self):
+        """多源抓取：相对路径按传入的页面 origin 补全，不再兜底 Aniplex 域名。"""
+        assert (
+            ia.absolute_image_url("/mascot/sticker.webp", "https://acgch.com/zh-hans/news/a")
+            == "https://acgch.com/mascot/sticker.webp"
+        )
+        assert (
+            ia.absolute_image_url("images/x.jpg", "https://ln-news.com/articles/1")
+            == "https://ln-news.com/images/x.jpg"
+        )
+        # 不传 base 时保持旧行为（Aniplex 单源导入）
+        assert ia.absolute_image_url("SYS/CONTENTS/x") == f"{SITE}/SYS/CONTENTS/x"
+
+    def test_image_key_matches_cropped_and_reencoded_variants(self):
+        """同一张图的裁切版 / 缩放版 / 不同编码判为同一张。
+
+        acgch 线上实测：头图是 og 裁切 `...-1200x630.jpg`，正文首图是
+        `...-1200x675.webp`——同一张 keyvisual。只比 path 时判成两张，
+        头图去重失效，页面上同一张图显示两遍。
+        """
+        og = "https://acgch.com/api/media/file/key-1024-nfoapw-1200x630.jpg?prefix=media"
+        body = "https://acgch.com/api/media/file/key-1024-nfoapw-1200x675.webp?prefix=media"
+        assert article_body.image_key(og) == article_body.image_key(body)
+        assert article_body.image_key(og) != article_body.image_key(
+            "https://acgch.com/api/media/file/other-key-1024-nfoapw-1200x630.jpg"
+        )
+
+    def test_image_key_matches_oss_query_variants(self):
+        """gcores 的 OSS 处理参数（resize/quality）不影响同一张图的判定。"""
+        thumb = "https://image.gcores.com/hash-1600-900.png?x-oss-process=image/resize,limit_1,m_fill,w_626,h_292/quality,q_92"
+        origin = "https://image.gcores.com/hash-1600-900.png"
+        assert article_body.image_key(thumb) == article_body.image_key(origin)
+
+    def test_upgraded_variants_whitelist(self):
+        """原图增强只对实测过的两个域名生效，其它域返回空（不猜）。"""
+        assert article_media.upgraded_image_variants(
+            "https://image.gcores.com/h-1600-900.png?x-oss-process=image/resize,w_626"
+        ) == ["https://image.gcores.com/h-1600-900.png"]
+        assert article_media.upgraded_image_variants(
+            "https://www.lisani.jp/admin/wp-content/uploads/2026/10/yh-004-300x300.jpg"
+        ) == ["https://www.lisani.jp/admin/wp-content/uploads/2026/10/yh-004.jpg"]
+        assert article_media.upgraded_image_variants("https://other.example/a-300x300.jpg") == []
+        assert article_media.upgraded_image_variants("/article-images/local.jpg") == []
+
+    def test_localize_prefers_original_then_falls_back(self):
+        """下载先试原图变体；原图拿不到才回退 feed 地址，映射仍按原 URL 改写正文。"""
+        body = "[图] https://image.gcores.com/h-1600-900.png?x-oss-process=image/resize,w_626"
+        tried: list[str] = []
+
+        def downloader(url, key, index):
+            tried.append(url)
+            if "x-oss-process" not in url:
+                raise article_media.ArticleImageError("原图 403")  # 原图拿不到
+            return "/article-images/thumb.png"
+
+        result = article_media.localize_media(
+            body, None, key="5", downloader=downloader
+        )
+        assert tried == [
+            "https://image.gcores.com/h-1600-900.png",  # 先试原图
+            "https://image.gcores.com/h-1600-900.png?x-oss-process=image/resize,w_626",  # 回退
+        ]
+        assert result.body == "[图] /article-images/thumb.png"
+        assert result.saved == 1 and result.failed == 0
+
+
+class TestFetchRetryBackoff:
+    def test_retry_uses_exponential_backoff(self, monkeypatch):
+        """重试退避从线性改指数（0.8 → 1.6），封顶 4s。"""
+        slept: list[float] = []
+        monkeypatch.setattr(ia.time, "sleep", lambda s: slept.append(s))
+        calls = {"n": 0}
+
+        def fake_urlopen(request, timeout=None):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise TimeoutError("read timeout")
+            return _FakeResponse(b"<html>ok</html>")
+
+        monkeypatch.setattr(ia.urllib.request, "urlopen", fake_urlopen)
+        text = ia.fetch_page("https://example.com/a", retries=2)
+        assert text == "<html>ok</html>"
+        assert slept == [0.8, 1.6]
+
+    def test_429_respects_retry_after(self, monkeypatch):
+        """429 按 Retry-After 等待（封顶 30s），不把剩余重试一次耗光。"""
+        slept: list[float] = []
+        monkeypatch.setattr(ia.time, "sleep", lambda s: slept.append(s))
+        calls = {"n": 0}
+
+        def fake_urlopen(request, timeout=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise urllib.error.HTTPError(
+                    request.full_url, 429, "Too Many Requests",
+                    {"Retry-After": "5"}, None,
+                )
+            return _FakeResponse(b"<html>ok</html>")
+
+        monkeypatch.setattr(ia.urllib.request, "urlopen", fake_urlopen)
+        text = ia.fetch_page("https://example.com/a", retries=2)
+        assert text == "<html>ok</html>"
+        assert slept == [5.0]
+
+    def test_4xx_still_fails_fast(self, monkeypatch):
+        """4xx（429 除外）是确定性错误，不重试、直接抛。"""
+        def fake_urlopen(request, timeout=None):
+            raise urllib.error.HTTPError(request.full_url, 403, "Forbidden", {}, None)
+
+        monkeypatch.setattr(ia.urllib.request, "urlopen", fake_urlopen)
+        with pytest.raises(ia.ArticleFetchError):
+            ia.fetch_page("https://example.com/a", retries=2)
+
+
+class _FakeResponse:
+    """够用的 urlopen 返回值：只用到 read 与 headers（与 test_article_import 同款）。"""
+
+    def __init__(self, payload: bytes):
+        self._payload = payload
+        self.headers = SimpleNamespace(get_content_charset=lambda: "utf-8")
+
+    def read(self, *args):
+        return self._payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False

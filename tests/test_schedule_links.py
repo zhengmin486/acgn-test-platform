@@ -414,7 +414,8 @@ def test_link_only_falls_back_to_network_resolution(session_factory):
     }
 
     def _search(keyword, **kwargs):
-        return [candidate]
+        # 季内目录请求（空关键词）不返回候选，让用例继续走关键词搜索这条路径。
+        return [candidate] if keyword else []
 
     summary = fw.link_schedules_to_contents(
         session_factory=session_factory,
@@ -448,7 +449,8 @@ def test_link_only_records_subject_when_work_not_in_library(session_factory):
     }
 
     def _search(keyword, **kwargs):
-        return [candidate]
+        # 季内目录请求（空关键词）不返回候选，让用例继续走关键词搜索这条路径。
+        return [candidate] if keyword else []
 
     summary = fw.link_schedules_to_contents(
         session_factory=session_factory,
@@ -748,3 +750,107 @@ def test_schedule_api_exposes_content_id(linked_client):
     ids = {item["title_main"]: item["content_id"] for item in body["items"]}
     assert ids["已关联作品"] == linked_id
     assert ids["未关联作品"] is None
+
+
+# ---------- 季标剥离 / 全半角归一 / 季内目录匹配 ----------
+
+
+@pytest.mark.parametrize(
+    ("raw", "base", "season"),
+    [
+        ("无职转生 第3期", "无职转生", 3),
+        ("杀手旅店 第2期", "杀手旅店", 2),
+        ("杀手旅店 第2期 Part.2", "杀手旅店", 2),
+        ("転生したら剣でしたⅡ", "転生したら剣でした", 2),
+        ("転生したら剣でしたII", "転生したら剣でした", 2),
+        ("HOTEL INHUMANS 第2期", "hotelinhumans", 2),
+        ("86 -不存在的战区- 第2クール", "86不存在的战区", 2),
+        ("猫娘乐园", "猫娘乐园", 1),
+    ],
+)
+def test_split_season_marker(raw, base, season):
+    """尾部季标（第N期/クール/Part/罗马数字）拆成基名 + 季数。"""
+    assert fw.split_season_marker(fw.normalize_title(raw)) == (base, season)
+
+
+def test_split_season_marker_keeps_mid_title_number():
+    """标题中段的数字（剧情副标题）不当季数剥掉。"""
+    base, season = fw.split_season_marker(
+        fw.normalize_title("小书痴的下克上 第4期 第三部 领主的养女")
+    )
+    assert season == 1  # 尾部不是季标，不猜
+    assert "领主的养女" in base
+
+
+def test_normalize_full_width_roman_equals_half_width():
+    """全角罗马数字与半角字母归一后必须相等（档期/ Bangumi 写法差异）。"""
+    assert fw.normalize_title("転生したら剣でしたⅡ") == fw.normalize_title(
+        "転生したら剣でしたII"
+    )
+    assert crud.normalize_title_key("転生したら剣でしたⅡ") == crud.normalize_title_key(
+        "転生したら剣でしたII"
+    )
+
+
+def test_score_catalog_same_season_high():
+    """基名一致 + 季数一致 → 高置信。"""
+    sched = fw.normalize_title("无职转生 第3期")
+    cand = {
+        "id": 1,
+        "name": "無職転生 ～異世界行ったら本気だす～ 第3期",
+        "name_cn": "无职转生 第3期",
+    }
+    assert fw.score_catalog_candidate(cand, jp="", cn=sched) >= fw.SCORE_CATALOG_BASE
+
+
+def test_score_catalog_rejects_other_season():
+    """基名一致但季数不同（第2期 vs 第3期）→ 不给分，避免挂错季。"""
+    sched = fw.normalize_title("无职转生 第3期")
+    cand = {
+        "id": 2,
+        "name": "無職転生 ～異世界行ったら本気だす～ 第2期",
+        "name_cn": "无职转生 第2期",
+    }
+    assert fw.score_catalog_candidate(cand, jp="", cn=sched) == 0
+
+
+def test_link_uses_season_catalog_when_keyword_misses(session_factory):
+    """关键词搜不到时用季内目录命中（全角Ⅱ vs 半角II 的真实场景）。"""
+    add_content(session_factory, title="转生就是剑 第二季", bangumi_id=412008)
+    add_schedule(
+        session_factory,
+        title_main="转生成为魔剑 第2期",
+        title_cn="转生成为魔剑 第2期",
+        title_jp="転生したら剣でしたⅡ",
+    )
+
+    def _search(keyword, **kwargs):
+        if not keyword:  # 季内目录请求：空关键词 + air_date 过滤
+            return [
+                {
+                    "id": 412008,
+                    "name": "転生したら剣でしたII",
+                    "name_cn": "转生就是剑 第二季",
+                    "date": "2026-10-07",
+                    "type": 2,
+                }
+            ]
+        return []  # 关键词搜索这一路故意搜不到
+
+    summary = fw.link_schedules_to_contents(
+        session_factory=session_factory,
+        apply=True,
+        use_network=True,
+        searcher=_search,
+        sleep=lambda _s: None,
+    )
+    assert summary.linked == 1
+    assert summary.unmatched == 0
+
+    db = session_factory()
+    try:
+        row = db.query(AnimeSchedule).first()
+        assert row.content_id is not None
+        assert row.bangumi_subject_id == 412008
+    finally:
+        db.close()

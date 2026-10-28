@@ -30,11 +30,13 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import os
 import re
 import sys
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -213,12 +215,179 @@ def compose_fallback_summary(entry) -> str:
 
 
 def normalize_title(text: str | None) -> str:
-    """标题归一化：去空白/标点/大小写，用于标题比对。"""
+    """标题归一化：全半角统一 + 去空白/标点/大小写，用于标题比对。
+
+    NFKC 这步很关键：档期侧常写「転生したら剣でしたⅡ」（全角罗马数字），
+    Bangumi 侧是「転生したら剣でしたII」（半角字母），不统一就判成两个标题。
+    """
     if not text:
         return ""
-    cleaned = re.sub(r"[\s　]+", "", str(text))
+    cleaned = unicodedata.normalize("NFKC", str(text))
+    cleaned = re.sub(r"[\s　]+", "", cleaned)
     cleaned = re.sub(r"[!！?？。.,，、·・:：;；~〜\-—_'\"“”‘’()（）\[\]【】]", "", cleaned)
     return cleaned.lower()
+
+
+# 季/分割标记：出现在标题**尾部**时才剥离，避免误伤标题中间的数字。
+# （第3期 / 2期 / 第2クール / Season 3 / 2nd Season / パート2 / Ⅱ 等）
+_ROMAN_SEASON = {"ii": 2, "iii": 3, "iv": 4, "v": 5, "vi": 6, "vii": 7, "viii": 8}
+_SEASON_TAIL_PATTERNS: list[tuple[str, int]] = [
+    (r"(?:第)?(\d+)(?:クール目|クール|期|季)$", 1),
+    (r"第?(\d+)シーズン$", 1),
+    (r"シーズン(\d+)$", 1),
+    (r"season(\d+)$", 1),
+    (r"(\d+)(?:nd|rd|th|st)season$", 1),
+    (r"theanimation(\d+)$", 1),
+    (r"(?:part|パート)(\d+)$", 0),  # 分割（part）不是新一季，只从基名里去掉
+    (r"(ii|iii|iv|v|vi|vii|viii)$", 2),
+]
+
+
+def split_season_marker(text: str | None) -> tuple[str, int]:
+    """把归一化标题拆成 ``(基名, 季数)``；未标注季数时返回 1。
+
+    「无职转生第3期」→ ``("无职转生", 3)``；
+    「転生したら剣でしたii」→ ``("転生したら剣でした", 2)``；
+    「杀手旅店第2期part2」→ ``("杀手旅店", 2)``（part 只是分割，不叠加季数）。
+
+    只剥离尾部标记：标题中间出现的「第N部/第N章」多是副标题（如
+    「小书痴的下克上 第4期 第三部 领主的养女」），不能当季数，剥离不掉时
+    交给关键词搜索兜底即可。
+    """
+    current = (text or "").strip()
+    season = 0
+    while current:
+        matched = False
+        for pattern, group_kind in _SEASON_TAIL_PATTERNS:
+            hit = re.search(pattern, current)
+            # 整个标题被吃掉（标题本来就是「第2期」这种）就放弃剥离。
+            if not hit or hit.start() <= 0:
+                continue
+            if group_kind == 1:
+                season = season or int(hit.group(1))
+            elif group_kind == 2:
+                season = season or _ROMAN_SEASON.get(hit.group(1), 0)
+            current = current[: hit.start()]
+            matched = True
+            break
+        if not matched:
+            break
+    return current, season or 1
+
+
+# 季内目录匹配的置信度（与关键词搜索的 score_candidate 同一量纲，阈值也复用 MIN_SCORE）。
+SCORE_CATALOG_EXACT = 300  # 归一化标题完全一致
+SCORE_CATALOG_BASE = 240  # 基名一致且季数一致
+SCORE_CATALOG_FUZZY = 180  # 基名相似度过阈值（译名措辞差异）
+CATALOG_FUZZY_RATIO = 0.90
+# 一次拉取季内目录的最大条数：单季动画 100~160 条，留足余量。
+CATALOG_MAX_ITEMS = 200
+
+
+def season_air_filter(season_code: str) -> dict | None:
+    """档期码 → Bangumi 搜索的 air_date 过滤条件（该季首末日期）。"""
+    window = season_window(season_code)
+    if not window:
+        return None
+    start, end = window
+    return {"air_date": [f">={start.isoformat()}", f"<{end.isoformat()}"]}
+
+
+def score_catalog_candidate(candidate: dict, *, jp: str, cn: str) -> int:
+    """季内目录候选打分：标题完全一致 > 基名+季数一致 > 基名高度相似。
+
+    与关键词搜索打分的区别：候选已经限定在「同一季播出」范围内，所以标题
+    只需对得上系列名即可，不必再叠日期信号；反过来，基名相同但季数不同的
+    候选一律不给分（否则「第3期」会被挂到库里的「第2期」上）。
+    """
+    name = normalize_title(candidate.get("name"))
+    name_cn = normalize_title(candidate.get("name_cn"))
+    best = 0
+    for sched in (jp, cn):
+        if not sched:
+            continue
+        for cand in (name, name_cn):
+            if not cand:
+                continue
+            if sched == cand:
+                return SCORE_CATALOG_EXACT
+            sched_base, sched_no = split_season_marker(sched)
+            cand_base, cand_no = split_season_marker(cand)
+            if sched_base and sched_base == cand_base:
+                if sched_no == cand_no:
+                    best = max(best, SCORE_CATALOG_BASE)
+                continue
+            ratio = difflib.SequenceMatcher(
+                None, sched_base or sched, cand_base or cand
+            ).ratio()
+            if ratio >= CATALOG_FUZZY_RATIO and sched_no == cand_no:
+                best = max(best, SCORE_CATALOG_FUZZY)
+    return best
+
+
+def fetch_season_catalog(
+    season_code: str,
+    *,
+    opener,
+    base_url: str,
+    timeout: float = DEFAULT_TIMEOUT,
+    retries: int = DEFAULT_RETRIES,
+    sleep=time.sleep,
+    searcher=None,
+) -> list[dict]:
+    """拉某一季在 Bangumi 播出的全部动画条目（air_date 过滤，最多 200 条）。
+
+    比关键词搜索可靠得多：搜索依赖「档期标题能被检索到」，而按档期窗口
+    枚举不依赖标题写法——档期写「杀手旅店 第2期」、Bangumi 写
+    「HOTEL INHUMANS 第2期」也能在同一份季内清单里对上。
+    """
+    air = season_air_filter(season_code)
+    if not air:
+        return []
+    search = searcher or search_subjects
+    items: list[dict] = []
+    offset = 0
+    while offset < CATALOG_MAX_ITEMS:
+        page = search(
+            "",
+            opener=opener,
+            base_url=base_url,
+            timeout=timeout,
+            retries=retries,
+            sleep=sleep,
+            extra_filter=air,
+            limit=100,
+            offset=offset,
+        )
+        page = list(page or [])
+        items.extend(page)
+        if len(page) < 100:
+            break
+        offset += 100
+        sleep(DEFAULT_SLEEP)
+    return items[:CATALOG_MAX_ITEMS]
+
+
+def match_season_catalog(entry, catalog: list[dict] | None) -> tuple[int | None, str]:
+    """在同季目录里找档期条目对应的 Bangumi subject（纯比对，不联网）。"""
+    if not catalog:
+        return None, ""
+    jp = normalize_title(getattr(entry, "title_jp", None))
+    cn = normalize_title(
+        getattr(entry, "title_main", None) or getattr(entry, "title_cn", None) or ""
+    )
+    best_id: int | None = None
+    best_score = 0
+    best_name = ""
+    for candidate in catalog:
+        score = score_catalog_candidate(candidate, jp=jp, cn=cn)
+        if score > best_score:
+            best_score = score
+            best_id = candidate.get("id")
+            best_name = candidate.get("name") or candidate.get("name_cn") or ""
+    if best_id and best_score >= MIN_SCORE:
+        return int(best_id), f"季内目录命中「{best_name}」（置信 {best_score}）"
+    return None, ""
 
 
 def parse_air_date(value) -> date | None:
@@ -241,14 +410,27 @@ def search_subjects(
     retries: int = DEFAULT_RETRIES,
     user_agent: str = DEFAULT_USER_AGENT,
     sleep=time.sleep,
+    extra_filter: dict | None = None,
+    limit: int = 20,
+    offset: int = 0,
 ) -> list[dict]:
     """按关键词搜索 Bangumi 条目（动画），返回候选列表。
 
     Bangumi v0 的搜索是 POST 接口（GET 会 405），故这里走 POST；
     失败抛异常，由调用方决定重试或计入失败。
+
+    ``extra_filter`` 用来附加过滤条件（如 ``{"air_date": [">=2026-10-01", ...]}``），
+    配合空 keyword 可枚举某一季的全部条目（季内目录匹配用）；
+    ``limit`` / ``offset`` 控制分页，默认值与 Bangumi 一致（20 条、从 0 开始）。
     """
     url = f"{base_url.rstrip('/')}{SEARCH_PATH}"
-    body = json.dumps({"keyword": keyword, "filter": {"type": [2]}}).encode("utf-8")
+    filters: dict = {"type": [2]}
+    if extra_filter:
+        filters.update(extra_filter)
+    payload: dict = {"keyword": keyword, "filter": filters, "limit": int(limit)}
+    if offset:
+        payload["offset"] = int(offset)
+    body = json.dumps(payload).encode("utf-8")
     last_reason = "未知错误"
 
     for attempt in range(retries + 1):
@@ -328,12 +510,18 @@ def resolve_subject(
     retries: int = DEFAULT_RETRIES,
     sleep=time.sleep,
     searcher=None,
+    catalog: list[dict] | None = None,
 ) -> tuple[int | None, str]:
     """把一条档期条目解析成 Bangumi subject id。
 
     返回 ``(subject_id, 说明)``；解析不到时 id 为 None 并给出原因。
-    先搜日文原名（Bangumi 主名是日文，命中率最高），不够再搜中文名。
+    解析顺序：**先季内目录比对**（同季播出清单，最可靠、零搜索误差），
+    再按关键词搜日文原名（Bangumi 主名是日文，命中率最高），最后搜中文名。
     """
+    catalog_id, catalog_reason = match_season_catalog(entry, catalog)
+    if catalog_id:
+        return catalog_id, catalog_reason
+
     search = searcher or search_subjects
     jp_raw = getattr(entry, "title_jp", None) or ""
     cn_raw = getattr(entry, "title_main", None) or getattr(entry, "title_cn", None) or ""
@@ -413,6 +601,21 @@ def fill_works_for_season(
             summary.capped = len(entries) - cap
             entries = entries[:cap]
 
+        # 季内目录：单季只需一份，先拉好再逐条比对（不联网比对，省请求）。
+        catalog: list[dict] = []
+        try:
+            catalog = fetch_season_catalog(
+                season_code,
+                opener=opener,
+                base_url=url,
+                timeout=timeout,
+                retries=retries,
+                sleep=sleep,
+                searcher=searcher,
+            )
+        except Exception:  # noqa: BLE001 - 目录拉不到就退回关键词搜索
+            catalog = []
+
         resolved: list[tuple[object, int, str]] = []
         consecutive_errors = 0
         for entry in entries:
@@ -426,6 +629,7 @@ def fill_works_for_season(
                     retries=retries,
                     sleep=sleep,
                     searcher=search,
+                    catalog=catalog,
                 )
                 consecutive_errors = 0
             except Exception as exc:  # noqa: BLE001 - 单条失败不中断整轮
@@ -574,6 +778,28 @@ def link_schedules_to_contents(
         index = crud.build_schedule_title_index(db)
         consecutive_errors = 0
 
+        # 季内目录缓存：每个档期码只拉一次，避免逐条重复请求。
+        catalogs: dict[str, list[dict]] = {}
+
+        def catalog_for(code: str) -> list[dict]:
+            key = (code or "").strip()
+            if not key:
+                return []
+            if key not in catalogs:
+                try:
+                    catalogs[key] = fetch_season_catalog(
+                        key,
+                        opener=opener,
+                        base_url=url,
+                        timeout=timeout,
+                        retries=retries,
+                        sleep=sleep,
+                        searcher=searcher,
+                    )
+                except Exception:  # noqa: BLE001 - 目录拉不到就退回关键词搜索
+                    catalogs[key] = []
+            return catalogs[key]
+
         for entry in entries:
             title = (
                 getattr(entry, "title_main", "")
@@ -605,6 +831,7 @@ def link_schedules_to_contents(
                         retries=retries,
                         sleep=sleep,
                         searcher=search,
+                        catalog=catalog_for(getattr(entry, "season_code", "")),
                     )
                     consecutive_errors = 0
                 except Exception as exc:  # noqa: BLE001 - 单条失败不中断整轮

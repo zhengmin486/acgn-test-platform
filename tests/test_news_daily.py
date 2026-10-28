@@ -17,6 +17,7 @@ from app import crud, news_llm
 from app.config import settings
 from app.database import build_engine
 from app.models import Article
+from scripts import news_daily
 from scripts.news_daily import run_import_daily
 from scripts.news_sources import (
     SOURCES,
@@ -1012,3 +1013,625 @@ class TestExtractBody:
             db.close()
 
 
+
+
+# ---------- 源顺序与池子均衡（2026-10-23：游戏源先到先得抢光配额） ----------
+
+
+BIG_GAME_SRC = SourceSpec("big-game", "测试大游戏源", "https://big-game.example/rss", "rss", "游戏", "zh")
+MANY_SRC = SourceSpec("many", "测试综合源", "https://many.example/rss", "rss", "综合动态", "zh")
+
+# 刻意用互不相似的标题：同事件的字符二元组相似度会触发去重合并。
+DISTINCT_TITLES = [
+    "声优访谈：夏日回忆",
+    "动画电影票房破十亿",
+    "厚木市联动海报公开",
+    "轻小说新刊书单推荐",
+    "店内主题橱窗布置",
+    "电台节目第四回",
+]
+
+
+def rss_items(prefix: str, titles: list[str]) -> str:
+    """拼一个含多条 item 的最小 RSS。"""
+    items = "".join(
+        f"<item><title>{title}</title><link>{prefix}/{index}</link>"
+        f"<description>摘要。</description></item>"
+        for index, title in enumerate(titles)
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        f"<rss version=\"2.0\"><channel><title>t</title>{items}</channel></rss>"
+    )
+
+
+# 互不相似的动画标题：同事件去重按标题二元组算相似度（阈值 0.62），
+# 用「动画新闻1/2/3」这种只差一个字的标题会被判成同一事件合并掉。
+ANIME_TITLES = [
+    "剧场版动画票房突破百亿日元",
+    "声优阵容追加三位新人",
+    "电视动画第二季定档四月",
+    "监督换人引发热议",
+    "片头曲由知名乐队创作",
+    "原作累计发行突破千万册",
+    "海外配信平台同步上线",
+    "角色设计图首次曝光",
+    "特别篇年末播出决定",
+    "舞台化改编计划启动",
+    "蓝光套装附赠广播剧",
+    "制作公司启用新工作室",
+    "主题曲试听片段放出",
+    "动画电影入围国际影展",
+    "人气投票结果揭晓",
+    "联动咖啡厅限定菜单",
+    "官方画集将于下月发售",
+    "导演谈创作幕后故事",
+    "官方网站改版上线",
+    "首映礼现场报道",
+    # 下面这组用来把动画候选池撑到 50 条以上（验证「保底之后剩余额度仍按权重回到动画」）。
+    "东京漫展现场速报",
+    "京都工作室参观记",
+    "北海道取景地巡礼",
+    "福冈粉丝见面会",
+    "名古屋上映会记录",
+    "札幌特别放映",
+    "仙台签名会实况",
+    "横滨主题展参观",
+    "神户联动活动报道",
+    "广岛巡回展启动",
+    "新潟放映厅加场",
+    "金泽原画展纪实",
+    "长野露营企划",
+    "静冈舞台见面会",
+    "冈山粉丝感谢祭",
+    "熊本复刻上映",
+    "鹿儿岛先行放映",
+    "冲绳特别活动",
+    "大阪座谈会实录",
+    "奈良合作企划公布",
+    "蓝光修复版重映",
+    "原声带追加曲目",
+    "设定资料集第二卷",
+    "角色歌专辑发售",
+    "广播剧CD化决定",
+    "手办化企划公开",
+    "改编新作正式发表",
+    "舞台剧演员定妆",
+    "朗读剧门票开售",
+    "美术展巡回日程",
+    "分镜集限定发售",
+    "制作记录片上线",
+]
+
+
+def _subject_cand(spec: SourceSpec, title: str, subject: str, score: int):
+    """构造一条「主体类型 / 优先级」已固定的候选。
+
+    绕过文本分类：类别保底按 `_classify` 的 category 计数，这里直接写死分类结果，
+    测试才可以只关心「各类留几条」而不被关键词判定牵着走（`_classify` 会复用缓存）。
+    """
+    candidate = _cand(spec, title)
+    candidate.classification = {
+        "category": subject,
+        "subcategory": "",
+        "event_type": "新作情报",
+        "region": "日本",
+        "source_type": spec.source_type,
+        "priority_score": score,
+        "is_adult": False,
+        "major": 0,
+        "major_hit": "",
+    }
+    return candidate
+
+
+class TestSourceOrderAndPoolBalance:
+    def test_sources_follow_category_priority(self):
+        """抓源顺序固定为 动画 → 漫画 → 轻小说 → 游戏 → 综合动态（2026-10-23 定稿）。"""
+        from scripts.news_daily import _ordered_sources
+
+        specs = (
+            SourceSpec("g1", "游戏1", "https://g1.example/rss", "rss", "游戏", "zh"),
+            SourceSpec("n1", "轻小说1", "https://n1.example/rss", "rss", "轻小说", "zh"),
+            SourceSpec("a1", "动画1", "https://a1.example/rss", "rss", "动画", "zh"),
+            SourceSpec("gen1", "综合1", "https://gen.example/rss", "rss", "综合动态", "zh"),
+            SourceSpec("m1", "漫画1", "https://m1.example/rss", "rss", "漫画", "zh"),
+            SourceSpec("a2", "动画2", "https://a2.example/rss", "rss", "动画", "zh"),
+        )
+        assert [spec.key for spec in _ordered_sources(specs)] == [
+            "a1", "a2", "m1", "n1", "g1", "gen1",
+        ]
+
+    def test_official_pr_still_last(self):
+        """交错不影响原有口径：官方 PR 源仍然垫底。"""
+        from scripts.news_daily import _ordered_sources
+
+        specs = (
+            SourceSpec("pr", "PR源", "https://pr.example/rss", "rss", "动画", "zh",
+                       source_type="官方PR"),
+            SourceSpec("a1", "动画1", "https://a1.example/rss", "rss", "动画", "zh"),
+        )
+        assert [spec.key for spec in _ordered_sources(specs)] == ["a1", "pr"]
+
+    def test_single_source_cannot_swallow_the_run(self, factory):
+        """一个 20 条的游戏源不能独吞配额，排在后面的源照样会被抓。"""
+        fetch = fake_fetch({
+            BIG_GAME_SRC.url: rss_items("https://big-game.example", [f"游戏新闻{i}" for i in range(20)]),
+            ANIME_SRC.url: RSS_ANIME_ONE,
+            MANY_SRC.url: rss_items("https://many.example", DISTINCT_TITLES[:2]),
+        })
+        summary = run_import_daily(
+            factory, apply=True, quota=10, run_quota=0, exempt_quota=0,
+            sources=(BIG_GAME_SRC, ANIME_SRC, MANY_SRC), fetch=fetch,
+        )
+        # ceil(10 * 0.34) = 4：大游戏源最多贡献 4 条，剩下的位置留给后面的源
+        assert summary.per_source.get("big-game", 0) <= 4
+        assert summary.per_source.get("zh-anime") == 1
+        assert summary.per_source.get("many", 0) >= 1
+
+    def test_run_quota_limits_each_run(self, factory):
+        """日配额 100、单轮 2：一轮只入库 2 条，下一轮继续。"""
+        fetch = fake_fetch({MANY_SRC.url: rss_items("https://many.example", DISTINCT_TITLES)})
+        kwargs = dict(
+            apply=True, quota=100, run_quota=2, exempt_quota=0,
+            sources=(MANY_SRC,), fetch=fetch,
+        )
+        assert run_import_daily(factory, **kwargs).added == 2
+        assert run_import_daily(factory, **kwargs).added == 2
+        assert run_import_daily(factory, **kwargs).added == 2
+        # 6 条全部按轮放出，日配额（100）远未用完
+        assert run_import_daily(factory, **kwargs).added == 0
+
+    def test_run_quota_zero_means_unlimited(self, factory):
+        """run_quota=0 退回「只看日配额」的旧行为。"""
+        fetch = fake_fetch({MANY_SRC.url: rss_items("https://many.example", DISTINCT_TITLES)})
+        summary = run_import_daily(
+            factory, apply=True, quota=100, run_quota=0, exempt_quota=0,
+            sources=(MANY_SRC,), fetch=fetch,
+        )
+        assert summary.added == len(DISTINCT_TITLES)
+
+    def test_category_floor_reserves_quota_per_category(self):
+        """动画能喂满配额时，保底仍给漫画 / 轻小说 / 游戏各留位置。"""
+        from scripts.news_daily import select_quota
+        from scripts.news_classify import SUBJECT_ANIME, SUBJECT_GAME, SUBJECT_LN, SUBJECT_MANGA
+
+        pool = [_subject_cand(ANIME_SRC, t, SUBJECT_ANIME, 200) for t in ANIME_TITLES]
+        pool += [
+            _subject_cand(ANIME_SRC, t, SUBJECT_MANGA, 120)
+            for t in ("漫画单行本发售", "漫画连载进入最终章", "漫画赏获奖公布")
+        ]
+        pool += [
+            _subject_cand(ANIME_SRC, t, SUBJECT_LN, 110)
+            for t in ("轻小说新刊情报", "轻小说动画化企划")
+        ]
+        pool += [
+            _subject_cand(ANIME_SRC, t, SUBJECT_GAME, 100)
+            for t in ("新作游戏发售日", "游戏改编电影", "游戏联动活动", "游戏更新补丁", "电竞比赛结果")
+        ]
+        selected, _ = select_quota(
+            pool, 50, 0,
+            {SUBJECT_ANIME: 10, SUBJECT_MANGA: 10, SUBJECT_LN: 10, SUBJECT_GAME: 10},
+        )
+        counts: dict[str, int] = {}
+        for candidate in selected:
+            subject = candidate.classification["category"]
+            counts[subject] = counts.get(subject, 0) + 1
+        # 三类不足 10 条的，池里有多少给多少（不强行凑数）
+        assert counts[SUBJECT_MANGA] == 3
+        assert counts[SUBJECT_LN] == 2
+        assert counts[SUBJECT_GAME] == 5
+        # 剩下的额度按权重回到动画，总数填满 50（不足不勉强，但这里候选够）
+        assert counts[SUBJECT_ANIME] == 40
+        assert len(selected) == 50
+
+    def test_without_floor_animation_takes_everything(self):
+        """关掉保底（category_floor=0）退回纯权重：动画把额度吃光。"""
+        from scripts.news_daily import select_quota
+        from scripts.news_classify import SUBJECT_ANIME, SUBJECT_MANGA
+
+        pool = [_subject_cand(ANIME_SRC, t, SUBJECT_ANIME, 200) for t in ANIME_TITLES]
+        pool += [
+            _subject_cand(ANIME_SRC, t, SUBJECT_MANGA, 120)
+            for t in ("漫画单行本发售", "漫画连载进入最终章")
+        ]
+        selected, _ = select_quota(pool, 20, 0, {})
+        assert len(selected) == 20
+        assert all(c.classification["category"] == SUBJECT_ANIME for c in selected)
+
+    def test_final_run_stops_reserving(self, factory):
+        """当天最后一轮（NEWS_FINAL_RUN_HOUR 起）不再预留，剩余额度按权重补满。"""
+        fetch = fake_fetch({ANIME_SRC.url: RSS_ANIME_ONE})
+        summary = run_import_daily(
+            factory, apply=True, quota=10, run_quota=0, exempt_quota=0,
+            category_floor=10, sources=(ANIME_SRC,), fetch=fetch,
+            now=datetime(2026, 10, 23, 16, 30),
+        )
+        assert summary.final_run is True
+        assert summary.category_deficit == {}
+
+    def test_floor_keeps_fetching_later_categories(self, factory):
+        """动画源一次就够配额时，仍会为没达标的漫画去抓源（否则保底永远落空）。"""
+        manga = SourceSpec("zh-manga", "测试漫画源", "https://zh-manga.example/rss", "rss", "漫画", "zh")
+        fetch = fake_fetch({
+            ANIME_SRC.url: rss_items("https://anime.example", ANIME_TITLES[:6]),
+            manga.url: rss_items("https://manga.example", ["漫画单行本发售", "漫画连载进入最终章"]),
+        })
+        summary = run_import_daily(
+            factory, apply=True, quota=5, run_quota=0, exempt_quota=0,
+            category_floor=2, sources=(ANIME_SRC, manga), fetch=fetch,
+            now=datetime(2026, 10, 23, 10, 0),
+        )
+        # 动画 6 条已 ≥ 本轮额度 5，但因为漫画欠额未满足，漫画源照抓
+        assert summary.per_source.get("zh-manga") == 2
+        assert summary.added == 5
+
+    def test_floor_off_restores_early_break(self, factory):
+        """保底关闭时维持老优化：配额一够就停，不再为后面的类别多抓源。"""
+        manga = SourceSpec("zh-manga", "测试漫画源", "https://zh-manga.example/rss", "rss", "漫画", "zh")
+        fetch = fake_fetch({ANIME_SRC.url: rss_items("https://anime.example", ANIME_TITLES[:6])})
+        summary = run_import_daily(
+            factory, apply=True, quota=5, run_quota=0, exempt_quota=0,
+            category_floor=0, sources=(ANIME_SRC, manga), fetch=fetch,
+            now=datetime(2026, 10, 23, 10, 0),
+        )
+        assert summary.per_source.get("zh-manga") is None
+        assert summary.added == 5
+
+
+# ---------- 新源正文容器 + RSS 导语补全（2026-10-23） ----------
+# 用户报「加的新源又没有文章详情」：详情页只有 feed 的一两句导语。两个成因——
+# ① リスアニ！ / アニメ！アニメ！ 的正文容器不在旧词表里；
+# ② parse_feed 把 description 塞进了 body，于是 `not candidate.body` 恒为假，详情页从不请求。
+
+DETAIL_URL = "https://zh-anime.example/a1"
+
+DETAIL_HTML = (
+    '<html><body><div class="detail__wysiwyg parts__wysiwyg">'
+    "<p>这是详情页里的正文第一段，长度足够长，用来证明导语会被替换成真正的正文内容。</p>"
+    "<p>第二段继续说明活动的时间、地点与参与方式，全文明显超过正文阈值，不会被判成短讯。</p>"
+    "</div></body></html>"
+)
+
+
+class TestNewSourceBodyContainers:
+    def test_lisani_wysiwyg_container(self):
+        """リスアニ！的 `div.detail__wysiwyg`（2026-10-23 实测容器）。"""
+        html = (
+            '<div class="detail__wrap"><div class="widget__ranking">排行</div>'
+            '<div class="detail__wysiwyg parts__wysiwyg">'
+            "<p>アニメレーベル“スターチャイルドレコード”発足から45年、歴代作品を振り返る特集。</p>"
+            "<p>関係者へのインタビューも掲載している。</p></div></div>"
+        )
+        body = extract_body(html)
+        assert "スターチャイルドレコード" in body
+        assert "排行" not in body
+
+    def test_animeanime_arti_body_container(self):
+        """アニメ！アニメ！的 `article.arti-body`（旧代码靠 <article> 兜底才勉强命中）。"""
+        html = (
+            '<article class="arti-body cf cXenseParse editor-revolution">'
+            "<p>『しろたん』の期間限定ポップアップショップが池袋で開催される。</p>"
+            "<p>開催期間は2026年10月27日から11月9日まで。限定グッズの販売も予定している。</p>"
+            "<p>入場は無料で、混雑時は整理券が配布される見込みだ。</p></article>"
+        )
+        body = extract_body(html)
+        assert "ポップアップショップ" in body
+
+
+class TestRssBodyHydration:
+    def _feed(self, description: str) -> str:
+        return (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<rss version="2.0"><channel><title>动画源</title>'
+            f"<item><title>动画新闻甲</title><link>{DETAIL_URL}</link>"
+            '<enclosure url="https://zh-anime.example/i.jpg" type="image/jpeg"/>'
+            f"<description>{description}</description></item>"
+            "</channel></rss>"
+        )
+
+    def test_short_feed_description_is_replaced_by_detail(self, factory):
+        """feed 只给一句导语时，抓详情页并用正文替换（原来直接拿导语当正文）。"""
+        calls: list[str] = []
+
+        def fetch(url: str) -> str:
+            calls.append(url)
+            if url == ANIME_SRC.url:
+                return self._feed("动画相关的一句导语。")
+            if url == DETAIL_URL:
+                return DETAIL_HTML
+            raise RuntimeError(f"未打桩：{url}")
+
+        summary = run_import_daily(
+            factory, apply=True, quota=5, run_quota=0, exempt_quota=0,
+            category_floor=0, sources=(ANIME_SRC,), fetch=fetch,
+        )
+        assert summary.added == 1
+        assert DETAIL_URL in calls
+        db = factory()
+        try:
+            row = db.scalars(select(Article)).one()
+        finally:
+            db.close()
+        assert "详情页里的正文第一段" in row.body
+
+    def test_long_feed_description_skips_detail_fetch(self, factory):
+        """feed 已经给全篇正文（超过阈值）时不多发一次详情请求。"""
+        long_text = "本文正文。" * 60  # 300 字，超过 _RSS_FEED_BODY_MIN
+        calls: list[str] = []
+
+        def fetch(url: str) -> str:
+            calls.append(url)
+            if url == ANIME_SRC.url:
+                return self._feed(long_text)
+            raise RuntimeError(f"不该请求：{url}")
+
+        summary = run_import_daily(
+            factory, apply=True, quota=5, run_quota=0, exempt_quota=0,
+            category_floor=0, sources=(ANIME_SRC,), fetch=fetch,
+        )
+        assert summary.added == 1
+        assert DETAIL_URL not in calls
+
+
+# ---------- 图片补全 / 装饰图 / 详情页留痕与限速（2026-10-25 三大症状修复） ----------
+
+
+class TestImageBaseUrlAndDecoration:
+    """2026-10-25：相对图片路径按页面 origin 补全 + 装饰图扩容 + 贴纸按位置保留。"""
+
+    def test_relative_image_uses_page_origin(self):
+        """详情页里的相对图片路径按页面 origin 补全。
+
+        旧版兜底写死 Aniplex 域名：acgch 的 /mascot/sticker-pointing.webp、
+        lnnews 的 /images/logo_x_white.png 全被补成 news.aniplex.co.jp/...（404），
+        详情页正文里留一片裂图——用户报「抓不到图片」的主形态。
+        """
+        html = (
+            '<div class="article-body">'
+            "<p>正文第一段，长度足够通过最短校验，讲的是新角色公布与配音阵容情况。</p>"
+            '<img src="/imgs/visual.jpg">'
+            "<p>正文第二段，继续讲活动详情与发售信息，同样足够长通过校验。</p>"
+            "</div>"
+        )
+        body = extract_body(html, "https://acgch.example/zh-hans/news/abc")
+        assert "[图] https://acgch.example/imgs/visual.jpg" in body
+        assert "aniplex" not in body
+
+    def test_feed_relative_image_uses_feed_origin(self):
+        """订阅源 description 里的相对图按 feed 地址的 origin 补全。"""
+        rss = (
+            '<?xml version="1.0"?><rss version="2.0"><channel>'
+            "<item><title>快讯</title><link>https://ln.example/articles/1</link>"
+            "<description><![CDATA[<p>摘要文字。</p><img src=\"/images/cover.jpg\">]]></description>"
+            "</item></channel></rss>"
+        )
+        spec = SourceSpec("ln", "LN", "https://ln.example/feed", "rss", "轻小说", "ja")
+        items = parse_feed(rss, spec)
+        assert items[0].image_url == "https://ln.example/images/cover.jpg"
+        assert "[图] https://ln.example/images/cover.jpg" in items[0].body
+
+    def test_hard_decorative_and_tracking_images_dropped(self):
+        """logo / 图标 / Facebook 追踪像素 / data 占位一律丢（硬装饰）。"""
+        html = (
+            '<div class="article-body">'
+            '<img src="/base/images/header-logo.png">'
+            '<img src="https://www.facebook.com/tr?id=1&ev=PageView&noscript=1">'
+            '<img src="data:image/gif;base64,R0lGODlhAQABAAAAACw=">'
+            '<img src="/brand/acgch-logo-v5.png">'
+            "<p>正文第一段，长度足够通过最短校验，介绍公布的新视觉图与角色阵容。</p>"
+            '<img src="/medias/real-visual.jpg">'
+            "<p>正文第二段，继续讲发售时间与平台信息，同样足够长通过校验。</p>"
+            "</div>"
+        )
+        body = extract_body(html, "https://animeanime.example/article/1")
+        assert "[图] https://animeanime.example/medias/real-visual.jpg" in body
+        assert "header-logo" not in body
+        assert "facebook.com/tr" not in body
+        assert "data:image" not in body
+        assert "logo-v5" not in body
+
+    def test_soft_decoration_kept_only_inside_text(self):
+        """表情贴纸（软装饰）按位置：孤立贴在首尾的丢，夹在文字中间的保留。"""
+        html = (
+            '<div class="article-body">'
+            '<img src="/mascot/sticker-pointing.webp">'
+            "<p>正文第一段，长度足够通过最短校验，介绍公布的新角色与视觉图。</p>"
+            '<img src="/mascot/sticker-cheer.webp">'
+            "<p>正文第二段，继续讲活动详情与发售信息，同样足够长通过校验。</p>"
+            '<img src="/mascot/sticker-end.webp">'
+            "</div>"
+        )
+        body = extract_body(html, "https://acgch.example/news/1")
+        assert "sticker-cheer" in body
+        assert "sticker-pointing" not in body
+        assert "sticker-end" not in body
+
+
+class TestDetailFailureAndPacing:
+    """2026-10-25：详情页失败留痕 + 摘要剥离占位行 + 详情页限速。"""
+
+    def test_detail_failure_is_counted_not_silent(self, factory):
+        """详情页抓不到时计入 detail_failed 并留原因；源级 failed 语义不变。"""
+        rss = (
+            '<?xml version="1.0"?><rss version="2.0"><channel>'
+            "<item><title>快讯甲</title><link>https://paced.example/a1</link></item>"
+            "<item><title>快讯乙</title><link>https://paced.example/a2</link></item>"
+            "</channel></rss>"
+        )
+        fetch = fake_fetch({ZH_SOURCE.url: rss})  # 详情页一律未打桩 → 失败
+        summary = run_import_daily(
+            factory, apply=True, quota=10, run_quota=0, exempt_quota=0,
+            category_floor=0, sources=(ZH_SOURCE,), fetch=fetch, sleep=lambda s: None,
+        )
+        assert summary.detail_failed == 2
+        assert summary.failed == 0  # 源级抓取没失败，不混入 failed
+        assert any("正文详情页失败" in d.get("reason", "") for d in summary.details)
+        assert "正文详情页失败 2" in summary.per_source_stats[ZH_SOURCE.key]
+
+    def test_summary_strips_placeholder_lines(self, factory):
+        """desc 为空的源：summary 回填时剥掉 [图]/[媒体] 行，不以 URL 开头。"""
+        rss = (
+            '<?xml version="1.0"?><rss version="2.0"><channel>'
+            "<item><title>快讯丙</title><link>https://paced.example/c1</link></item>"
+            "</channel></rss>"
+        )
+        page = (
+            "<article>"
+            '<img src="https://paced.example/cover.jpg">'
+            "<p>这是详情页真正的第一段正文，内容足够长，能够通过最短长度校验，不会被当作提取失败。</p>"
+            "<p>第二段：游戏将于2027年3月18日发售，登陆 Nintendo Switch 与 Steam 平台。</p>"
+            "</article>"
+        )
+        fetch = fake_fetch({ZH_SOURCE.url: rss, "https://paced.example/c1": page})
+        summary = run_import_daily(
+            factory, apply=True, quota=10, run_quota=0, exempt_quota=0,
+            category_floor=0, sources=(ZH_SOURCE,), fetch=fetch, sleep=lambda s: None,
+        )
+        db = factory()
+        try:
+            article = db.scalars(select(Article)).one()
+        finally:
+            db.close()
+        assert article.summary.startswith("这是详情页真正的第一段正文")
+        assert "[图]" not in article.summary
+
+    def test_detail_fetch_is_paced(self, factory):
+        """详情页之间按间隔限速（默认 1s）；sleep 可注入，测试不真等。"""
+        rss = (
+            '<?xml version="1.0"?><rss version="2.0"><channel>'
+            "<item><title>快讯丁</title><link>https://paced.example/d1</link></item>"
+            "<item><title>快讯戊</title><link>https://paced.example/d2</link></item>"
+            "</channel></rss>"
+        )
+        page = (
+            "<article><p>详情页正文第一段，长度足够通过最短长度校验，讲的是公布信息。</p>"
+            "<p>第二段继续补充发售时间与平台，长度也足够通过校验。</p></article>"
+        )
+        fetch = fake_fetch(
+            {
+                ZH_SOURCE.url: rss,
+                "https://paced.example/d1": page,
+                "https://paced.example/d2": page,
+            }
+        )
+        waited: list[float] = []
+        summary = run_import_daily(
+            factory, apply=True, quota=10, run_quota=0, exempt_quota=0,
+            category_floor=0, sources=(ZH_SOURCE,), fetch=fetch,
+            sleep=waited.append,
+        )
+        assert summary.added == 2
+        # 两篇都抓了详情页 → 两次限速等待；feed 列表请求不计间隔
+        assert waited == [news_daily.DETAIL_SLEEP_SECONDS] * 2
+
+
+# ---------- 无限制源（2026-10-25 用户定稿：acgch 没有任何限制包括配额，全抓） ----------
+
+
+class TestUnrestrictedSource:
+    """SourceSpec.unrestricted：过滤链一层不走、配额不占、单源入池上限不适用。"""
+
+    FREE_SOURCE = SourceSpec(
+        "free-test", "无限制测试源", "https://free.example/rss", "rss",
+        "综合动态", "zh", unrestricted=True,
+    )
+    # 三条都会被普通源的过滤层拒掉的稿子（硬广标记 / 抽奖导流 / VOD 导流，
+    # 均为与类别无关的判据）。description 刻意超过 _RSS_FEED_BODY_MIN(240) 并带图，
+    # 免得触发详情页抓取——本组测试只关心过滤与配额，不关心正文补全。
+    _PAD = "活动细则以官方公告为准，最终解释权归主办方所有，详情留意后续更新说明。"
+    JUNK_RSS = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel><title>无限制源</title>
+<item><title>【推广】普通游戏联名手柄发售决定</title><link>https://free.example/j1</link>
+<description><![CDATA[<p>与普通游戏联名的纪念手柄开启预约。</p><p>{pad}{pad}{pad}{pad}{pad}{pad}{pad}{pad}</p>
+<img src="https://free.example/i1.jpg">]]></description></item>
+<item><title>关注转发抽奖送福利</title><link>https://free.example/j2</link>
+<description><![CDATA[<p>关注账号并转发即可参与抽奖，奖品是联名周边一套。</p><p>{pad}{pad}{pad}{pad}{pad}{pad}{pad}{pad}</p>
+<img src="https://free.example/i2.jpg">]]></description></item>
+<item><title>新番見放題配信先比較指南</title><link>https://free.example/j3</link>
+<description><![CDATA[<p>哪家平台能看新番，各大配信先横向比较。</p><p>{pad}{pad}{pad}{pad}{pad}{pad}{pad}{pad}</p>
+<img src="https://free.example/i3.jpg">]]></description></item>
+</channel></rss>""".format(pad=_PAD)
+
+    NORMAL_RSS = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel><title>普通源</title>
+<item><title>《星海机工》公布新角色与声优阵容</title><link>https://zh-anime.example/n1</link>
+<description><![CDATA[<p>机甲动画星海机工公布新角色与声优，制作阵容同步公开。</p><p>{pad}{pad}{pad}{pad}{pad}{pad}{pad}{pad}</p>
+<img src="https://zh-anime.example/n1.jpg">]]></description></item>
+<item><title>《治愈食堂》第二季制作决定</title><link>https://zh-anime.example/n2</link>
+<description><![CDATA[<p>治愈系漫画改编动画第二季制作决定，预告片同步解禁。</p><p>{pad}{pad}{pad}{pad}{pad}{pad}{pad}{pad}</p>
+<img src="https://zh-anime.example/n2.jpg">]]></description></item>
+<item><title>《荒野列车》剧场版上映日期确定</title><link>https://zh-anime.example/n3</link>
+<description><![CDATA[<p>荒野列车剧场版上映日期确定，入场者特典信息公布。</p><p>{pad}{pad}{pad}{pad}{pad}{pad}{pad}{pad}</p>
+<img src="https://zh-anime.example/n3.jpg">]]></description></item>
+</channel></rss>""".format(pad=_PAD)
+
+    def _run(self, factory, sources, pages, **kwargs):
+        params = dict(
+            apply=True, quota=10, run_quota=0, exempt_quota=0,
+            category_floor=0, sources=sources, fetch=fake_fetch(pages),
+            sleep=lambda s: None,
+        )
+        params.update(kwargs)
+        return run_import_daily(factory, **params)
+
+    def test_acgch_is_the_only_unrestricted_source(self):
+        """线上只有 acgch 一个无限制源（用户 2026-10-25 定稿），其它源行为不变。"""
+        assert [spec.key for spec in SOURCES if spec.unrestricted] == ["acgch"]
+
+    def test_junk_articles_pass_for_unrestricted_source(self, factory):
+        """硬广 / 抽奖 / VOD 导流在无限制源里一条都不拦。"""
+        summary = self._run(factory, (self.FREE_SOURCE,), {self.FREE_SOURCE.url: self.JUNK_RSS})
+        assert summary.filtered == 0
+        assert summary.added == 3
+
+    def test_same_junk_is_filtered_for_normal_source(self, factory):
+        """对照组：同样的稿子在普通源里全被拒——证明绕过是真的绕过了。"""
+        summary = self._run(factory, (ZH_SOURCE,), {ZH_SOURCE.url: self.JUNK_RSS})
+        assert summary.filtered == 3
+        assert summary.added == 0
+
+    def test_added_even_when_daily_quota_exhausted(self, factory):
+        """日配额 0 也全量抓：早退与「配额满就丢非官宣」两个闸门都绕过。"""
+        summary = self._run(
+            factory, (self.FREE_SOURCE,), {self.FREE_SOURCE.url: self.JUNK_RSS}, quota=0,
+        )
+        assert summary.added == 3
+        assert "无限制全量" in summary.per_source_stats[self.FREE_SOURCE.key]
+
+    def test_does_not_consume_daily_quota(self, factory):
+        """无限制源不扣 remaining：普通源照样拿满自己的配额，互不挤占。"""
+        summary = self._run(
+            factory, (ANIME_SRC, self.FREE_SOURCE),
+            {ANIME_SRC.url: self.NORMAL_RSS, self.FREE_SOURCE.url: self.JUNK_RSS},
+            quota=2,
+        )
+        assert summary.per_source.get("zh-anime") == 2  # 普通源：配额 2 条拿满即止
+        assert summary.per_source.get("free-test") == 3  # 无限制源：3 条全进
+        assert summary.added == 5
+
+    def test_not_capped_by_per_source_pool_cap(self, factory):
+        """单源入池上限（needed×0.34）不适用于无限制源。"""
+        # quota=3、3 个源 → source_cap = ceil(3×0.34) = 2；无限制源 3 条候选应全入池。
+        one = """<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"><channel><title>源</title>
+<item><title>动画条目</title><link>https://zh-anime.example/c1</link>
+<description><![CDATA[<p>某动画公布新视觉图与放送日程。</p><p>{pad}{pad}{pad}{pad}{pad}{pad}{pad}{pad}</p>
+<img src="https://zh-anime.example/c1.jpg">]]></description></item>
+</channel></rss>""".format(pad=self._PAD)
+        game = (
+            one.replace("动画条目", "游戏条目")
+            .replace("zh-anime.example", "zh-game.example")
+            .replace("某动画公布新视觉图与放送日程", "某游戏公布新版本内容与上线时间")
+        )
+        summary = self._run(
+            factory, (ANIME_SRC, GAME_SRC, self.FREE_SOURCE),
+            {
+                ANIME_SRC.url: one,
+                GAME_SRC.url: game,
+                self.FREE_SOURCE.url: self.JUNK_RSS,
+            },
+            quota=3,
+        )
+        assert summary.per_source.get("free-test") == 3
+        assert summary.added == 5  # 2 条普通（配额内）+ 3 条无限制

@@ -1,5 +1,6 @@
 {% extends "base_content.html" %}
 {% from "_brand.html" import wordmark %}
+{% from "_work_card.html" import poster_card with context %}
 {% block title %}首页{% endblock %}
 {% block content %}
 {# 分类图标：统一内联 SVG（.svg-ic 描边助手），替代 emoji，保证跨平台渲染一致 #}
@@ -11,10 +12,11 @@
 } %}
 {% set fallback_icon = "<svg class='svg-ic' viewBox='0 0 24 24' aria-hidden='true'><path d='M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z'/></svg>" %}
 
-{# ===== 顶部 hero：品牌字标 + 价值主张 + 主 CTA + 真实数据行 + 海报拼贴。
+{# ===== 顶部 hero：品牌字标 + 价值主张 + 主 CTA + 真实数据行 + 海报轮播。
    搜索不再占黄金位——已收编为导航栏全局搜索（base_content.html），/ 键聚焦 #nav-q；
    全量筛选在 /contents 页。背景图来自本地素材（static/img/home），
-   海报为当季动画主视觉图，前 3 张静态展示。
+   海报为服务端全站名单（当季新番轮转生成 / 管理员手动指定，见 app/home_posters.py），
+   Coverflow 展示：C 位可进详情，侧边点击切 C 位，手机横滑切换。
    品牌只留字标（全站唯一来源 _brand.html）。首页不放宣传语：
    黄金位只给字标，「这站是什么」由副标题和页脚承担。 ===== #}
 <section class="home-hero">
@@ -46,13 +48,35 @@
                 </div>
             </dl>
         </div>
-        <div class="home-hero-collage" aria-hidden="true">
-            {# 首屏大图：eager + fetchpriority=high 抢加载优先级；width/height 锁定占位防
-               布局抖动（CLS）。属性比例必须严格 2:3，与 style.css 的 aspect-ratio 同口径，
-               否则自然比例与 CSS 比例冲突、海报被拉变形。真实裁切由 object-fit:cover 负责。 #}
-            <img class="home-poster home-poster-a" src="/static/img/home/poster-sakura.jpg" alt="" width="200" height="300" loading="eager" fetchpriority="high" decoding="async">
-            <img class="home-poster home-poster-b" src="/static/img/home/poster-haruhi.jpg" alt="" width="200" height="300" loading="eager" fetchpriority="high" decoding="async">
-            <img class="home-poster home-poster-c" src="/static/img/home/poster-bocchi.jpg" alt="" width="200" height="300" loading="eager" fetchpriority="high" decoding="async">
+        <div class="home-hero-collage coverflow" data-coverflow tabindex="0" role="region"
+             aria-label="首页海报轮播" aria-roledescription="轮播">
+            {# Coverflow：C 位海报可点进详情页；侧边海报点击切换到 C 位；
+                手机左右滑动切换，轻点 C 位进详情。无 JS 时只显示第一张（CSS 降级），
+                点击即进详情，行为与改造前一致。箭头 / 圆点 / 页码一律不常驻。 #}
+            <div class="coverflow-stage">
+                <button class="coverflow-nav coverflow-nav-prev" type="button" data-coverflow-prev aria-label="上一张海报">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="15 5 8 12 15 19"/></svg>
+                </button>
+                <ul class="coverflow-track">
+                    {% for item in coverflow_items %}
+                    <li class="coverflow-slide{% if loop.first %} is-active{% endif %}" data-coverflow-slide data-href="{{ item.href }}">
+                        <a class="coverflow-card" href="{{ item.href }}" aria-label="{{ item.title }}（进入作品详情页）">
+                            <img class="coverflow-img" src="{{ thumb_src(item.image_url) }}" alt="{{ item.title }}海报"
+                                 width="300" height="450" decoding="async" referrerpolicy="no-referrer"
+                                 loading="{% if loop.first %}eager{% else %}lazy{% endif %}"
+                                 {% if loop.first %}fetchpriority="high"{% endif %}
+                                 onerror="this.style.display='none'">
+                        </a>
+                        <span class="coverflow-caption" aria-hidden="true">
+                            <span class="coverflow-title">{{ item.title }}</span>
+                        </span>
+                    </li>
+                    {% endfor %}
+                </ul>
+                <button class="coverflow-nav coverflow-nav-next" type="button" data-coverflow-next aria-label="下一张海报">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="9 5 16 12 9 19"/></svg>
+                </button>
+            </div>
         </div>
     </div>
 </section>
@@ -129,8 +153,11 @@
 
         {# --- 主列 2 · 推荐作品：自适应网格，卡片铺满不留大空白。
              <576 两列 / ≥576 三列 / ≥768 与 ≥992 按最小卡宽自动填充（见 style.css）。
-             初始铺前 home_rec_initial（=CONTENT_PAGE_SIZE=60，整除各列数、末行必满），
-             其余带 home-top-extra 收起，「展开更多推荐」点开（上限 100）。 --- #}
+             折叠分界跟「最新资讯」侧栏一致：资讯栏 col-12 col-lg-3，仅 lg（≥992）并排、
+             <992 下移。故 PC（≥992，资讯栏并排）不折叠：全部推荐作品（上限 100）直接铺开；
+             手机（<992，资讯栏下移）折叠到前 home_rec_mobile_initial（=10）部，超出带
+             home-top-extra 收起、「展开更多推荐」点开（无 JS 时前 10 部照常可见）。
+             PC 不再有展开按钮，原位置改为「更多作品」入口（跳 /contents）。 --- #}
         <section class="mb-4">
             <div class="d-flex justify-content-between align-items-center mb-3">
                 <h2 class="h5 mb-0 section-heading">推荐作品</h2>
@@ -139,38 +166,20 @@
             {% if top_contents %}
             <div class="home-top-grid">
                 {% for item in top_contents %}
-                {% set stars = (item.rating / 2) | int %}
-                <a class="work-card{% if loop.index > home_rec_initial %} home-top-extra{% endif %}" href="/contents/{{ item.id }}">
-                    <span class="work-cover-box">
-                        <span class="work-cover-rank {{ 'work-rank-top' if loop.index <= 3 else '' }}" aria-hidden="true">{{ loop.index }}</span>
-                        <span class="work-cover" aria-hidden="true">{{ item.title[:1] }}</span>
-                        {% if item.image_url %}
-                        <img class="work-cover" src="{{ thumb_src(item.image_url) }}" alt="{{ item.title }}封面" loading="lazy" width="400" height="600" decoding="async" onerror="this.style.display='none'">
-                        {% endif %}
-                    </span>
-                    <span class="work-card-body">
-                        <span class="work-card-title">{{ item.title }}</span>
-                        <span class="work-card-rating">
-                            <span class="badge detail-type-badge-sm">{{ type_labels.get(item.type, item.type) }}</span>
-                            {% if item.rating > 0 %}
-                            <span class="detail-stars" aria-hidden="true">{% for i in range(1, 6) %}<span class="{{ 'star-on' if i <= stars else 'star-off' }}">★</span>{% endfor %}</span>
-                            <span>{{ '%.1f' % item.rating }}</span>
-                            {% else %}
-                            <span class="text-muted small">暂无评分</span>
-                            {% endif %}
-                        </span>
-                        <span class="text-secondary work-card-summary">{{ item.summary[:40] }}{% if item.summary|length > 40 %}…{% endif %}</span>
-                    </span>
-                </a>
+                {{ poster_card(item, 'card',
+                               rank=loop.index,
+                               extra_class=('home-top-extra' if loop.index > home_rec_mobile_initial else '')) }}
                 {% endfor %}
             </div>
-            {% if top_contents|length > home_rec_initial %}
-            <div class="text-center mt-3">
-                <button type="button" class="btn btn-outline-primary btn-sm" id="home-rec-expand">展开更多推荐（还有 {{ top_contents|length - home_rec_initial }} 部）</button>
+            {% if top_contents|length > home_rec_mobile_initial %}
+            {# 手机：展开按钮（仅窄屏可见，PC 由 CSS 隐藏） #}
+            <div class="text-center mt-3 home-rec-expand-wrap">
+                <button type="button" class="btn btn-outline-primary btn-sm" id="home-rec-expand">展开更多推荐（还有 {{ top_contents|length - home_rec_mobile_initial }} 部）</button>
             </div>
             <script>
-                /* 推荐模块「展开更多」：移除收起类即整批铺开，按钮随后退场。
-                   无 JS 时前 home_rec_initial 部照常可见（渐进增强）。 */
+                /* 推荐模块「展开更多」（仅手机）：移除收起类即整批铺开，按钮随后退场。
+                   无 JS 时前 home_rec_mobile_initial 部照常可见（渐进增强）。
+                   PC 端该按钮由 CSS 隐藏，作品本身已被 CSS 强制铺开。 */
                 (function () {
                     "use strict";
                     var btn = document.getElementById("home-rec-expand");
@@ -185,14 +194,17 @@
                 })();
             </script>
             {% endif %}
+            {# PC：原「展开更多推荐」位置改为「更多作品」入口（仅宽屏可见，手机隐藏） #}
+            <div class="text-center mt-3 home-rec-more-wrap">
+                <a class="btn btn-outline-primary btn-sm" href="/contents">更多作品 &rarr;</a>
+            </div>
             {% else %}
             <div class="detail-empty">暂无内容数据，暂时无法推荐。</div>
             {% endif %}
         </section>
     </main>
 
-    <aside class="col-12 col-lg-3 home-side">
-        <div class="home-side-inner">
+    <aside class="col-12 col-lg-3 home-side">        <div class="home-side-inner">
             {# --- 侧栏 1 · 御宅成分检测引流卡：游客免登录试算，登录用户直达成分报告。 --- #}
             <a class="home-persona-card mb-4" href="{{ '/me/persona' if current_user else '/persona' }}">
                 <span class="home-persona-kicker">御宅成分检测</span>
@@ -249,4 +261,184 @@
         </div>
     </aside>
 </div>
+
+{# ===== 首页海报轮播（Coverflow）交互：渐进增强，无 JS 时只显示第一张且可点进详情。
+     - 自动播放 7s 一格、同方向循环；悬停 / 聚焦 / 触摸 / 手动交互时暂停，操作后顺延恢复；
+     - 点击侧边海报平滑切到 C 位，点击 C 位进入该作品详情页；
+     - 手机横滑切换（touch-action: pan-y，纵向滚动放行），轻点 C 位才跳转；
+     - 键盘左右方向键仅在组件聚焦时生效；
+     - prefers-reduced-motion：不自动播放（CSS 同时去掉位移动画）。 ===== #}
+{% if coverflow_items|length > 1 %}
+<script>
+(function () {
+    "use strict";
+    var root = document.querySelector("[data-coverflow]");
+    if (!root) return;
+    var slides = Array.prototype.slice.call(root.querySelectorAll("[data-coverflow-slide]"));
+    if (!slides.length) return;
+    var count = slides.length;
+    var active = 0;
+    slides.forEach(function (slide, i) {
+        if (slide.classList.contains("is-active")) active = i;
+    });
+
+    root.setAttribute("data-enhanced", "");  // CSS：非 active 海报改为可见并参与定位
+    if (count <= 1) root.setAttribute("data-single", "");
+
+    var AUTOPLAY_MS = 7000;   // 自动切换间隔
+    var RESUME_DELAY = 3000;  // 手动操作后恢复自动播放的顺延时
+    var SWIPE_MIN = 40;       // 有效横滑的最小横向距离（px）
+    var reduceMotion = !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+
+    var timer = null;
+    var resumeTimer = null;
+    var suppressTimer = null;
+    var suppressClick = false;
+    var startX = 0;
+    var startY = 0;
+    var tracking = false;
+
+    function shortestOffset(i) {
+        var off = i - active;
+        if (off > count / 2) off -= count;
+        else if (off < -count / 2) off += count;
+        return off;
+    }
+
+    /* 三张构图的状态类（位置 / 尺寸 / 角度 / 层级全部在 style.css，与改动前拼贴同值）：
+       is-active=C 位、is-prev=左预览、is-next=右预览、is-hidden=第三张及以外。
+       PC 与手机共用同一份 DOM 与同一组类，差异只由 CSS 断点切换，不判断 UA。 */
+    function render() {
+        slides.forEach(function (slide, i) {
+            var off = shortestOffset(i);
+            var abs = Math.abs(off);
+            slide.classList.toggle("is-active", off === 0);
+            slide.classList.toggle("is-prev", off === -1);
+            slide.classList.toggle("is-next", off === 1);
+            slide.classList.toggle("is-hidden", abs > 1);
+            slide.setAttribute("aria-hidden", off === 0 ? "false" : "true");
+            // 侧边链接退出 Tab 序列：键盘用户只会在 C 位停留
+            var link = slide.querySelector("a");
+            if (link) link.tabIndex = off === 0 ? 0 : -1;
+        });
+    }
+
+    function setActive(i) {
+        active = ((i % count) + count) % count;
+        render();
+    }
+
+    function next() { setActive(active + 1); }
+    function prev() { setActive(active - 1); }
+
+    function startAuto() {
+        if (count <= 1 || reduceMotion || timer) return;
+        timer = window.setInterval(next, AUTOPLAY_MS);
+    }
+
+    function stopAuto() {
+        if (timer) {
+            window.clearInterval(timer);
+            timer = null;
+        }
+    }
+
+    function resumeAuto(delay) {
+        if (resumeTimer) window.clearTimeout(resumeTimer);
+        resumeTimer = window.setTimeout(startAuto, delay || RESUME_DELAY);
+    }
+
+    function manualSwitch(fn) {
+        fn();
+        stopAuto();
+        resumeAuto();
+    }
+
+    /* ---- 悬停 / 聚焦：暂停；离开 / 失焦：恢复 ---- */
+    root.addEventListener("mouseenter", stopAuto);
+    root.addEventListener("mouseleave", startAuto);
+    root.addEventListener("focusin", stopAuto);
+    root.addEventListener("focusout", startAuto);
+
+    /* ---- 点击：C 位放行跳详情，侧边切到 C 位 ---- */
+    root.addEventListener("click", function (event) {
+        /* 鼠标点击后清掉聚焦态：被点的箭头 / 侧边海报（<a>）会持续聚焦，
+           让 .coverflow:focus-within 一直为真，箭头停在「显示」态不消失。
+           失焦后箭头改回只由 :hover 控制，鼠标移开即淡出。
+           键盘 Enter/Space 触发的 click 其 detail 为 0，不在此失焦，保留键盘可见性。 */
+        if (event.detail) {
+            var ae = document.activeElement;
+            if (ae && root.contains(ae) && typeof ae.blur === "function") {
+                ae.blur();
+            }
+        }
+        if (suppressClick) {
+            // 触摸横滑后浏览器补发的 click：一律抑制，避免「滑一下又跳详情」
+            suppressClick = false;
+            event.preventDefault();
+            return;
+        }
+        var slide = event.target.closest && event.target.closest("[data-coverflow-slide]");
+        if (!slide) return;
+        var index = slides.indexOf(slide);
+        if (index < 0) return;
+        if (slide.classList.contains("is-active")) return;  // C 位：默认行为即跳详情页
+        event.preventDefault();                              // 侧边：只切换，不跳转
+        manualSwitch(function () { setActive(index); });
+    });
+
+    /* ---- 箭头按钮（PC 悬停淡入；触摸设备不渲染，见 CSS） ---- */
+    var prevBtn = root.querySelector("[data-coverflow-prev]");
+    var nextBtn = root.querySelector("[data-coverflow-next]");
+    if (prevBtn) prevBtn.addEventListener("click", function () { manualSwitch(prev); });
+    if (nextBtn) nextBtn.addEventListener("click", function () { manualSwitch(next); });
+
+    /* ---- 键盘：容器 tabindex=0，仅在聚焦时触发，不影响页面其它功能 ---- */
+    root.addEventListener("keydown", function (event) {
+        if (event.key === "ArrowLeft") {
+            event.preventDefault();
+            manualSwitch(prev);
+        } else if (event.key === "ArrowRight") {
+            event.preventDefault();
+            manualSwitch(next);
+        }
+    });
+
+    /* ---- 触摸 / 指针：横滑切换、轻点跳转；纵向滚动放行（stage 设 touch-action: pan-y） ---- */
+    root.addEventListener("pointerdown", function (event) {
+        if (event.pointerType === "mouse") return;  // 鼠标走 click / hover 两条路
+        tracking = true;
+        startX = event.clientX;
+        startY = event.clientY;
+        stopAuto();
+    });
+    root.addEventListener("pointerup", function (event) {
+        if (!tracking) return;
+        tracking = false;
+        var dx = event.clientX - startX;
+        var dy = event.clientY - startY;
+        var absX = Math.abs(dx);
+        var absY = Math.abs(dy);
+        if (absX > SWIPE_MIN && absX > absY * 1.2) {
+            suppressClick = true;  // 抑制随后补发的 click，防止滑动误跳详情
+            if (suppressTimer) window.clearTimeout(suppressTimer);
+            suppressTimer = window.setTimeout(function () { suppressClick = false; }, 400);
+            manualSwitch(function () { if (dx < 0) next(); else prev(); });
+        } else {
+            resumeAuto();  // 轻点 / 纵向滚动：顺延恢复自动播放
+        }
+    });
+    root.addEventListener("pointercancel", function () {
+        tracking = false;
+        resumeAuto();
+    });
+
+    /* ---- PC / 手机构图差异全部由 CSS 断点切换，JS 不监听视口变化 ---- */
+
+    if (reduceMotion) root.setAttribute("data-reduced-motion", "");
+    render();
+    startAuto();
+})();
+</script>
+{% endif %}
 {% endblock %}

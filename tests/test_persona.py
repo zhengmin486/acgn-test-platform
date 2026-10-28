@@ -2,7 +2,7 @@
 
 覆盖：
 - Bangumi 条目类型 / 收藏状态映射（私有、音乐 / 三次元被过滤）；
-- 成分报告：类型分布、标签、避雷（抛弃 / 低分）、六维分数、人格标签；
+- 成分报告：类型分布、标签、避雷（抛弃 / 低分）、维度分数、人格标签；
 - 提示词包含事实与语气，且明确禁止编造；
 - 页面：游客跳登录、同步（打桩不触网）、生成、贴回文案、LLM 生成、清除；
 - 雷达图坐标数量。
@@ -260,7 +260,7 @@ class TestProfile:
         assert profile["entry_year"] == 2006
         assert profile["latest_year"] == 2024
         assert profile["identity"] in ("番剧党", "杂食党")
-        assert len(profile["dimensions"]) == 6
+        assert len(profile["dimensions"]) == 7
 
     def test_prompt_contains_facts_and_guardrails(self):
         profile = persona.build_profile(
@@ -359,7 +359,7 @@ class TestPersonaPage:
         assert "本命类型" in page.text
         assert "避雷类型" in page.text
         assert "致郁" in page.text
-        assert "六维成分" in page.text
+        assert "维度成分" in page.text
         assert "复制提示词" in page.text
 
     def test_manual_narrative_saved(self, persona_env):
@@ -429,15 +429,16 @@ class TestRadar:
                 "type_focus": 50,
                 "tag_focus": 30,
                 "mainstream": 60,
+                "quality": 70,
                 "exploration": 40,
                 "hype": 20,
                 "completion": 80,
             }
         )
-        assert len(radar["polygon"].split()) == 6
+        assert len(radar["polygon"].split()) == 7
         assert len(radar["grid"]) == 4
-        assert len(radar["axes"]) == 6
-        assert len(radar["labels"]) == 6
+        assert len(radar["axes"]) == 7
+        assert len(radar["labels"]) == 7
 
 
 class _FakeResponse:

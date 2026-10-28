@@ -12,7 +12,12 @@ from fastapi import APIRouter, Depends, Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from app import crud, mailer
-from app.admin_common import actor_id as _actor_id, short_text as _short, url_with as _url
+from app.admin_common import (
+    actor_id as _actor_id,
+    collect_ids as _collect_ids,
+    short_text as _short,
+    url_with as _url,
+)
 from app.auth import require_owner_page
 from app.config import settings
 from app.page_common import DbSession, templates
@@ -162,7 +167,7 @@ def _render_invites_page(
             "codes": codes,
             "status_labels": crud.INVITE_STATUS_LABELS,
             "usernames": usernames,
-            "invite_required": settings.registration_invite_only,
+            "invite_required": settings.registration_invite_required,
             "registration_mode": settings.registration_mode,
             "max_batch": crud.INVITE_CODE_MAX_BATCH,
             "generated": generated,
@@ -188,7 +193,11 @@ def invites_page(
 
 @router.post("/admin/invites/generate")
 async def generate_invites_page(request: Request, db: DbSession):
-    """批量生成邀请码；PRG 回列表页，新码出现在列表最上方（明文展示）。"""
+    """批量生成邀请码；PRG 回列表页，新码出现在列表最上方（明文展示）。
+
+    ``role`` 为该批邀请码登记的目标角色（普通用户 / 管理员）：管理员邀请码是
+    唯一的「注册即管理员」提权入口，**仅站长可生成**；普通管理员只能发普通用户码。
+    """
     form = await request.form()
     count_text = str(form.get("count", "1")).strip() or "1"
     if not count_text.isdigit() or not (1 <= int(count_text) <= crud.INVITE_CODE_MAX_BATCH):
@@ -200,6 +209,20 @@ async def generate_invites_page(request: Request, db: DbSession):
     if error:
         return RedirectResponse(_url("/admin/invites", error=error), status_code=303)
     note = str(form.get("note", "")).strip()
+    role = str(form.get("role", crud.ROLE_USER)).strip() or crud.ROLE_USER
+    if role not in (crud.ROLE_USER, crud.ROLE_ADMIN):
+        return RedirectResponse(
+            _url("/admin/invites", error="邀请码目标角色只能是普通用户或管理员"),
+            status_code=303,
+        )
+    if role == crud.ROLE_ADMIN:
+        # 管理员邀请码是提权入口，仅站长可生成（普通管理员只能发普通用户码）。
+        actor = getattr(request.state, "current_user", None)
+        if not (actor and crud.has_role(actor.role, crud.ROLE_OWNER)):
+            return RedirectResponse(
+                _url("/admin/invites", error="仅站长可生成管理员邀请码"),
+                status_code=303,
+            )
     try:
         codes = crud.create_invite_codes(
             db,
@@ -207,11 +230,27 @@ async def generate_invites_page(request: Request, db: DbSession):
             expires_at=expires_at,
             note=note,
             created_by=_actor_id(request),
+            role=role,
         )
     except (ValueError, RuntimeError) as exc:
         return RedirectResponse(_url("/admin/invites", error=str(exc)), status_code=303)
     return RedirectResponse(
         _url("/admin/invites", generated=len(codes)), status_code=303
+    )
+
+
+@router.post("/admin/invites/revoke")
+async def revoke_invites_bulk(request: Request, db: DbSession):
+    """批量作废邀请码（勾选框提交的 invite_ids 列表）。
+
+    只作废未使用的码：已使用 / 已作废的会被跳过，回显数量按真实作废数，
+    与列表里看到的变化一致。与单条作废共用页面与提示口径。
+    """
+    form = await request.form()
+    revoked = crud.revoke_invite_codes(db, _collect_ids(form.getlist("invite_ids")))
+    return RedirectResponse(
+        _url("/admin/invites", revoked=str(revoked) if revoked else "", error=""),
+        status_code=303,
     )
 
 
