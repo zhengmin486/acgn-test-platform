@@ -953,54 +953,257 @@ def recommend_contents(
 
 
 QUIZ_TYPES = ("anime", "comic", "game", "novel")
+# 主题面只出动画：站内动画压倒性多数（7894 vs 1428/1464/1226），四类均分会把
+# 问卷稀释成「你看过动画吗」；漫画/游戏/轻小说改走折叠的「附加题」，想看的人
+# 自己展开，不占主题面题量（2026-10-28 用户定）。
+QUIZ_MAIN_TYPES = ("anime",)
+QUIZ_EXTRA_TYPES = ("comic", "game", "novel")
+# 附加题每类抽几张（可选，页面默认折叠）
+QUIZ_EXTRA_PER_TYPE = 4
 # 热度池的倍数：每个类目先按热度倒序取「名额 × 本值」条作候选，再从中随机抽。
 # 太小则题目永远是那几部顶流；太大则混进大量冷门。
 QUIZ_POOL_FACTOR = 6
 
+# 年份分层（发行年区间 + 该段占比）：老番 / 中段 / 新番。
+# 纯按热度排序时题面 57% 落在 2010s、2020 年后只占四分之一（2026-10-28 线上实测：
+# top120 池子里 2010s 68 部、2020s 31 部、2000s 18 部、1990s 3 部），追新番的人
+# 一张自己看过的题卡都摸不到；分层后每段各占一份，越新的段权重越高。
+QUIZ_YEAR_BUCKETS = (
+    (None, 2009, 0.20),
+    (2010, 2019, 0.35),
+    (2020, None, 0.45),
+)
 
-def sample_quiz_contents(db: Session, size: int = 20, seed: object = 0) -> list[dict]:
-    """选题式成分测试的题面：按类目配额取样，热度打底 + 随机打散。
+# 题材保底：常见观看口味各保底抽几张，避免热度池把题面洗成「少年漫改专场」
+# （热度排序天然偏话题作，治愈 / 日常 / 悬疑可能一张都不出现，题材垂直度就测不准）。
+# 词取站内标签（content_tags ← Bangumi 题材词），组内是或关系。
+QUIZ_GENRE_BUCKETS = (
+    ("热血战斗", ("热血", "战斗")),
+    ("恋爱", ("恋爱",)),
+    ("日常搞笑", ("日常", "搞笑")),
+    ("科幻机战", ("科幻", "机战", "萝卜")),
+    ("奇幻异世界", ("奇幻", "异世界")),
+    ("治愈", ("治愈",)),
+    ("悬疑推理", ("悬疑", "推理")),
+    ("校园青春", ("校园", "青春")),
+)
+# 题材保底占题面的比例：20 题 → 每类 1 张（共 8 张），100 题 → 每类 5 张（共 40 张）。
+QUIZ_GENRE_SHARE = 0.4
 
-    - **四个类目均分**名额（20 题 → 每类 5 张；100 题 → 每类 25 张）：站内动画
-      本来就是压倒性多数，按占比加权会让另外三类各分到一两张，问卷退化成
-      「你看过动画吗」，失去区分度；
-    - 每个类目先按「评分人数 + 评分」倒序圈一个热度池，**只取有本地封面的**
-      （image_url 为空的条目在卡面是灰块，观感很差），再从池里随机抽——兼顾
-      「有一定热度」与每次来都是新的一批；
-    - ``seed`` 决定抽到哪几张：同一 seed 题目稳定（刷新 / 回来接着选不会换题），
-      页面换一个 seed 就是「换一批」；
-    - 只 select 需要的标量列，不取 Content 实体：aliases 是 JSON 列，取实体会
-      每行触发一次 json.loads（首页那个 1.78s 的旧坑）。
+# 题面热度带：题测要能区分「只看热门」和「专挖冷门」，但也不能出太冷门没人认识的。
+# rating_count 是 Bangumi 评分人数，量级约 100（极冷门）~ 10 万+（霸权番）。
+# - FLOOR：低于这数的作品社区里基本没人知道，当题面等于送分 / 劝退，直接不要；
+# - 同桶内改成「跨热度均匀取样」（见 _quiz_take_stratified），保证每套题里既有
+#   全民霸权、也有评分区才摸得到的冷门——这样主流厨 / 冷门挖掘机都摸得着，不会
+#   人人都是评价党 / 主流厨（2026-10-29 修：此前题库只取热度头部，且作答 popularity
+#   被清零，mainstream 维度恒 50，全掉进主流厨 / 评价党）。
+QUIZ_POP_FLOOR = 800
 
-    已知可优化：没做系列去重（同一 IP 的多季可能被同时抽中），先把链路跑通。
+
+def _quiz_columns():
+    """题面要取的标量列：不取 Content 实体（aliases 是 JSON 列，取实体会逐行 json.loads）。
+
+    series_id 一并取出来，仅供系列去重用（不渲染）——同一季的多季 / 剧场版
+    同时被抽中，等于白白占掉两个名额。
     """
-    per_type = max(1, int(size) // len(QUIZ_TYPES))
-    pool_limit = per_type * QUIZ_POOL_FACTOR
-    rng = random.Random(str(seed))
-    picked: list = []
-    for content_type in QUIZ_TYPES:
-        rows = db.execute(
-            select(
-                Content.id,
-                Content.title,
-                Content.type,
-                Content.year,
-                Content.rating,
-                Content.rating_count,
-                Content.image_url,
-            )
-            .where(
-                Content.type == content_type,
-                Content.image_url.is_not(None),
-                Content.image_url != "",
-            )
-            .order_by(
-                func.coalesce(Content.rating_count, 0).desc(), Content.rating.desc()
-            )
-            .limit(pool_limit)
-        ).all()
-        picked.extend(rows if len(rows) <= per_type else rng.sample(rows, per_type))
-    rng.shuffle(picked)
+    return (
+        Content.id,
+        Content.title,
+        Content.type,
+        Content.year,
+        Content.rating,
+        Content.rating_count,
+        Content.image_url,
+        Content.series_id,
+    )
+
+
+def _quiz_pool(
+    db: Session,
+    content_type: str,
+    *,
+    limit: int,
+    year_min: int | None = None,
+    year_max: int | None = None,
+    pop_min: int | None = QUIZ_POP_FLOOR,
+    pop_max: int | None = None,
+) -> list:
+    """圈一个热度池：类目 + 有本地封面 + 可选年段 + 可选热度带，评分人数倒序。
+
+    ``pop_min`` 默认 ``QUIZ_POP_FLOOR``：太冷门（评分人数极少）的作品社区里没人
+    认识，当题面等于送分；``pop_max`` 可用来单独切「热门带」或「冷门带」。
+    结果按评分人数降序，供 _quiz_take_stratified 按热度排名均匀取样。
+    """
+    stmt = select(*_quiz_columns()).where(
+        Content.type == content_type,
+        Content.image_url.is_not(None),
+        Content.image_url != "",
+    )
+    if year_min is not None:
+        stmt = stmt.where(Content.year >= year_min)
+    if year_max is not None:
+        stmt = stmt.where(Content.year <= year_max)
+    if pop_min is not None:
+        stmt = stmt.where(Content.rating_count >= pop_min)
+    if pop_max is not None:
+        stmt = stmt.where(Content.rating_count <= pop_max)
+    stmt = stmt.order_by(
+        func.coalesce(Content.rating_count, 0).desc(), Content.rating.desc()
+    ).limit(max(0, int(limit)))
+    return db.execute(stmt).all()
+
+
+def _quiz_genre_pools(db: Session, per_genre: int) -> dict[str, list]:
+    """一次查出所有保底题材的候选，按题材组切好（组内保持热度倒序）。
+
+    一条 join 查询代替「每组一条」：8 个题材组串行查 8 次，在选题页首屏就是
+    8 次往返；这里按热度全局排序后顺序扫一遍，每组只留前
+    ``per_genre × QUIZ_POOL_FACTOR`` 条（同一作品命中组内多个标签时只留一次）。
+    """
+    labels = {name: label for label, names in QUIZ_GENRE_BUCKETS for name in names}
+    stmt = (
+        select(*_quiz_columns(), Tag.name)
+        .join(ContentTag, ContentTag.content_id == Content.id)
+        .join(Tag, Tag.id == ContentTag.tag_id)
+        .where(
+            Content.type == QUIZ_MAIN_TYPES[0],
+            Content.image_url.is_not(None),
+            Content.image_url != "",
+            Content.rating_count >= QUIZ_POP_FLOOR,
+            Tag.name.in_(tuple(labels)),
+        )
+        .order_by(func.coalesce(Content.rating_count, 0).desc(), Content.rating.desc())
+    )
+    # 候选窗口加宽到 3 倍：题材桶单类只取 1 张，但窗口要覆盖从热门到冷门，
+    # 随机抽样时才可能摸到冷门（否则题材桶全是头部热门，全题面偏热）。
+    cap = max(1, per_genre * QUIZ_POOL_FACTOR * 3)
+    groups: dict[str, list] = {label: [] for label, _names in QUIZ_GENRE_BUCKETS}
+    for row in db.execute(stmt).all():
+        bucket = groups[labels[row[-1]]]
+        if len(bucket) < cap:
+            bucket.append(row[:-1])
+    return groups
+
+
+def _quiz_keys(row) -> tuple[str, ...]:
+    """系列去重键（可能两个）：同 IP 的多季 / 剧场版视为同一部。
+
+    同时给出标题归一键与 ``series_id`` 键，任一命中即算同系列——线上系列
+    归得并不齐，同一个 IP 常见「一季有 series_id、二季没有」，只取一种键会漏。
+    """
+    keys: list[str] = []
+    title = str(row[1] or "")
+    if title:
+        keys.append(f"t:{series_title_key(title)}")
+    series_id = row[7] if len(row) > 7 else None
+    if series_id:
+        keys.append(f"sid:{int(series_id)}")
+    return tuple(keys) or (f"id:{row[0]}",)
+
+
+def _quiz_same_series(left: str, right: str) -> bool:
+    """两个归一键是否属于同一系列：完全相同，或短的整串是长的前缀（≥4 字）。
+
+    ``series_title_key`` 只剥**尾部**的季 / 剧场版标记，中缀的剥不掉：
+    「进击的巨人 第三季 Part.2」「新世纪福音战士剧场版 Air/真心为你」都会保留
+    全名。所以再叠一层前缀判断——与首页去重同一套口径，只认「整串是前缀」且
+    前缀 ≥ 4 字：「魔法少女小圆」不是「魔法少女奈叶」的前缀，不会误并。
+
+    ``sid:`` 键只做全等比较：数字前缀（sid:12 / sid:123）会假命中。
+    """
+    if left == right:
+        return True
+    if left.startswith("sid:") or right.startswith("sid:"):
+        return False
+    short, longer = (left, right) if len(left) <= len(right) else (right, left)
+    # "t:" 占 2 个字符，余下 ≥ 4 字才算有效前缀
+    return len(short) >= 6 and longer.startswith(short)
+
+
+def _quiz_take(
+    rng: random.Random, pool, count: int, seen: set, used: list | None = None
+) -> list:
+    """从池里随机取 count 条（跳过已选的，跳过同系列已出现的）。
+
+    必须**边取边判**：先把整池过滤一遍再 ``rng.sample``，同一池里的两季会在
+    过滤阶段同时通过，然后被一起抽中（2026-10-28 实测：进击的巨人第三季与正传、
+    EVA TV 与剧场版同时出现在同一批题面）。
+    """
+    if count <= 0:
+        return []
+    fresh = [row for row in pool if row[0] not in seen]
+    if not fresh:
+        return []
+    rng.shuffle(fresh)
+    take: list = []
+    for row in fresh:
+        if len(take) >= count:
+            break
+        if used is not None:
+            keys = _quiz_keys(row)
+            if any(_quiz_same_series(key, taken) for key in keys for taken in used):
+                continue
+        take.append(row)
+        seen.add(row[0])
+        if used is not None:
+            used.extend(_quiz_keys(row))
+    return take
+
+
+def _quiz_take_stratified(
+    rng: random.Random, pool, count: int, seen: set, used: list | None = None
+) -> list:
+    """跨热度均匀取样：``pool`` 已按热度降序，等间隔取 ``count`` 个，跳过已选 / 同系列。
+
+    纯随机（_quiz_take）在「只取热度头部」的池子里只会抽到热门；分层抽样让一套题
+    同时覆盖热度高低两端——既有全民霸权，也有评分区才摸得到的冷门。主流厨与
+    冷门挖掘机的判定才都有样本，不会人人都是同一顶帽子（2026-10-29）。
+    """
+    if count <= 0:
+        return []
+    fresh = [row for row in pool if row[0] not in seen]
+    if not fresh:
+        return []
+    n = len(fresh)
+    if count >= n:
+        return _quiz_take(rng, fresh, count, seen, used)
+    # 等间隔下标 + 随机相位：覆盖从最热到最冷的两端，每段只取一个避免扎堆
+    step = max(1, n // count)
+    phase = rng.randrange(step)
+    taken: list = []
+    for k in range(count):
+        idx = phase + k * step
+        if idx >= n:
+            break
+        row = fresh[idx]
+        if used is not None:
+            keys = _quiz_keys(row)
+            if any(_quiz_same_series(key, taken_key) for key in keys for taken_key in used):
+                continue
+        taken.append(row)
+        seen.add(row[0])
+        if used is not None:
+            used.extend(_quiz_keys(row))
+    # 系列去重滤掉太多没凑满时，从剩余里随机补（仍跳同系列）
+    if len(taken) < count:
+        rest = [row for row in fresh if row[0] not in seen]
+        rng.shuffle(rest)
+        for row in rest:
+            if len(taken) >= count:
+                break
+            if used is not None:
+                keys = _quiz_keys(row)
+                if any(_quiz_same_series(key, taken_key) for key in keys for taken_key in used):
+                    continue
+            taken.append(row)
+            seen.add(row[0])
+            if used is not None:
+                used.extend(_quiz_keys(row))
+    rng.shuffle(taken)
+    return taken
+
+
+def _quiz_payload(rows) -> list[dict]:
     return [
         {
             "id": content_id,
@@ -1011,8 +1214,104 @@ def sample_quiz_contents(db: Session, size: int = 20, seed: object = 0) -> list[
             "rating_count": rating_count,
             "image_url": image_url,
         }
-        for content_id, title, content_type, year, rating, rating_count, image_url in picked
+        for content_id, title, content_type, year, rating, rating_count, image_url, _series_id in rows
     ]
+
+
+def sample_quiz_contents(
+    db: Session, size: int = 20, seed: object = 0, types=None
+) -> list[dict]:
+    """选题式成分测试的题面：题材保底 + 年份分层 + 热度打底 + 随机打散。
+
+    - 默认只出**动画**（``QUIZ_MAIN_TYPES``）：站内动画压倒性多数，四类均分会把
+      问卷稀释成「你看过动画吗」。漫画 / 游戏 / 轻小说传 ``types=QUIZ_EXTRA_TYPES``
+      单独取一小批，页面上折进「附加题」，不占主题面题量；
+    - **题材保底**（``QUIZ_GENRE_BUCKETS``）：常见观看口味各留一份名额，先把题面
+      的题材面铺开。热度排序天然偏话题作 / 少年漫改，不加保底时治愈、悬疑、日常
+      可能一张都不出现，「题材垂直度」这一维就测不出东西；
+    - **年份分层**（``QUIZ_YEAR_BUCKETS``）：剩余名额按老番 / 中段 / 新番分配。
+      纯按热度排时 2020 年后的新番只有四分之一能进池（评分人数还没攒够），
+      追新番的人整页题卡都不认识——而这正是「题面要新」的关键；
+    - 每段内部仍按「评分人数 + 评分」圈热度池、只取有本地封面的；但不再纯随机——
+      改成**跨热度均匀取样**（``_quiz_take_stratified``）：候选窗口加宽（≥120）、
+      按评分人数降序，等间隔取，保证一套题里既有全民霸权、也有评分区才摸得到的
+      冷门。否则题库只取热度头部 + 作答 popularity 被清零，mainstream 维度恒 50，
+      人人都是主流厨 / 评价党（2026-10-29 修）。某段候选不够（小库 / 年代集中）
+      时用全动画池兜底，所以 ``year`` 为空的条目也不会永远被漏掉；
+    - ``seed`` 决定抽到哪几张：同一 seed 题目稳定（刷新 / 回来接着选不会换题），
+      页面换一个 seed 就是「换一批」；
+    - **同系列只出一张**：多季 / 剧场版（《链锯人》TV 与剧场版、《辉夜》2019 与
+      2022）同时进题面等于白占两个名额，按 ``series_id`` + 标题归一键去重；
+    - 只 select 需要的标量列，不取 Content 实体：aliases 是 JSON 列，取实体会
+      每行触发一次 json.loads（首页那个 1.78s 的旧坑）。
+    """
+    picked_types = tuple(types or QUIZ_MAIN_TYPES)
+    size = max(1, int(size))
+    rng = random.Random(str(seed))
+
+    # 附加题（漫画 / 游戏 / 轻小说）：类目均分 + 热度池。题量小，不做年份 / 题材分层。
+    if picked_types != QUIZ_MAIN_TYPES:
+        per_type = max(1, size // len(picked_types))
+        picked = []
+        seen_extra: set = set()
+        used_extra: list = []
+        for content_type in picked_types:
+            rows = _quiz_pool(db, content_type, limit=per_type * QUIZ_POOL_FACTOR)
+            picked.extend(_quiz_take(rng, rows, per_type, seen_extra, used_extra))
+        rng.shuffle(picked)
+        return _quiz_payload(picked)
+
+    picked: list = []
+    seen: set = set()
+    used_keys: list = []
+
+    # 1) 题材保底：先占掉一批，保证常见口味在题面里都有落点。
+    #    用跨热度均匀取样：单类窗口已加宽到 3 倍，随机相位从热门到冷门都可能摸到。
+    per_genre = max(1, round(size * QUIZ_GENRE_SHARE / len(QUIZ_GENRE_BUCKETS)))
+    genre_pools = _quiz_genre_pools(db, per_genre)
+    for label, _names in QUIZ_GENRE_BUCKETS:
+        if len(picked) >= size:
+            break
+        picked.extend(
+            _quiz_take_stratified(
+                rng,
+                genre_pools[label],
+                min(per_genre, size - len(picked)),
+                seen,
+                used_keys,
+            )
+        )
+
+    # 2) 年份分层：剩余名额按老 / 中 / 新分配，除不尽的余数给新番。
+    #    每段窗口足够大（≥60）且按热度降序，分层抽样把热度高低两端都铺开——
+    #    追新番的人摸到新番、补老番的人摸到老番，主流 / 冷门都看得见过。
+    remain = size - len(picked)
+    if remain > 0:
+        quotas = [int(remain * share) for _lo, _hi, share in QUIZ_YEAR_BUCKETS]
+        quotas[-1] += remain - sum(quotas)
+        for (year_min, year_max, _share), quota in zip(QUIZ_YEAR_BUCKETS, quotas):
+            if quota <= 0:
+                continue
+            pool = _quiz_pool(
+                db,
+                QUIZ_MAIN_TYPES[0],
+                year_min=year_min,
+                year_max=year_max,
+                limit=max(quota * QUIZ_POOL_FACTOR * 4, 120),
+            )
+            picked.extend(_quiz_take_stratified(rng, pool, quota, seen, used_keys))
+
+    # 3) 兜底：小库 / 年代集中时某些段候选为空，用全动画池补齐（同样分层抽样）
+    if len(picked) < size:
+        pool = _quiz_pool(
+            db, QUIZ_MAIN_TYPES[0], limit=max(size * QUIZ_POOL_FACTOR * 4, 240)
+        )
+        picked.extend(
+            _quiz_take_stratified(rng, pool, size - len(picked), seen, used_keys)
+        )
+
+    rng.shuffle(picked)
+    return _quiz_payload(picked)
 
 
 # 首页「推荐作品」的编辑口味：站长的本命 / 避雷（站内标签口径，匹配时经 tagging 展开）。
@@ -6035,12 +6334,18 @@ def purge_anonymous_persona_results(db: Session) -> int:
     return int(result.rowcount or 0)
 
 
-def record_persona_label(db: Session, label_key: str) -> tuple[int, int]:
-    """给某个成分桶记一次，返回 (该桶计数, 全部桶合计)。
+def record_persona_label(
+    db: Session, label_key: str, total_prefix: str | None = None
+) -> tuple[int, int]:
+    """给某个成分桶记一次，返回 (该桶计数, 分母)。
 
     用于结果页的「占已测用户的 X%」。计数口径是「生成一次 +1」，不做用户去重
     （理由见 models.PersonaLabelStat 的文档）。任何异常都不该连累出报告——
     调用方负责 try/except，这里只做纯数据操作。
+
+    total_prefix：分母只统计以该前缀开头的行。稀有度 2026-10-30 起改按**称号**
+    分桶（键形如 "T:GUNPLA"），而库里还留着旧口径的「番剧党·恋爱」这类键；
+    不加前缀过滤，旧数据会把分母撑大，把所有人算得偏稀有。
     """
     key = (label_key or "").strip()[:60]
     if not key:
@@ -6052,7 +6357,12 @@ def record_persona_label(db: Session, label_key: str) -> tuple[int, int]:
     row.count += 1
     row.updated_at = datetime.now()
     db.commit()
-    total = db.scalar(select(func.coalesce(func.sum(PersonaLabelStat.count), 0)))
+    total_query = select(func.coalesce(func.sum(PersonaLabelStat.count), 0))
+    if total_prefix:
+        total_query = total_query.where(
+            PersonaLabelStat.label_key.like(total_prefix + "%")
+        )
+    total = db.scalar(total_query)
     return int(row.count), int(total or 0)
 
 

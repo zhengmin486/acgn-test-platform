@@ -259,7 +259,7 @@ def validate_registration(
     if not (MIN_USERNAME_LENGTH <= len(name) <= MAX_USERNAME_LENGTH):
         return name, f"用户名长度需为 {MIN_USERNAME_LENGTH}-{MAX_USERNAME_LENGTH} 个字符"
     if not _USERNAME_PATTERN.match(name):
-        return name, "用户名只能包含字母、数字、下划线和连字符"
+        return name, "用户名只能包含中文、字母、数字、下划线和连字符"
     password_error = validate_password(password, confirm)
     if password_error:
         return name, password_error

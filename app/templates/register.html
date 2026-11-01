@@ -62,7 +62,7 @@
                            minlength="{{ min_username_length }}" maxlength="{{ max_username_length }}">
                     <div class="auth-feedback" id="register-username-msg" aria-live="polite"></div>
                     <div class="form-text">
-                        {{ min_username_length }}-{{ max_username_length }} 个字符，可使用字母、数字、下划线和连字符。
+                        {{ min_username_length }}-{{ max_username_length }} 个字符，可使用中文、字母、数字、下划线和连字符。
                     </div>
                 </div>
                 <div class="mb-3">
@@ -182,7 +182,10 @@
     var form = document.getElementById("register-form");
     if (!form) return;
 
-    var NAME_RE = /^[\w-]+$/;
+    /* 必须用 Unicode 属性转义：JS 的 \w 只认 ASCII（A-Za-z0-9_），跟后端 Python
+       的 \w（UNICODE 模式，任意文字的字母数字）不是一回事。用 \w 的话「张三丰」
+       在本行就被拦下，可后端本来是收的（2026-11-02 实测）。 */
+    var NAME_RE = /^[\p{L}\p{N}_-]+$/u;
     var MAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
     var minUser = Number(form.dataset.minUser), maxUser = Number(form.dataset.maxUser);
     var minPwd = Number(form.dataset.minPwd), maxPwd = Number(form.dataset.maxPwd);
@@ -220,7 +223,7 @@
         var v = input.value.trim();
         if (!v) return "用户名不能为空";
         if (v.length < minUser || v.length > maxUser) return "用户名长度需为 " + minUser + "-" + maxUser + " 个字符";
-        if (!NAME_RE.test(v)) return "用户名只能包含字母、数字、下划线和连字符";
+        if (!NAME_RE.test(v)) return "用户名只能包含中文、字母、数字、下划线和连字符";
         return "";
     }
 

@@ -220,6 +220,14 @@ def _regenerate_report(
     bilibili_works = [persona.work_from_bilibili(row) for row in bilibili_rows]
     works = persona.dedupe_works_across_sources(bangumi_works, bilibili_works)
     works += site_works
+    # 跨源口径统一：题材用站内库的细标签（B站只给粗 styles），
+    # 评分也用站内库那份 Bangumi 评分，对不上的才退回「B站 −2.5」近似
+    persona.apply_site_meta(
+        works,
+        persona.site_meta_lookup(
+            db, [w.get("title") or "" for w in works if w.get("source") != "site"]
+        ),
+    )
     if not works:
         return "还没有可分析的数据：先在作品库收藏或标注几部作品，也可以同步 Bangumi 收藏 / B站追番表"
 
@@ -242,7 +250,7 @@ def _regenerate_report(
     _rarity = persona.attach_rarity(db, profile)
     payload = {
         "profile": profile,
-        "report": persona.build_template_report(profile, _rarity),
+        "report": persona.build_template_report(profile, _rarity, seed=str(uid)),
         "prompt": persona.build_llm_prompt(
             profile,
             use_tone,
@@ -280,6 +288,14 @@ def _freshness_hint(
     """
     if report is None or not report.payload:
         return ""
+    # 维度换过（追更强度 → 追新度）：旧报告里没有 fresh，先提示重新生成，
+    # 否则雷达图上那一维按中性 50 画，看着像「测不出来」。
+    dims = (report.payload.get("profile") or {}).get("dimensions")
+    if isinstance(dims, dict) and dims and "fresh" not in dims:
+        return (
+            "检测维度已更新：「追更强度」换成按作品发行年算的「追新度」，"
+            "点下方「生成 / 重新生成」刷新报告即可看到新维度"
+        )
     profile = (report.payload or {}).get("profile") or {}
     profile_total = int(profile.get("total") or 0)
     if (
@@ -358,24 +374,116 @@ def _site_sync_stats(db: DbSession, collections: list, limit: int) -> dict:
     }
 
 
+# 文案字段：随 persona.COPY_VERSION 一起变化，迁移时整体重算。
+# 事实字段（subtitle / data_note / favorite_genres / persona_tags …）不在其中——
+# 那些是画像算出来的，重算会掩盖历史快照，也可能因老 profile 缺键而算歪。
+_COPY_KEYS = (
+    "copy_version",
+    "title",
+    "hero_title",
+    "hero_code",
+    "hero_note",
+    "share_line",
+    "long_review",
+    "final_quip",
+    "trait_blurbs",
+)
+
+
 def _backfill_template_report(payload: dict | None) -> dict | None:
-    """历史报告可能缺 trait_blurbs（旧代码未生成该键），在此回填，避免模板 500
-    并让老用户也能看到人格标签的毒舌短评。"""
+    """历史报告回填 + 文案版本迁移。
+
+    做两件事：
+    1. 旧代码没生成过的键（trait_blurbs / long_review / share_line）补上，避免模板 500；
+    2. **文案版本落后时只重算文案字段**。报告里的文案是生成那一刻写死的快照，
+       改了文案池（现在 66 个称号 / 198 条文案）不迁移的话，老用户永远停在旧句子上，
+       除非主动点「重新生成」——而那个要重算整个画像，几百条收藏得跑几秒。
+       这里只换文案，事实与用户已生成的 LLM 文案都不动。
+    """
     if not payload:
         return None
     report = payload.get("report")
     if not isinstance(report, dict):
         return report
-    if "trait_blurbs" in report:
+    profile = payload.get("profile") or {}
+    complete = {"trait_blurbs", "long_review", "share_line"} <= set(report)
+    up_to_date = report.get("copy_version") == persona.COPY_VERSION
+    if complete and up_to_date:
         return report
-    tags = (
-        report.get("persona_tags")
-        or (payload.get("profile") or {}).get("persona_tags")
-        or []
-    )
+
     report = dict(report)
-    report["trait_blurbs"] = {t: persona.TRAIT_BLURBS.get(t, "") for t in tags}
+    seed = persona._seed_of(profile, "")
+    if not up_to_date:
+        try:
+            rebuilt = persona.build_template_report(
+                profile, payload.get("rarity"), seed
+            )
+        except Exception:
+            rebuilt = {}
+        for key in _COPY_KEYS:
+            if key in rebuilt:
+                report[key] = rebuilt[key]
+        # 即使重建失败也打上版本戳：老 profile 结构缺字段时不该每次渲染都重试一遍
+        report["copy_version"] = persona.COPY_VERSION
+
+    tags = report.get("persona_tags") or profile.get("persona_tags") or []
+    if "trait_blurbs" not in report:
+        report["trait_blurbs"] = {t: persona.TRAIT_BLURBS.get(t, "") for t in tags}
+    if "long_review" not in report:
+        try:
+            report["long_review"] = persona._compose_long_review(
+                profile, payload.get("rarity"), seed
+            )
+        except Exception:
+            report["long_review"] = ""
+    if "share_line" not in report:
+        try:
+            report["share_line"] = persona._share_line(
+                str(report.get("hero_title") or ""),
+                str(report.get("hero_note") or ""),
+                profile,
+                seed,
+            )
+        except Exception:
+            report["share_line"] = ""
     return report
+
+
+def _radar_for(payload: dict | None) -> dict | None:
+    """雷达坐标按**当前**维度口径现算，而不是用报告里存的那份。
+
+    payload["radar"] 是生成那一刻的坐标快照：换过维度之后（追更强度 → 追新度），
+    老报告里存的标签还是旧的，页面上就会「提示说换成追新度、雷达却写着追更强度」。
+    纯字符串拼接，单次不到 0.1ms。
+    """
+    if not payload:
+        return None
+    dims = (payload.get("profile") or {}).get("dimensions")
+    if isinstance(dims, dict) and dims:
+        try:
+            return persona.build_radar(dims)
+        except Exception:
+            pass
+    return payload.get("radar")
+
+
+def _dim_rows(profile: dict | None) -> list:
+    """七维（标签, 数值）列表，顺序与 DIMENSION_LABELS 一致，供报告页长卡展示。
+
+    缺失的维度按中性 50 显示：旧报告里没有「追新度」（那时叫追更强度），
+    直接当 0 会在雷达上画出一个假的缺角（2026-10-28 换维度后兼容）。
+    """
+    if not profile:
+        return []
+    dims = profile.get("dimensions") or {}
+    rows = []
+    for key, label in persona.DIMENSION_LABELS:
+        try:
+            val = int(round(float(dims.get(key, 50) or 0)))
+        except (TypeError, ValueError):
+            val = 0
+        rows.append((label, val))
+    return rows
 
 
 @router.get("/me/persona", response_class=HTMLResponse)
@@ -433,14 +541,29 @@ def persona_page(request: Request, db: DbSession):
             "report": report,
             "payload": payload,
             "profile": payload.get("profile") if payload else None,
-            # 分享卡参数：由画像现算，不落库（卡片内容只依赖人格标签与维度）
+            # 分享卡参数：带上称号三件套 + 作品数，让卡面真正成为引流钩子
             "share_card_token": (
-                persona.encode_card(payload.get("profile") or {}, payload.get("rarity"))
+                persona.encode_card(
+                    payload.get("profile") or {},
+                    payload.get("rarity"),
+                    (payload.get("report") or {}).get("hero_title", ""),
+                    (payload.get("report") or {}).get("hero_code", ""),
+                    (payload.get("report") or {}).get("hero_note", ""),
+                    int((payload.get("profile") or {}).get("total") or 0),
+                )
                 if payload
                 else ""
             ),
             "template_report": _backfill_template_report(payload),
-            "radar": payload.get("radar") if payload else None,
+            "radar": _radar_for(payload),
+            # 维度算法/阈值改过之后，旧报告里的分数与称号都是老口径算的。
+            # 重算要重新拉收藏，只能由用户点「重新生成」，所以这里只负责提示。
+            "dim_stale": bool(
+                payload
+                and (payload.get("profile") or {}).get("dimension_version")
+                != persona.DIMENSION_VERSION
+            ),
+            "dim_rows": _dim_rows(payload.get("profile") if payload else None),
             "prompt": payload.get("prompt") if payload else "",
             "narrative": report.narrative if report else None,
             "narrative_source": report.narrative_source if report else "template",
@@ -578,16 +701,24 @@ def undo_site_imports(request: Request, db: DbSession):
 def generate_report(
     request: Request,
     db: DbSession,
-    tone: str = Form(default="sharp"),
-    tone_prompt: str = Form(default=""),
-    extra_prompt: str = Form(default=""),
+    tone: str | None = Form(default=None),
+    tone_prompt: str | None = Form(default=None),
+    extra_prompt: str | None = Form(default=None),
 ):
-    """手动生成：更新语气 / 提示词设置后，按三源快照重算画像。"""
+    """手动生成：重算画像与骨架文案。
+
+    语气 / 提示词是**可选的**：没传就沿用报告里的旧值（它们只服务 LLM 提示词，
+    界面已挪到「LLM 文案」卡里），这样上面只剩一个「生成 / 重新生成」按钮，
+    重算事实时不会把用户设好的语气冲掉。
+    """
     uid = _uid(request)
-    tone = tone if tone in persona.TONE_LABELS else "sharp"
-    tone_prompt = (tone_prompt or "").strip()[: persona.MAX_TONE_PROMPT]
-    extra_prompt = (extra_prompt or "").strip()[: persona.MAX_EXTRA_PROMPT]
-    if tone == "custom" and not tone_prompt:
+    if tone is not None:
+        tone = tone if tone in persona.TONE_LABELS else "sharp"
+    if tone_prompt is not None:
+        tone_prompt = (tone_prompt or "").strip()[: persona.MAX_TONE_PROMPT]
+    if extra_prompt is not None:
+        extra_prompt = (extra_prompt or "").strip()[: persona.MAX_EXTRA_PROMPT]
+    if tone == "custom" and not (tone_prompt or "").strip():
         return RedirectResponse(
             f"{PAGE}?error={quote('选择了「自定义语气」，请先填写语气说明')}",
             status_code=303,
@@ -602,6 +733,84 @@ def generate_report(
     if error:
         return RedirectResponse(f"{PAGE}?error={quote(error[:200])}", status_code=303)
     return RedirectResponse(f"{PAGE}?generated=1", status_code=303)
+
+
+def _refresh_prompt(
+    db: DbSession,
+    uid: int,
+    *,
+    tone: str | None = None,
+    tone_prompt: str | None = None,
+    extra_prompt: str | None = None,
+) -> str:
+    """只重写 LLM 提示词，不重算画像（改语气 / 追加要求后立刻生效）。
+
+    画像与骨架文案是规则算的，换语气不该连带重算一遍（收藏多时要跑几秒）；
+    这里直接拿报告里已有的 profile / recommendations 重新拼 prompt。返回空串
+    表示成功，非空为错误消息。
+    """
+    report = crud.get_persona_report(db, uid)
+    if report is None or not report.payload:
+        return "还没有生成画像报告"
+    payload = dict(report.payload)
+    profile = payload.get("profile") or {}
+    use_tone = tone or report.tone or "sharp"
+    use_tone_prompt = (
+        tone_prompt if tone_prompt is not None else (report.tone_prompt or "")
+    )
+    use_extra = (
+        extra_prompt if extra_prompt is not None else (report.extra_prompt or "")
+    )
+    payload["prompt"] = persona.build_llm_prompt(
+        profile,
+        use_tone,
+        tone_prompt=use_tone_prompt or "",
+        extra_prompt=use_extra or "",
+        recommendations=payload.get("recommendations"),
+    )
+    crud.save_persona_report(
+        db,
+        uid,
+        bangumi_username=report.bangumi_username,
+        tone=use_tone,
+        payload=payload,
+        narrative=report.narrative,
+        source=report.narrative_source,
+        tone_prompt=use_tone_prompt or None,
+        extra_prompt=use_extra or None,
+        bilibili_mid=report.bilibili_mid,
+    )
+    return ""
+
+
+@router.post("/me/persona/prompt")
+def update_prompt(
+    request: Request,
+    db: DbSession,
+    tone: str | None = Form(default=None),
+    tone_prompt: str | None = Form(default=None),
+    extra_prompt: str | None = Form(default=None),
+):
+    """只保存语气 / 提示词并重写 prompt（未配置 LLM 时走这条，供复制到网页版）。"""
+    uid = _uid(request)
+    tone = tone if tone in persona.TONE_LABELS else None
+    tone_prompt = (tone_prompt or "").strip()[: persona.MAX_TONE_PROMPT]
+    extra_prompt = (extra_prompt or "").strip()[: persona.MAX_EXTRA_PROMPT]
+    if tone == "custom" and not tone_prompt:
+        return RedirectResponse(
+            f"{PAGE}?error={quote('选择了「自定义语气」，请先填写语气说明')}",
+            status_code=303,
+        )
+    error = _refresh_prompt(
+        db,
+        uid,
+        tone=tone,
+        tone_prompt=tone_prompt,
+        extra_prompt=extra_prompt,
+    )
+    if error:
+        return RedirectResponse(f"{PAGE}?error={quote(error[:200])}", status_code=303)
+    return RedirectResponse(f"{PAGE}?prompt=saved", status_code=303)
 
 
 @router.post("/me/persona/narrative")
@@ -621,14 +830,53 @@ def save_narrative(request: Request, db: DbSession, narrative: str = Form(defaul
 
 
 @router.post("/me/persona/llm")
-def generate_narrative_with_llm(request: Request, db: DbSession):
-    """直接调用 LLM（用户级 Key 优先，站点级兜底）生成文案。"""
+def generate_narrative_with_llm(
+    request: Request,
+    db: DbSession,
+    tone: str | None = Form(default=None),
+    tone_prompt: str | None = Form(default=None),
+    extra_prompt: str | None = Form(default=None),
+):
+    """直接调用 LLM（用户级 Key 优先，站点级兜底）生成文案。
+
+    表单里一并提交了语气 / 追加要求：先按它们重写 prompt 再调用，省掉「先点一次
+    重新生成、再点 LLM」的两步——画像不变，只是提示词变了。
+    """
     uid = _uid(request)
     report = crud.get_persona_report(db, uid)
     if report is None or not report.payload:
         return RedirectResponse(
             f"{PAGE}?error={quote('还没有生成画像报告')}", status_code=303
         )
+    if tone is not None or tone_prompt is not None or extra_prompt is not None:
+        use_tone = tone if tone in persona.TONE_LABELS else None
+        use_tone_prompt = (
+            (tone_prompt or "").strip()[: persona.MAX_TONE_PROMPT]
+            if tone_prompt is not None
+            else None
+        )
+        use_extra = (
+            (extra_prompt or "").strip()[: persona.MAX_EXTRA_PROMPT]
+            if extra_prompt is not None
+            else None
+        )
+        if (use_tone or report.tone) == "custom" and not (
+            use_tone_prompt if use_tone_prompt is not None else report.tone_prompt
+        ):
+            return RedirectResponse(
+                f"{PAGE}?error={quote('选择了「自定义语气」，请先填写语气说明')}",
+                status_code=303,
+            )
+        error = _refresh_prompt(
+            db,
+            uid,
+            tone=use_tone,
+            tone_prompt=use_tone_prompt,
+            extra_prompt=use_extra,
+        )
+        if error:
+            return RedirectResponse(f"{PAGE}?error={quote(error[:200])}", status_code=303)
+        report = crud.get_persona_report(db, uid)
     llm = _llm_config(request, db)
     if not llm["ready"]:
         return RedirectResponse(
@@ -758,6 +1006,7 @@ def _render_guest_error(
             "bili_max_items": settings.persona_guest_bilibili_max_items,
             "username": username,
             "mid": mid,
+            "quiz_min_positive": QUIZ_MIN_POSITIVE,
         },
         status_code=200,
     )
@@ -776,7 +1025,7 @@ def _guest_bilibili_counts(rows) -> dict[str, int]:
 
 @public_router.get(GUEST_PAGE, response_class=HTMLResponse)
 def persona_landing(request: Request):
-    """免登录试算入口：填 Bangumi 用户名 / B站 UID 就能先看一版画像（不保存）。"""
+    """成分检测入口：主推选题测；有外部账号的走收藏数据试算（次入口，默认折叠）。"""
     return templates.TemplateResponse(
         request=request,
         name="persona_landing.html",
@@ -786,6 +1035,7 @@ def persona_landing(request: Request):
             "bili_max_items": settings.persona_guest_bilibili_max_items,
             "username": "",
             "mid": "",
+            "quiz_min_positive": QUIZ_MIN_POSITIVE,
         },
     )
 
@@ -876,6 +1126,12 @@ def persona_preview(
     ]
     bilibili_works = [persona.work_from_bilibili(row) for row in bilibili_rows]
     works = persona.dedupe_works_across_sources(bangumi_works, bilibili_works)
+    persona.apply_site_meta(
+        works,
+        persona.site_meta_lookup(
+            db, [w.get("title") or "" for w in works if w.get("source") != "site"]
+        ),
+    )
     if not works:
         detail = "；".join(notes) if notes else "接口没有返回可识别的作品"
         return _render_guest_error(
@@ -907,7 +1163,7 @@ def persona_preview(
     _rarity = persona.attach_rarity(db, profile)
     payload = {
         "profile": profile,
-        "report": persona.build_template_report(profile, _rarity),
+        "report": persona.build_template_report(profile, _rarity, seed=name),
         "prompt": persona.build_llm_prompt(
             profile, "sharp", recommendations=recommendations
         ),
@@ -953,9 +1209,17 @@ def persona_preview(
             "template_report": payload["report"],
             "radar": payload["radar"],
             "prompt": payload["prompt"],
-            "share_card_token": persona.encode_card(profile, payload.get("rarity")),
+            "share_card_token": persona.encode_card(
+                profile,
+                payload.get("rarity"),
+                payload["report"].get("hero_title", ""),
+                payload["report"].get("hero_code", ""),
+                payload["report"].get("hero_note", ""),
+                int(profile.get("total") or 0),
+            ),
             "narrative": None,
             "narrative_source": "template",
+            "dim_rows": _dim_rows(profile),
             "bound_username": name,
             # 游客试算不提供「直接生成」：只给站点级配置的展示与手动贴回，
             # 用户级 Key 随登录态走（_llm_config 需要 request + db）。
@@ -1038,9 +1302,23 @@ def _quiz_seed(value: object) -> int:
         return 0
 
 
+def _quiz_extras(db: DbSession, seed: int) -> list[dict]:
+    """附加题：漫画 / 游戏 / 轻小说各抽 QUIZ_EXTRA_PER_TYPE 张，页面默认折叠。
+
+    主题面只出动画（QUIZ_MAIN_TYPES）；这三类降级成可选附加题，不占题量。
+    seed 偏移一下，避免附加题和主题面总抽到同一批风格。
+    """
+    return crud.sample_quiz_contents(
+        db,
+        size=crud.QUIZ_EXTRA_PER_TYPE * len(crud.QUIZ_EXTRA_TYPES),
+        seed=seed + 7919,
+        types=crud.QUIZ_EXTRA_TYPES,
+    )
+
+
 @public_router.get(QUIZ_ROUTE, response_class=HTMLResponse)
 def persona_quiz(request: Request, db: DbSession, size: str = "", seed: str = "0"):
-    """选题式成分测试：按类目配额出题，点选后即可出画像。
+    """选题式成分测试：主题面出动画，漫画/游戏/轻小说折进「附加题」。
 
     seed 同样收裸值后自行归一（并在下面把「下一批」的 seed 一起算好），
     不然 ?seed=abc 也会被 FastAPI 挡在门外。
@@ -1056,6 +1334,7 @@ def persona_quiz(request: Request, db: DbSession, size: str = "", seed: str = "0
         name="persona_quiz.html",
         context={
             "works": works,
+            "extras": _quiz_extras(db, seed_value),
             "size": picked_size,
             "seed": seed_value,
             "next_seed": (seed_value + 1) % QUIZ_SEED_MAX,
@@ -1076,6 +1355,7 @@ def _render_quiz_form(
         name="persona_quiz.html",
         context={
             "works": crud.sample_quiz_contents(db, size=size, seed=seed),
+            "extras": _quiz_extras(db, seed),
             "size": size,
             "seed": seed,
             "next_seed": (seed + 1) % QUIZ_SEED_MAX,
@@ -1088,21 +1368,51 @@ def _render_quiz_form(
     )
 
 
+@public_router.get(QUIZ_ROUTE + "/search")
+def persona_quiz_search(db: DbSession, q: str = ""):
+    """选题式测试的「搜更多」：按标题找作品，给前端插进题面网格。
+
+    只挑展示要的标量列返回（同 sample_quiz_contents 的口径：不序列化整个
+    Content 实体，aliases 是 JSON 列，全序列化每行会触发一次 json.loads）。
+    短查询不查，避免一个字把全表捞回来；结果截 12 条够填一屏。
+    """
+    q = (q or "").strip()[:80]
+    if len(q) < 2:
+        return {"works": []}
+    rows = crud.search_contents(db, q)[:12]
+    return {
+        "works": [
+            {
+                "id": r.id,
+                "title": r.title,
+                "type": r.type,
+                "year": r.year,
+                "image_url": r.image_url,
+            }
+            for r in rows
+        ]
+    }
+
+
 @public_router.post(QUIZ_ROUTE, response_class=HTMLResponse)
 def persona_quiz_result(
     request: Request,
     db: DbSession,
     picks: list[str] = Form([]),
     seen: list[str] = Form([]),
-    want: list[str] = Form([]),
+    doing: list[str] = Form([]),
+    drop: list[str] = Form([]),
     size: str = Form(""),
-    seed: str = Form("0"),
+    seed: str = "0",
 ):
     """按点选结果算画像并渲染结果页（复用游客试算那一套渲染）。
 
-    seen / want 两组 checkbox 分别提交 id 列表（同一作品同时勾上时以 seen 为准——
-    先看过的更可信）。**「无感」不进 works**：它只是没看过，不是负向信号；塞进
-    interest 会把没看过的作品也算成口味，画像直接失真。
+    三态 checkbox（看过 / 在看 / 抛弃）分别提交 id 列表。映射到画像口径：
+    看过 → seen；在看 → want（还没看完、已在追，进「想看积压」供称号判定，
+    不再参与维度打分——原「追更强度」维度已换成按发行年算的「追新度」）；
+    抛弃 → drop（负向，进避雷）。同一作品同时勾上时以 seen 为准（先看过的更可信），
+    互斥由前端保证，这里只是兜底。没标的作品不进 works——它只是没看过，
+    不是负向信号；塞进 interest 会把没看过的作品也算成口味，画像直接失真。
     """
     picked_size = _quiz_size(size)
     seed_value = _quiz_seed(seed)
@@ -1118,22 +1428,24 @@ def persona_quiz_result(
         )
 
     chosen: dict[int, str] = {}
-    # seen 在前：同一 id 两组都勾上时以 seen 为准
-    for group, status in ((seen, "seen"), (want, "want")):
+    # seen 在前：同一 id 多组都勾上时以 seen 为准
+    for group, status in ((seen, "seen"), (drop, "drop"), (doing, "want")):
         for raw in group or []:
             if str(raw).strip().isdigit():
                 chosen.setdefault(int(str(raw).strip()), status)
-    # 上限兜底：提交条数不该超过这一批的题面数量
-    if len(chosen) > picked_size:
-        chosen = dict(list(chosen.items())[:picked_size])
+    # 上限兜底：题面 + 搜索加进来的；防有人拼表单灌几千条
+    if len(chosen) > picked_size + 100:
+        chosen = dict(list(chosen.items())[: picked_size + 100])
 
-    if len(chosen) < QUIZ_MIN_POSITIVE:
+    # 「抛弃」是负向，不算进「至少 N 部正向」的额度
+    positive = sum(1 for s in chosen.values() if s in ("seen", "want"))
+    if positive < QUIZ_MIN_POSITIVE:
         return _render_quiz_form(
             request,
             db,
             size=picked_size,
             seed=seed_value,
-            error=f"至少标记 {QUIZ_MIN_POSITIVE} 部看过或想看的，才够算出画像。",
+            error=f"至少标记 {QUIZ_MIN_POSITIVE} 部看过或在看的，才够算出画像。",
         )
 
     contents = crud.list_contents_by_ids(db, list(chosen))
@@ -1203,9 +1515,17 @@ def persona_quiz_result(
             "template_report": payload["report"],
             "radar": payload["radar"],
             "prompt": payload["prompt"],
-            "share_card_token": persona.encode_card(profile, payload.get("rarity")),
+            "share_card_token": persona.encode_card(
+                profile,
+                payload.get("rarity"),
+                payload["report"].get("hero_title", ""),
+                payload["report"].get("hero_code", ""),
+                payload["report"].get("hero_note", ""),
+                int(profile.get("total") or 0),
+            ),
             "narrative": None,
             "narrative_source": "template",
+            "dim_rows": _dim_rows(profile),
             "bound_username": "",
             "llm": persona.resolve_llm_config(
                 settings.persona_llm_provider,

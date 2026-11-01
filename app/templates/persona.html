@@ -1,4 +1,5 @@
 {% extends "base_content.html" %}
+{% from "_brand.html" import wordmark %}
 {% block title %}我的御宅成分{% endblock %}
 {% block content %}
 <div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-3">
@@ -29,9 +30,9 @@
 <div class="alert alert-success py-2">已同步 {{ request.query_params.get('bili') }} 条 B站追番。</div>
 {% endif %}
 {% if request.query_params.get('llmkey') == 'saved' %}
-<div class="alert alert-success py-2">LLM 接口 Key 已保存，可直接生成文案（页面只显示脱敏后的 Key）。</div>
+<div class="alert alert-success py-2">AI 密钥已保存，可以直接生成文案（这里只显示打码后的部分）。</div>
 {% elif request.query_params.get('llmkey') == 'cleared' %}
-<div class="alert alert-info py-2">已清除你的 LLM Key，回落到站点级配置 / 手动贴回。</div>
+<div class="alert alert-info py-2">已清除你的 AI 密钥，改用站点提供的配置，或手动贴回文案。</div>
 {% endif %}
 {% if not guest_mode and freshness_hint %}
 <div class="alert alert-warning py-2">{{ freshness_hint }}</div>
@@ -63,14 +64,17 @@
 {% if request.query_params.get('generated') %}
 <div class="alert alert-success py-2">成分报告已生成。</div>
 {% endif %}
+{% if request.query_params.get('prompt') == 'saved' %}
+<div class="alert alert-success py-2">语气与提示词已保存，提示词已按新设置重写。</div>
+{% endif %}
 {% if request.query_params.get('narrative') == 'manual' %}
 <div class="alert alert-success py-2">文案已保存。</div>
 {% elif request.query_params.get('narrative') == 'llm' %}
-<div class="alert alert-success py-2">已用配置的 LLM 生成文案。</div>
+<div class="alert alert-success py-2">已用 AI 生成文案。</div>
 {% endif %}
 {% if request.query_params.get('llmtest') %}
 <div class="alert alert-success py-2">
-    接口可用（{{ request.query_params.get('llmtest') }}），返回：{{ request.query_params.get('llmreply') }}
+    连接正常（{{ request.query_params.get('llmtest') }}），返回：{{ request.query_params.get('llmreply') }}
 </div>
 {% endif %}
 {% if request.query_params.get('cleared') %}
@@ -129,50 +133,22 @@
             也可以在下面「补充数据」里导入 Bangumi 公开收藏。
         </p>
         {% endif %}
-        <form method="post" action="/me/persona/generate" class="row g-2 align-items-end">
-            <div class="col-auto">
-                <label class="form-label small mb-0" for="tone">语气</label>
-                <select class="form-select form-select-sm" id="tone" name="tone">
-                    {% for key, label in tone_labels.items() %}
-                    <option value="{{ key }}"{% if tone == key %} selected{% endif %}>{{ label }}</option>
-                    {% endfor %}
-                </select>
-            </div>
-            <div class="col-auto">
-                <button class="btn btn-sm btn-primary" type="submit"
-                        {% if not site_work_count and not collections_count %}disabled{% endif %}>生成 / 重新生成</button>
-            </div>
-            <div class="col-12">
-                <label class="form-label small mb-0" for="tone-prompt">
-                    自定义语气说明<span class="text-muted">（选择「自定义语气」时生效，{{ tone_prompt_max }} 字以内）</span>
-                </label>
-                <textarea class="form-control form-control-sm" id="tone-prompt" name="tone_prompt"
-                          rows="2" maxlength="{{ tone_prompt_max }}"
-                          placeholder="例如：像老朋友聊天，多用梗，少用书面语，结尾必须损我一句">{{ tone_prompt or '' }}</textarea>
-            </div>
-            <div class="col-12">
-                <label class="form-label small mb-0" for="extra-prompt">
-                    额外要求 / 追加提示词<span class="text-muted">（可选，{{ extra_prompt_max }} 字以内；会原样拼进提示词，优先级高于默认要求）</span>
-                </label>
-                <textarea class="form-control form-control-sm" id="extra-prompt" name="extra_prompt"
-                          rows="5" maxlength="{{ extra_prompt_max }}"
-                          placeholder="可以整段写：希望分几段、每段多长、要不要用表格以外的排版、想吐槽哪些点、要引用哪几部作品、禁止说什么…">{{ extra_prompt or '' }}</textarea>
-            </div>
-            <div class="col-12">
-                <span class="form-text">
-                    数据越多，检测越准；
-                    规则算分，LLM 只写文案；「不得编造事实」始终生效，额外要求不能覆盖它。
-                </span>
-            </div>
+        <form method="post" action="/me/persona/generate" class="d-flex flex-wrap align-items-center gap-2">
+            <button class="btn btn-sm btn-primary" type="submit"
+                    {% if not site_work_count and not collections_count %}disabled{% endif %}>生成 / 重新生成</button>
+            <span class="form-text mb-0">
+                数据越多，检测越准；这一步纯按规则算分，不用 AI。
+                语气和额外要求会在下面「2. AI 文案」里用上。
+            </span>
         </form>
         {% endif %}
-    </div>
-</div>
 
-{% if not guest_mode %}
-<div class="card app-card mb-3">
-    <div class="card-header bg-white fw-semibold">2. 补充数据（可选）· 导入 Bangumi 公开收藏</div>
-    <div class="card-body">
+        {% if not guest_mode %}
+        <hr class="my-3">
+        {# 补充数据和「生成」同属准备数据，并进同一张卡；有报告时默认收起，展开才把报告推下去 #}
+        <details {% if not report %}open{% endif %}>
+            <summary class="fw-semibold" style="cursor: pointer;">补充数据（可选）· 导入 Bangumi 公开收藏</summary>
+            <div class="mt-3">
         <p class="small text-muted mb-3">
             上面的检测只用本站收藏与标注就能跑。想让样本更全、结果更准，可以再导入 Bangumi 公开收藏。
         </p>
@@ -289,9 +265,11 @@
             </form>
         </div>
         {% endif %}
+            </div>
+        </details>
+        {% endif %}
     </div>
 </div>
-{% endif %}
 
 {% if report and payload %}
 {% if guest_mode %}
@@ -304,25 +282,63 @@
 {% endif %}
 </div>
 {% endif %}
-<div class="card app-card mb-3">
-    <div class="card-body p-4">
-        <div class="d-flex flex-wrap justify-content-between align-items-start gap-3">
-            <div>
-                <div class="mb-2">
-                    <div class="fw-bold" style="font-size:1.5rem;line-height:1.3;">「{{ template_report.hero_title }}」</div>
-                    <div class="mt-1">
-                        <span class="badge bg-dark me-2">{{ template_report.hero_code }}</span>
-                        <span class="text-muted small">{{ template_report.hero_note }}</span>
-                    </div>
-                </div>
-                <h2 class="persona-title mb-1">{{ template_report.title }}</h2>
-                <p class="persona-subtitle mb-0">{{ template_report.subtitle }}</p>
+{% if payload and payload.profile and (dim_stale or not payload.profile.dimensions.get('era_span')) %}
+<div class="alert alert-info py-2 small">
+    检测口径更新过（热度改成站内百分位、评分统一到 Bangumi 口径、阈值按真实账号重新校准），
+    这份报告里的分数还是旧的。点上方「生成 / 重新生成」即可按新口径重算。
+</div>
+{% endif %}
+{# ===== 御宅成分卡：报告页即分享卡（截图友好，不强制单独下载） ===== #}
+<div class="persona-share-hint">
+    <div class="persona-share-hint-main">
+        这张成分卡可以截图保存，转给聊得来的同好。
+    </div>
+</div>
+
+<div class="persona-share-card" id="personaCard">
+    <div class="persona-card-head">
+        <span class="persona-card-brand">{{ wordmark() }}<span class="persona-card-brand-text">御宅成分检测</span></span>
+        <span class="persona-card-head-sub">Otaku · 测你的二次元人格</span>
+    </div>
+
+    <div class="persona-card-body">
+        {# 称号暴击：卡面最大字 + 稀有度徽章（贴着称号，不再沉到卡底）+ 罗马音代号 #}
+        <div class="persona-hero">
+            <div class="persona-hero-top">
+                <div class="persona-hero-title">「{{ template_report.hero_title }}」</div>
+                {% if payload.rarity %}
+                {# 稀有度说的是「这顶称号有多稀有」，和称号是同一件事，所以并排放。
+                   占比来自校准先验（模拟画像实测）或真实计数，没有占比（未标定）
+                   就不报百分比，只说「未标定」——不编数字，也不假装它最稀有 #}
+                <span class="persona-rarity persona-rarity-{{ 'unrated' if payload.rarity.tier == '?' else payload.rarity.tier|lower }}">
+                    <span class="persona-rarity-k">稀有度</span>
+                    <b class="persona-rarity-tier">{{ payload.rarity.tier }}</b>
+                    <span class="persona-rarity-sep">·</span>
+                    {# 名号按 tier 现查（旧报告快照没存 label），字母给爽感、名号给圈内味 #}
+                    <span class="persona-rarity-label">{{ rarity_label(payload.rarity.tier) }}</span>
+                    {% if payload.rarity.share is not none %}
+                    <span class="persona-rarity-share">· {{ payload.rarity.share }}% 同好</span>
+                    {% endif %}
+                </span>
+                {% endif %}
             </div>
-            <span class="badge bg-info text-dark">生成于 {{ report.generated_at.strftime('%Y-%m-%d %H:%M') }}</span>
+            <div class="persona-hero-meta">
+                <span class="persona-hero-code">{{ template_report.hero_code }}</span>
+                <span class="persona-hero-note">{{ template_report.hero_note }}</span>
+            </div>
         </div>
 
-        <div class="row g-4 mt-1 align-items-center">
-            <div class="col-12 col-lg-5">
+        {# 锐评：紧跟称号下方、不挂「锐评」标签。
+           hero_note 是绑称号的「称号毒舌」（贴代号那一行），这里放通用 final_quip，两者分工不同 #}
+        <div class="persona-quip">
+            <span>{{ template_report.final_quip }}</span>
+        </div>
+
+        {# 维度 + 二次元人格：PC 左右分栏（雷达保持全尺寸）；手机雷达缩小、人格在右，缩短卡高 #}
+        <div class="persona-metrics-row">
+        {% set _tags = template_report.persona_tags %}
+        <div class="persona-metrics">
+            <div class="persona-radar-wrap">
                 <svg class="persona-radar" viewBox="0 0 300 240" width="100%" role="img" aria-label="维度成分">
                     {% for ring in radar.grid %}
                     <polygon points="{{ ring }}" fill="none" stroke="#d8e3ef" stroke-width="1"/>
@@ -336,132 +352,108 @@
                     {% for label in radar.labels %}
                     <text x="{{ label.x }}" y="{{ label.y }}" text-anchor="{{ label.anchor }}"
                           dominant-baseline="middle" font-size="12" fill="#5b6b7a">{{ label.text }}</text>
+                    <text x="{{ label.x }}" y="{{ label.y + 13 }}" text-anchor="{{ label.anchor }}"
+                          dominant-baseline="middle" font-size="11" font-weight="700" fill="#2b9ae0">{{ label.value }}</text>
                     {% endfor %}
                 </svg>
             </div>
-            <div class="col-12 col-lg-7">
-                {% if narrative %}
-                <div class="persona-narrative">{{ narrative }}</div>
-                <p class="small text-muted mb-0 mt-2">
-                    文案来源：{{ '已配置的 LLM' if narrative_source == 'llm' else '手动贴回' }}。
-                </p>
-                {% else %}
-                <div class="persona-narrative">{{ template_report.entry_story }}
-{{ template_report.core_taste }}
-{{ template_report.dependencies }}</div>
-                <p class="small text-muted mb-0 mt-2">这是规则版骨架文案；想要样例那种写法，把下方向导贴给 LLM 再贴回。</p>
-                {% endif %}
-            </div>
+            {# 雷达下方那块留白：放主身份。右栏太窄（手机 ~176px），长说明会被挤成三行；
+               左栏桌面 300px 刚好两行。手机左栏只有 140px，说明降级隐藏，只留名号 #}
+            {% if _tags|length > 1 %}
+            {% set _id_note = template_report.get('trait_blurbs', {}).get(_tags[1]) %}
+            <p class="persona-identity">
+                <span class="persona-identity-k">主要阵地</span>
+                <b>{{ _tags[1] }}</b>
+                {% if _id_note %}<span class="persona-identity-note">——{{ _id_note }}</span>{% endif %}
+            </p>
+            {% endif %}
         </div>
 
-        <div class="row g-3 mt-3">
-            <div class="col-md-6">
-                <h3 class="h6">本命类型</h3>
-                <div class="d-flex flex-wrap gap-1">
-                    {% for name in template_report.favorite_genres %}
-                    <span class="tag-chip">{{ name }}</span>
-                    {% else %}
-                    <span class="text-muted small">数据不足</span>
-                    {% endfor %}
-                </div>
-            </div>
-            <div class="col-md-6">
-                <h3 class="h6">避雷类型</h3>
-                <div class="d-flex flex-wrap gap-1">
-                    {% for name in template_report.avoided_genres %}
-                    <span class="tag-chip tag-chip-clear">{{ name }}</span>
-                    {% else %}
-                    <span class="text-muted small">负向信号不足，暂时推断不出</span>
-                    {% endfor %}
-                </div>
-            </div>
-        </div>
-
-        <div class="row g-3 mt-3">
-            <div class="col-md-6">
-                <h3 class="h6">二次元人格</h3>
-                <div class="d-flex flex-wrap gap-3 align-items-start">
-                    {% for tag in template_report.persona_tags %}
-                    <div class="text-center" style="max-width: 10rem;">
-                        <span class="badge bg-primary">{{ tag }}</span>
-                        {% set note = template_report.get('trait_blurbs', {}).get(tag) %}
-                        {% if note %}<div class="small text-muted mt-1">{{ note }}</div>{% endif %}
-                    </div>
-                    {% endfor %}
-                </div>
-                {% if payload.rarity and payload.rarity.total %}
-                <p class="small text-muted mt-2 mb-0">
-                    稀有度 <span class="badge bg-dark">{{ payload.rarity.tier }}</span>
-                    {{ payload.rarity.note }} · 同样成分在已测的
-                    <strong>{{ payload.rarity.total }}</strong> 人里占
-                    <strong>{{ payload.rarity.share }}%</strong>
-                </p>
-                {% endif %}
-                {% if share_card_token %}
-                <a class="btn btn-sm btn-outline-secondary mt-2"
-                   href="/persona/card?d={{ share_card_token }}"
-                   target="_blank" rel="noopener" download="otaku-成分卡.svg">下载成分卡</a>
-                {% endif %}
-            </div>
-            <div class="col-md-6">
-                <h3 class="h6">代表作</h3>
-                <ul class="small mb-0">
-                    {% for work in profile.representative %}
-                    <li>{{ work.title }}{% if work.year %}（{{ work.year }}）{% endif %}</li>
-                    {% else %}
-                    <li class="text-muted">数据不足</li>
-                    {% endfor %}
-                </ul>
-            </div>
-        </div>
-
-        <div class="mt-3">
-            <h3 class="h6">建议</h3>
-            <p class="small mb-1">{{ template_report.advice }}</p>
-            <p class="small text-muted mb-0">锐评：{{ template_report.final_quip }}</p>
-        </div>
-
-        {# 按口味推荐：规则从站内作品库筛（本命命中 + 避雷一票否决 + 剔除已收藏） #}
-        {% if payload.recommendations %}
-        <div class="mt-3">
-            <h3 class="h6">按你的口味推荐（站内作品）</h3>
-            <div class="row g-2">
-                {% for item in payload.recommendations %}
-                <div class="col-12 col-md-6">
-                    <a class="work-card" href="/contents/{{ item.content_id }}">
-                        <span class="work-cover" aria-hidden="true">{{ item.title[:1] }}</span>
-                        <span class="work-card-body">
-                            <span class="d-flex justify-content-between align-items-center gap-2">
-                                <span class="fw-semibold text-truncate">{{ item.title }}</span>
-                                <span class="small text-muted">{% set _rd = rating_display(item.rating, item.rating_count) %}{% if _rd == '--' %}--{% elif _rd %}{{ _rd }}{% else %}暂无评分{% endif %}</span>
-                            </span>
-                            <span class="d-flex flex-wrap gap-1 mt-1">
-                                {% for tag in item.matched %}
-                                <span class="tag-chip tag-chip-clear">{{ tag }}</span>
-                                {% endfor %}
-                            </span>
-                            <span class="small text-muted mt-1">
-                                {% if item.year %}{{ item.year }} · {% endif %}{{ item.reason }}
-                            </span>
-                        </span>
-                    </a>
+        {# 二次元人格（雷达右侧） #}
+        <div class="persona-section persona-section-traits">
+            <h3 class="persona-section-title">二次元人格</h3>
+            <div class="persona-trait-list">
+                {# 头条只放真正区分度的「题材系 + 特征」；媒体身份（番剧党等）是动画受众的默认值，
+                   不当头条 badge 占地方（否则人人都是番剧党，没信息量），挪到雷达下方当副行。
+                   每条一行：标签靠左、说明接在后面（桌面基本一行读完，比多列网格对齐干净） #}
+                {% for tag in (_tags[:1] + _tags[2:]) %}
+                <div class="persona-trait-row">
+                    <span class="persona-tag-pill">{{ tag }}</span>
+                    {% set note = template_report.get('trait_blurbs', {}).get(tag) %}
+                    {% if note %}<p class="persona-trait-note">{{ note }}</p>{% endif %}
                 </div>
                 {% endfor %}
             </div>
-            <p class="small text-muted mt-2 mb-0">
-                按本命题材命中数排序；已剔除你收藏过的作品，带避雷标签的一律不推。
-            </p>
         </div>
-        {% endif %}
+        </div>
 
-        <p class="small text-muted mt-3 mb-0">{{ template_report.data_note }}</p>
+        {# 成分长评：LLM 文案优先，否则规则拼的长评（移到卡面底部） #}
+        <div class="persona-section">
+            <h3 class="persona-section-title">成分长评</h3>
+            <div class="persona-longreview">
+                {% if narrative %}
+                <div class="persona-longreview-text">{{ narrative }}</div>
+                {% else %}
+                {% for para in template_report.long_review.split('\n\n') %}
+                <p>{{ para }}</p>
+                {% endfor %}
+                {% endif %}
+            </div>
+        </div>
+        <p class="small text-muted mb-2">{{ template_report.advice }}</p>
+
+        <p class="small text-muted mt-2 mb-0">{{ template_report.data_note }}</p>
         {% if profile.notes %}
-        <div class="alert alert-warning py-2 small mb-0 mt-2">
+        <div class="alert alert-warning py-2 small mb-2 mt-2">
             {% for note in profile.notes %}<div>{{ note }}</div>{% endfor %}
         </div>
         {% endif %}
+
+        <div class="persona-card-foot">{{ site_name }} · {{ site_tagline }} — 来测你的御宅成分</div>
     </div>
 </div>
+
+{% if share_card_token %}
+<p class="text-muted small mt-2 mb-3">
+    也想要一张可保存的成分卡原图？
+    <a href="/persona/card?d={{ share_card_token }}" target="_blank" rel="noopener">打开成分卡原图</a>
+</p>
+{% endif %}
+
+{# 按口味推荐：规则从站内作品库筛（本命命中 + 避雷一票否决 + 剔除已收藏），放在卡外不进截图 #}
+{% if payload.recommendations %}
+<div class="card app-card mb-3">
+    <div class="card-header bg-white fw-semibold">按你的口味推荐（站内作品）</div>
+    <div class="card-body">
+        <div class="row g-2">
+            {% for item in payload.recommendations %}
+            <div class="col-12 col-md-6">
+                <a class="work-card" href="/contents/{{ item.content_id }}">
+                    <span class="work-cover" aria-hidden="true">{{ item.title[:1] }}</span>
+                    <span class="work-card-body">
+                        <span class="d-flex justify-content-between align-items-center gap-2">
+                            <span class="fw-semibold text-truncate">{{ item.title }}</span>
+                            <span class="small text-muted">{% set _rd = rating_display(item.rating, item.rating_count) %}{% if _rd == '--' %}--{% elif _rd %}{{ _rd }}{% else %}暂无评分{% endif %}</span>
+                        </span>
+                        <span class="d-flex flex-wrap gap-1 mt-1">
+                            {% for tag in item.matched %}
+                            <span class="tag-chip tag-chip-clear">{{ tag }}</span>
+                            {% endfor %}
+                        </span>
+                        <span class="small text-muted mt-1">
+                            {% if item.year %}{{ item.year }} · {% endif %}{{ item.reason }}
+                        </span>
+                    </span>
+                </a>
+            </div>
+            {% endfor %}
+        </div>
+        <p class="small text-muted mt-2 mb-0">
+            按本命题材命中数排序；已剔除你收藏过的作品，带避雷标签的一律不推。
+        </p>
+    </div>
+</div>
+{% endif %}
 
 {% if guest_mode %}
 <div class="card app-card mb-3">
@@ -469,8 +461,8 @@
         <h2 class="h6 mb-2">登录后继续</h2>
         <p class="small text-muted mb-3">
             保存这份成分报告、按「看过 / 想看」筛选标注、把收藏里站内没有的作品同步到本站作品库，
-            还能用 LLM 生成完整文案（锐评 / 温和可切换）。
-            登录后绑定 Bangumi 用户名 / B站 UID，之后的收藏与追番变化会自动进画像。
+            登录后还能解锁一个 AI 文案模块——它会顺着你的成分，用更自然的话写出专属的看番小作文（犀利 / 温和可切换）。
+            之后绑定 Bangumi 用户名 / B站 UID，收藏与追番变化会自动进画像。
         </p>
         <div class="d-flex flex-wrap gap-2">
             <a class="btn btn-primary btn-sm" href="/login?next=/me/persona">登录</a>
@@ -481,12 +473,12 @@
 </div>
 {% else %}
 <div class="card app-card mb-3">
-    <div class="card-header bg-white fw-semibold">3. LLM 文案（可选）</div>
+    <div class="card-header bg-white fw-semibold">2. AI 文案（可选）</div>
     <div class="card-body">
         {# --- 用户级 LLM Key：填了就走自己的额度直接生成；不填回落到站点级 / 手动贴回 --- #}
         <form method="post" action="/me/persona/llm-key" class="row g-2 align-items-end mb-3">
             <div class="col-sm-4 col-md-3">
-                <label class="form-label small mb-0" for="llm-provider">接口</label>
+                <label class="form-label small mb-0" for="llm-provider">服务商</label>
                 <select class="form-select form-select-sm" id="llm-provider" name="provider">
                     {% for key, preset in llm_providers.items() %}
                     <option value="{{ key }}" {{ 'selected' if llm_source == 'user' and llm.provider == key else '' }}>{{ preset.label }}</option>
@@ -520,26 +512,61 @@
         </form>
         <p class="small text-muted mb-3">
             Key 只保存在本站数据库、仅用于调用接口，页面不显示全文；建议用子账号或小额 Key。
-            {% if llm_source == 'site' %}当前在用<strong>站点级</strong>配置。{% elif llm_source == 'user' %}当前在用<strong>你的</strong> Key。{% endif %}
+            {% if llm_source == 'site' %}当前使用<strong>站点提供的</strong>配置。{% elif llm_source == 'user' %}当前使用<strong>你填的</strong>密钥。{% endif %}
         </p>
-        {% if llm_enabled %}
-        <form method="post" action="/me/persona/llm" class="d-flex flex-wrap align-items-center gap-2 mb-3">
-            <button class="btn btn-sm btn-primary" type="submit">用已配置的 LLM 生成文案</button>
-            <button class="btn btn-sm btn-outline-secondary" type="submit"
-                    formaction="/me/persona/llm/test">测一下接口</button>
-            <span class="form-text mb-0">{{ llm.label }} · {{ llm.model }}</span>
+        {# --- 语气 / 提示词：只影响 LLM 文案，与规则算分无关，所以并进这个模块 --- #}
+        <form method="post" action="/me/persona/llm" class="row g-2 mb-3">
+            <div class="col-sm-5 col-md-4">
+                <label class="form-label small mb-0" for="tone">语气</label>
+                <select class="form-select form-select-sm" id="tone" name="tone">
+                    {% for key, label in tone_labels.items() %}
+                    <option value="{{ key }}"{% if tone == key %} selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-12">
+                <label class="form-label small mb-0" for="tone-prompt">
+                    自定义语气说明<span class="text-muted">（选择「自定义语气」时生效，{{ tone_prompt_max }} 字以内）</span>
+                </label>
+                <textarea class="form-control form-control-sm" id="tone-prompt" name="tone_prompt"
+                          rows="2" maxlength="{{ tone_prompt_max }}"
+                          placeholder="例如：像老朋友聊天，多用梗，少用书面语，结尾必须损我一句">{{ tone_prompt or '' }}</textarea>
+            </div>
+            <div class="col-12">
+                <label class="form-label small mb-0" for="extra-prompt">
+                    额外要求 / 追加提示词<span class="text-muted">（可选，{{ extra_prompt_max }} 字以内；会原样拼进提示词，优先级高于默认要求）</span>
+                </label>
+                <textarea class="form-control form-control-sm" id="extra-prompt" name="extra_prompt"
+                          rows="4" maxlength="{{ extra_prompt_max }}"
+                          placeholder="可以整段写：希望分几段、每段多长、要不要用表格以外的排版、想吐槽哪些点、要引用哪几部作品、禁止说什么…">{{ extra_prompt or '' }}</textarea>
+            </div>
+            <div class="col-12 d-flex flex-wrap align-items-center gap-2">
+                {% if llm_enabled %}
+                <button class="btn btn-sm btn-primary" type="submit">用 AI 生成文案</button>
+                <button class="btn btn-sm btn-outline-secondary" type="submit"
+                        formaction="/me/persona/llm/test">测试连接</button>
+                <span class="form-text mb-0">{{ llm.label }} · {{ llm.model }}</span>
+                {% else %}
+                <button class="btn btn-sm btn-primary" type="submit"
+                        formaction="/me/persona/prompt">保存语气与提示词</button>
+                <span class="form-text mb-0">保存后展开下面的提示词，复制到网页版即可。</span>
+                {% endif %}
+            </div>
+            <div class="col-12">
+                <span class="form-text">
+                    规则负责算分，AI 只负责写文案；「不能编造事实」这条一直有效，额外要求也改不了它。
+                </span>
+            </div>
         </form>
-        {% else %}
-        <p class="small text-muted mb-1">
-            没配接口也能用：展开下面的提示词，贴到千问 / 豆包 / DeepSeek 网页版，再把结果贴回即可。
-        </p>
+        {% if not llm_enabled %}
         <p class="small text-muted mb-3">
-            {{ llm.hint }}
+            没配 AI 也能用：先保存语气和要求，再把下面的提示词复制到千问 / 豆包 / DeepSeek
+            的网页版，把写好的内容贴回来就行。{{ llm.hint }}
         </p>
         {% endif %}
         {# --- 提示词默认折叠：上千字铺开把页面撑爆，点开再复制 --- #}
         <details class="mb-2">
-            <summary class="small fw-semibold" style="cursor: pointer;">提示词（点开复制到你的 LLM 网页版 / App）</summary>
+            <summary class="small fw-semibold" style="cursor: pointer;">提示词（点开复制到你的 AI 网页版 / App）</summary>
             <textarea class="form-control persona-prompt mt-2" id="persona-prompt" rows="10" readonly>{{ prompt }}</textarea>
             <div class="d-flex flex-wrap gap-2 mt-2">
                 <button class="btn btn-sm btn-outline-secondary" type="button"
@@ -547,9 +574,9 @@
             </div>
         </details>
         <form method="post" action="/me/persona/narrative" class="mt-3">
-            <label class="form-label small mb-1" for="persona-narrative">把 LLM 生成的文案贴回这里</label>
+            <label class="form-label small mb-1" for="persona-narrative">把 AI 写好的文案贴回这里</label>
             <textarea class="form-control" id="persona-narrative" name="narrative" rows="10"
-                      placeholder="粘贴 LLM 输出的完整报告">{{ narrative or '' }}</textarea>
+                      placeholder="粘贴 AI 写好的完整报告">{{ narrative or '' }}</textarea>
             <div class="d-flex flex-wrap align-items-center gap-2 mt-2">
                 <button class="btn btn-sm btn-primary" type="submit">保存文案</button>
                 <span class="form-text mb-0">保存后会用你的文案替换上面的骨架文案。</span>

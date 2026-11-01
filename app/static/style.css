@@ -8682,3 +8682,279 @@ button[disabled],
         max-width: none;
     }
 }
+
+/* ==========================================================================
+   御宅成分卡（报告页即分享卡 · 截图友好）
+   - 报告页结果区重排为一张设计过的竖版卡：品牌头带 + 称号暴击 + 成分长评 +
+     维度雷达 + 七维 + 人格标签 + 代表作 + 锐评 + 引流页脚。
+   - 不强制单独下载：截图即可发小红书 / QQ；推荐位移到卡外，不进截图。
+   ========================================================================== */
+
+/* 截图引导条：卡上方，提示截图分享 + 一键复制分享文案 */
+.persona-share-hint {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem 0.75rem;
+    margin-bottom: var(--space-3);
+    padding: 0.6rem 0.85rem;
+    border: 1px solid var(--brand-200);
+    border-radius: var(--radius-md);
+    background: var(--brand-50);
+    color: var(--brand-900);
+    font-size: var(--text-sm);
+}
+.persona-share-hint strong { color: var(--brand-700); }
+.persona-share-copy {
+    flex: 0 0 auto;
+    border: 1px solid var(--brand-300);
+    background: #fff;
+    color: var(--brand-700);
+    border-radius: 999px;
+    padding: 0.3rem 0.85rem;
+    font-size: var(--text-xs);
+    font-weight: 600;
+    cursor: pointer;
+    transition: background-color var(--dur-fast) var(--ease), border-color var(--dur-fast) var(--ease);
+}
+.persona-share-copy:hover { background: var(--brand-100); border-color: var(--brand-400); }
+
+/* 成分卡本体：居中收窄，手机满宽；白底圆角，自带头带 */
+.persona-share-card {
+    max-width: 680px;
+    margin: 0 auto var(--space-4);
+    border-radius: var(--radius-xl);
+    overflow: hidden;
+    background: var(--card-bg);
+    box-shadow: var(--shadow-md);
+    border: 1px solid var(--brand-100);
+}
+
+/* 品牌头带：深色渐变 + 白字，复用 home-persona-card 的语言，让截图自带站点识别 */
+.persona-card-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    padding: 0.7rem 1.1rem;
+    background: linear-gradient(120deg, var(--brand-800) 0%, var(--brand-600) 60%, var(--accent-600) 130%);
+    color: #fff;
+}
+.persona-card-brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    color: #fff;
+}
+.persona-card-brand .wm-latin { color: #fff; font-size: 1.05rem; }
+.persona-card-brand .wm-kana { color: rgba(255, 255, 255, 0.82); border-left-color: rgba(255, 255, 255, 0.45); }
+.persona-card-brand-text { font-weight: 800; letter-spacing: 0.02em; font-size: 1.02rem; }
+.persona-card-head-sub {
+    font-size: var(--text-xs);
+    color: rgba(255, 255, 255, 0.82);
+    white-space: nowrap;
+}
+
+.persona-card-body { padding: 1.25rem 1.25rem 0; }
+
+/* 称号暴击：卡面最大字 + 稀有度徽章 + 罗马音代号 + 毒舌句 */
+.persona-hero { margin-bottom: var(--space-4); }
+/* 称号与稀有度并排：稀有度是称号的属性，不该沉到卡底单独占一行；
+   空间不够时（窄屏大称号）自动折到下一行，不挤成两行小字 */
+.persona-hero-top {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.4rem 0.7rem;
+}
+.persona-hero-title {
+    font-size: clamp(1.8rem, 6vw, 2.5rem);
+    font-weight: 800;
+    line-height: 1.15;
+    letter-spacing: 0.01em;
+    color: var(--ink-900);
+}
+/* 稀有度徽章：分档配色（SSR 金 > SR 蓝 > R 灰 > N 浅灰），稀有的显眼、普通的收敛 */
+.persona-rarity {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 0.3rem;
+    padding: 0.16rem 0.6rem;
+    border-radius: 999px;
+    border: 1px solid #dde4ec;
+    background: #f6f8fa;
+    font-size: var(--text-xs);
+    line-height: 1.5;
+    color: var(--ink-500);
+    white-space: nowrap;
+}
+.persona-rarity-k { opacity: 0.72; }
+.persona-rarity-tier { font-weight: 800; letter-spacing: 0.06em; }
+/* 名号（婆罗门 / 刹帝利 / 吠舍 / 路人）比字母更主要，稍加重一点 */
+.persona-rarity-label { font-weight: 700; }
+.persona-rarity-sep { opacity: 0.45; }
+.persona-rarity-share { font-variant-numeric: tabular-nums; opacity: 0.85; }
+.persona-rarity-ssr { border-color: #e0a800; background: #fdf6dd; color: #8a6a00; }
+.persona-rarity-sr { border-color: #2b9ae0; background: #e8f3fd; color: #1b6fa8; }
+.persona-rarity-r { border-color: #9fadb9; background: #eef2f5; color: #5c6874; }
+.persona-rarity-n { border-color: #d4dbe2; background: #f4f6f8; color: #7c8894; }
+/* 未标定：校准样本里没出现过的称号。虚线边框表示「还没测出来」而不是「很稀有」 */
+.persona-rarity-unrated {
+    border-style: dashed;
+    border-color: #cfd8e0;
+    background: #fbfcfd;
+    color: #8b96a2;
+}
+.persona-hero-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.4rem;
+}
+.persona-hero-code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.8rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    padding: 0.18rem 0.55rem;
+    border-radius: 999px;
+    background: var(--brand-100);
+    color: var(--brand-800);
+}
+.persona-hero-note { font-size: var(--text-sm); color: var(--ink-700); }
+/* 区块标题：渐变竖线 + 小字 */
+.persona-section { margin-top: var(--space-4); }
+.persona-section-title {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    margin: 0 0 0.6rem;
+    font-size: var(--text-sm);
+    font-weight: 700;
+    color: var(--ink-700);
+}
+.persona-section-title::before {
+    content: "";
+    width: 0.24rem;
+    height: 0.95em;
+    border-radius: 999px;
+    background: linear-gradient(var(--brand-400), var(--accent-500));
+    flex: 0 0 auto;
+}
+
+/* 二次元人格：每条一行「标签 + 说明」。桌面一行读完、对齐干净；
+   手机说明自动换行。比多列网格（3 列 + 1 个孤儿、说明和 pill 对不齐）稳得多。 */
+.persona-trait-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-top: 0.2rem;
+}
+.persona-trait-row {
+    display: flex;
+    align-items: baseline;
+    gap: 0.6rem;
+}
+.persona-trait-row .persona-tag-pill { flex: 0 0 auto; }
+.persona-tag-pill {
+    display: inline-block;
+    padding: 0.28rem 0.7rem;
+    border-radius: 999px;
+    background: var(--brand-600);
+    color: #fff;
+    font-size: var(--text-sm);
+    font-weight: 700;
+    line-height: 1.2;
+    white-space: nowrap;
+}
+.persona-trait-note { flex: 1; margin: 0; font-size: var(--text-xs); line-height: 1.5; color: var(--ink-500); }
+
+/* 成分长评：正文级可读性，LLM 文案保留换行 */
+.persona-longreview { font-size: var(--text-base); line-height: 1.85; color: var(--ink-800); }
+.persona-longreview p { margin: 0 0 0.7rem; }
+.persona-longreview p:last-child { margin-bottom: 0; }
+.persona-longreview-text { white-space: pre-wrap; word-break: break-word; }
+
+/* 维度 + 二次元人格：PC 左右分栏，雷达保持全尺寸；手机雷达缩小、人格在右，缩短卡高 */
+.persona-metrics-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 1rem 1.25rem;
+    margin-top: var(--space-4);
+}
+.persona-metrics-row .persona-metrics {
+    flex: 0 0 300px;
+    max-width: 300px;
+    margin-top: 0;
+}
+.persona-metrics {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: var(--space-2);
+}
+.persona-metrics-row .persona-section-traits {
+    flex: 1 1 12rem;
+    min-width: 0;
+    margin-top: 0;
+}
+.persona-radar-wrap { display: flex; justify-content: center; width: 100%; }
+.persona-radar { max-width: 300px; }
+
+/* 雷达下方那块留白：主身份。桌面左栏 300px 刚好两行；手机上整行宽度、说明照常放 */
+.persona-identity {
+    width: 100%;
+    margin: 0.15rem 0 0;
+    font-size: var(--text-xs);
+    line-height: 1.6;
+    color: var(--ink-500);
+}
+.persona-identity-k { letter-spacing: 0.04em; }
+.persona-identity b { color: var(--ink-700); font-weight: 700; }
+
+/* 手机：仍是两栏（上下排会让卡片多出 100px+，不能接受）。
+   两栏高度天然不匹配——雷达 140px 宽只有 112px 高，4 行标签却有 280px，
+   雷达下面必然空出一块。解决办法不是塞东西，而是**把雷达和它下面那行主身份
+   当作一块整体垂直居中**：留白上下对分，看着像刻意居中的插图，而不是底部一个洞。
+   （原先顶对齐时，4 行标签下左栏要空 138px，最难看。） */
+@media (max-width: 575px) {
+    .persona-metrics-row { gap: 0.6rem 0.75rem; align-items: center; }
+    .persona-metrics-row .persona-metrics { flex-basis: 140px; max-width: 140px; }
+    .persona-metrics-row .persona-radar { max-width: 140px; }
+    .persona-metrics-row .persona-section-traits { flex: 1 1 0; }
+    /* 140px 窄列里塞 26 字说明会变四行小字，反而把左栏撑高、把留白挤没了 */
+    .persona-identity-note { display: none; }
+}
+
+/* 代表作 */
+.persona-works { line-height: 1.7; color: var(--ink-700); }
+
+/* 锐评：高亮块 */
+.persona-quip {
+    display: block;
+    margin-top: var(--space-4);
+    padding: 0.7rem 0.85rem;
+    border-radius: var(--radius-md);
+    background: var(--brand-50);
+    border-left: 3px solid var(--brand-400);
+    font-size: var(--text-base);
+    line-height: 1.6;
+    color: var(--ink-800);
+}
+
+/* 引流页脚：截图自带站点标识 */
+.persona-card-foot {
+    margin: var(--space-4) -1.25rem 0;
+    padding: 0.7rem 1.25rem;
+    background: var(--surface);
+    border-top: 1px solid var(--brand-100);
+    font-size: var(--text-xs);
+    color: var(--ink-500);
+    text-align: center;
+}
+
+@media (max-width: 575.98px) {
+    .persona-card-head-sub { display: none; }
+}

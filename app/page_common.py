@@ -14,6 +14,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
 from app import media
+from app import persona
 from app.config import settings
 from app.database import get_db
 from app.rating import rating_display
@@ -73,15 +74,18 @@ templates = Jinja2Templates(
     context_processors=[_inject_current_user],
 )
 
-# 静态资源缓存版本号（模板全局）：取 style.css 的 mtime。
+# 静态资源缓存版本号（模板全局）：取 style.css 的 mtime + 字节数。
 # 模板以 /static/style.css?v={{ asset_v }} 引用，样式一改版本号就变，
 # 浏览器自动拉新文件，不再出现「改了 CSS 用户端还是旧样式」的缓存问题。
-# 用 __str__ 而非固定字符串：进程不重启也要拿到当前 mtime —— 否则改完 CSS
+# 用 __str__ 而非固定字符串：进程不重启也要拿到当前值 —— 否则改完 CSS
 # 不重启服务，?v= 还是旧值，浏览器继续吃缓存（2026-10-22 实际踩到）。
+# **必须带上 size**：部署包解压后文件 mtime 可能被写成 0（tar 打包没保留时间），
+# 只认 mtime 的话版本号恒为 "0"，2026-10-28 就因此让用户一直看到旧样式。
 class _AssetVersion:
     def __str__(self) -> str:
         try:
-            return str(int((BASE_DIR / "static" / "style.css").stat().st_mtime))
+            stat = (BASE_DIR / "static" / "style.css").stat()
+            return f"{int(stat.st_mtime)}-{stat.st_size}"
         except OSError:
             return "1"
 
@@ -142,6 +146,11 @@ SITE_NAME = "Otaku"
 SITE_TAGLINE = "ACGN 内容平台"
 templates.env.globals["site_name"] = SITE_NAME
 templates.env.globals["site_tagline"] = SITE_TAGLINE
+
+# 稀有度等级名号（SSR 婆罗门 / SR 刹帝利 / R 吠舍 / N 路人）。
+# 报告页、游客试算、题测结果页三处共用同一张卡，且旧报告快照里没有 label 字段，
+# 所以这里注册成全局函数：模板按 tier 现查名号，不依赖快照里存了什么。
+templates.env.globals["rarity_label"] = persona.rarity_label
 
 # 书籍细分标注（2026-10-19）：Bangumi 书籍区只有一个「小说」platform，里面既有
 # 文库出身的轻小说，也有日本普通小说（纯文学 / 一般文艺）。早先一律入库后，

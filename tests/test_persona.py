@@ -260,7 +260,7 @@ class TestProfile:
         assert profile["entry_year"] == 2006
         assert profile["latest_year"] == 2024
         assert profile["identity"] in ("番剧党", "杂食党")
-        assert len(profile["dimensions"]) == 7
+        assert len(profile["dimensions"]) == 9
 
     def test_prompt_contains_facts_and_guardrails(self):
         profile = persona.build_profile(
@@ -280,7 +280,7 @@ class TestProfile:
             bangumi_total=1,
         )
         sharp = persona.build_llm_prompt(profile, "sharp")
-        assert "善意锐评" in sharp
+        assert "犀利毒舌" in sharp
         assert "不得编造" in sharp
         assert "日常" in sharp
         assert "2006" in sharp
@@ -356,9 +356,7 @@ class TestPersonaPage:
         assert "generated=1" in resp.headers["location"]
 
         page = persona_env.client.get("/me/persona")
-        assert "本命类型" in page.text
-        assert "避雷类型" in page.text
-        assert "致郁" in page.text
+        assert "二次元人格" in page.text
         assert "维度成分" in page.text
         assert "复制提示词" in page.text
 
@@ -435,10 +433,87 @@ class TestRadar:
                 "completion": 80,
             }
         )
-        assert len(radar["polygon"].split()) == 7
+        assert len(radar["polygon"].split()) == 9
         assert len(radar["grid"]) == 4
-        assert len(radar["axes"]) == 7
-        assert len(radar["labels"]) == 7
+        assert len(radar["axes"]) == 9
+        assert len(radar["labels"]) == 9
+
+
+class TestShareCard:
+    """分享卡重做：称号/代号/毒舌句必须上卡，稀有度不社死，旧 token 兼容。"""
+
+    def _profile(self) -> dict:
+        return {
+            "persona_tags": ["治愈系", "番剧党", "主流厨", "神作党", "偏食"],
+            "dimensions": {
+                "type_focus": 100, "tag_focus": 63, "mainstream": 100,
+                "quality": 95, "exploration": 54, "hype": 0, "completion": 100,
+            },
+            "total": 137,
+        }
+
+    def test_encode_carries_hero_and_total(self):
+        tok = persona.encode_card(
+            self._profile(), {"tier": "N", "share": 50.0, "total": 2},
+            "伪婆罗门", "NISE-BRAHMIN", "别人问爱好，憋半天说「看动漫」。", 137,
+        )
+        data = persona.decode_card(tok)
+        assert data["hero_title"] == "伪婆罗门"
+        assert data["hero_code"] == "NISE-BRAHMIN"
+        assert "看动漫" in data["quip"]
+        assert data["total"] == 137
+
+    def test_old_token_still_renders(self):
+        # 旧分享卡只编码标签+维度+稀有度，无 h/n 字段，必须向后兼容
+        tok = persona.encode_card(
+            self._profile(), {"tier": "N", "share": 50.0, "total": 2}
+        )
+        data = persona.decode_card(tok)
+        assert data["hero_title"] == ""
+        svg = persona.build_share_card(data)
+        assert "<svg" in svg and "伪婆罗门" not in svg  # 回退口味标签，不崩
+
+    def test_unrated_tier_does_not_fake_a_number(self):
+        """未标定：不编百分比，也不落到「最稀有」的口径上。"""
+        data = persona.decode_card(persona.encode_card(
+            self._profile(), {"tier": "?", "share": None, "total": 2},
+            "伪婆罗门", "NISE-BRAHMIN", "q", 137))
+        svg = persona.build_share_card(data)
+        assert "校准样本未收录" in svg
+        assert "同好" not in svg
+        assert "占已测" not in svg
+
+    def test_rarity_flex_for_rare_tier(self):
+        ssr = persona.decode_card(persona.encode_card(
+            self._profile(), {"tier": "SSR", "share": 3.0, "total": 512},
+            "赛博貔貅", "PIXIU", "q", 137))
+        svg = persona.build_share_card(ssr)
+        assert "仅 3.0% 同好" in svg and "SSR" in svg
+
+    def test_sub_one_percent_keeps_decimal(self):
+        """0.3% 不能被四舍五入成 0%（早年 :.0f 就是这么写的）。"""
+        data = persona.decode_card(persona.encode_card(
+            self._profile(), {"tier": "SSR", "share": 0.3, "total": 512},
+            "赛博貔貅", "PIXIU", "q", 137))
+        svg = persona.build_share_card(data)
+        assert "0.3%" in svg and "0%" not in svg.replace("0.3%", "")
+
+    def test_rarity_neutral_for_common(self):
+        common = persona.decode_card(persona.encode_card(
+            self._profile(), {"tier": "N", "share": 80.0, "total": 512},
+            "宅宅", "OTAKU", "q", 137))
+        svg = persona.build_share_card(common)
+        assert "大众路线" in svg and "占已测" not in svg
+
+    def test_share_card_contains_hero(self):
+        data = persona.decode_card(persona.encode_card(
+            self._profile(), {"tier": "SR", "share": 9.0, "total": 512},
+            "伪婆罗门", "NISE-BRAHMIN", "别人问爱好，憋半天说「看动漫」。", 137))
+        svg = persona.build_share_card(data)
+        assert "伪婆罗门" in svg
+        assert "NISE-BRAHMIN" in svg
+        assert "别人问爱好" in svg
+        assert "基于 137 部作品" in svg
 
 
 class _FakeResponse:
@@ -630,7 +705,7 @@ class TestLlmTestRoute:
         assert "千问 / 豆包 / DeepSeek 网页版" in page.text
         assert "保存 Key" in page.text
         assert "API Key" in page.text
-        assert "用已配置的 LLM 生成文案" not in page.text
+        assert "用 AI 生成文案" not in page.text
 
 
 class TestSiteSync:
@@ -927,7 +1002,7 @@ class TestGuestPreview:
         resp = client.post("/persona/preview", data={"username": "sai"})
         assert resp.status_code == 200
         assert "御宅成分试算" in resp.text
-        assert "本命类型" in resp.text
+        assert "二次元人格" in resp.text
         assert "免登录试算结果" in resp.text
         assert "登录后继续" in resp.text
         # 游客看不到「同步到本站」的表单
@@ -965,7 +1040,7 @@ class TestGuestPreview:
         assert resp.status_code == 200
         assert "B站 UID 2" in resp.text
         assert "B站追番 2 条" in resp.text
-        assert "本命类型" in resp.text
+        assert "二次元人格" in resp.text
 
     def test_preview_merges_both_sources(self, persona_env, monkeypatch):
         """双源合并：同作品只计一次，画像注脚显示两边条数。"""
@@ -1025,7 +1100,7 @@ class TestGuestPreview:
         text = client.post(
             "/persona/preview", data={"username": "sai", "mid": "2"}
         ).text
-        assert "本命类型" in text  # Bangumi 结果照常渲染
+        assert "二次元人格" in text  # Bangumi 结果照常渲染
         assert "B站追番表读取失败" in text  # notes 提示
         assert "已跳过" in text
 
@@ -1123,7 +1198,7 @@ class TestGuestPreview:
         client = TestClient(app, follow_redirects=False)
         text = client.post("/persona/preview", data={"username": "sai"}).text
         assert "生成成分报告" not in text
-        assert "LLM 文案" not in text
+        assert "2. AI 文案（可选）" not in text
 
 
 class TestContinueImport:
@@ -1173,7 +1248,7 @@ class TestCustomTone:
         prompt = persona.build_llm_prompt(
             self._profile(), "sharp", tone_prompt="这段不该生效", extra_prompt=""
         )
-        assert "善意锐评" in prompt
+        assert "犀利毒舌" in prompt
         assert "这段不该生效" not in prompt
 
     def test_extra_prompt_truncated(self):
@@ -1236,6 +1311,77 @@ class TestCustomTone:
         assert "幽默一点，但别刻薄" in page.text
         assert "每段前面加一个小标题。" in page.text
         assert "自定义语气" in page.text
+
+    def test_regenerate_keeps_saved_tone(self, persona_env):
+        """「生成 / 重新生成」不该冲掉已设好的语气。
+
+        语气与追加要求只服务 LLM 提示词（界面上已挪进 LLM 卡），这个按钮
+        只是重算画像与骨架；不传这些字段时必须沿用报告里的旧值。
+        """
+        _seed_collections(persona_env.session_factory)
+        persona_env.client.post(
+            "/me/persona/generate",
+            data={
+                "tone": "custom",
+                "tone_prompt": "像电台主播，语速快",
+                "extra_prompt": "分三段写",
+            },
+            follow_redirects=False,
+        )
+        # 只点按钮、不提交语气字段
+        persona_env.client.post("/me/persona/generate", data={}, follow_redirects=False)
+
+        db = persona_env.session_factory()
+        try:
+            report = crud.get_persona_report(db, _uid(persona_env.session_factory))
+            assert report.tone == "custom"
+            assert report.tone_prompt == "像电台主播，语速快"
+            assert report.extra_prompt == "分三段写"
+        finally:
+            db.close()
+
+    def test_prompt_endpoint_rewrites_prompt_only(self, persona_env):
+        """`/me/persona/prompt` 只重写提示词：未配 LLM 的用户靠它更新待复制内容。"""
+        _seed_collections(persona_env.session_factory)
+        persona_env.client.post("/me/persona/generate", data={}, follow_redirects=False)
+
+        resp = persona_env.client.post(
+            "/me/persona/prompt",
+            data={
+                "tone": "custom",
+                "tone_prompt": "像老朋友聊天",
+                "extra_prompt": "分四段写，每段不超过 60 字",
+            },
+            follow_redirects=False,
+        )
+        assert "prompt=saved" in resp.headers["location"]
+
+        db = persona_env.session_factory()
+        try:
+            report = crud.get_persona_report(db, _uid(persona_env.session_factory))
+            assert report.tone == "custom"
+            assert report.tone_prompt == "像老朋友聊天"
+            assert report.extra_prompt == "分四段写，每段不超过 60 字"
+            assert "分四段写，每段不超过 60 字" in report.payload["prompt"]
+            # 画像仍在（只换提示词，不该把报告结构弄丢）
+            assert report.payload.get("profile")
+        finally:
+            db.close()
+
+    def test_tone_fields_live_in_llm_card(self, persona_env):
+        """语气 / 自定义语气 / 追加要求都在「2. AI 文案」卡里，不再占检测卡的位置。"""
+        _seed_collections(persona_env.session_factory)
+        persona_env.client.post("/me/persona/generate", data={}, follow_redirects=False)
+        page = persona_env.client.get("/me/persona").text
+
+        # 合并后「补充数据」也并进卡 1，所以检测区一直到 AI 卡头为止
+        detect_card = page.split("1. 生成成分报告")[1].split("2. AI 文案（可选）")[0]
+        for field in ('id="tone"', 'id="tone-prompt"', 'id="extra-prompt"'):
+            assert field not in detect_card
+
+        llm_card = page.split("2. AI 文案（可选）")[-1]
+        for field in ('id="tone"', 'id="tone-prompt"', 'id="extra-prompt"'):
+            assert field in llm_card
 
 
 class TestRecommendations:
@@ -1434,3 +1580,126 @@ class TestSiteDataFirst:
         text = persona_env.client.get("/me/persona").text
         assert "还没有可分析的数据" in text
         assert "disabled>生成 / 重新生成" in text
+
+
+def _long_review_profile(**overrides):
+    """规则长评要的画像骨架（事实全部由调用方决定，便于钉死具体文案）。"""
+    profile = {
+        "persona_tags": ["治愈系", "番剧党"],
+        "cluster": "治愈",
+        "identity": "番剧党",
+        "total": 448,
+        "seen": 446,
+        "want": 0,
+        "drop": 0,
+        "dimensions": {
+            "type_focus": 100,
+            "tag_focus": 63,
+            "mainstream": 100,
+            "quality": 95,
+            "exploration": 54,
+            "hype": 0,
+            "completion": 100,
+        },
+        "top_genres": [{"name": "日常"}, {"name": "奇幻"}, {"name": "战斗"}],
+        "top_tags": [],
+        "avoided_tags": [],
+        "top_studios": [],
+        "entry_year": 2016,
+        "latest_year": 2026,
+        "entry_work": "某部入坑作",
+        "latest_work": "某部新番",
+        "bangumi_total": 0,
+        "bilibili_total": 500,
+        "site_counts": {"favorites": 6, "statuses": 0},
+    }
+    profile.update(overrides)
+    return profile
+
+
+class TestLongReviewEntryLine:
+    """入坑线：entry_year 是「收藏里最早作品的发行年」，不能当成用户的入坑年。"""
+
+    def test_ancient_entry_work_is_not_called_ruku(self):
+        """收藏里有 1928 年的上古条目时，不能写「1928 年入坑、98 年没爬出来」。"""
+        text = persona._compose_long_review(
+            _long_review_profile(
+                entry_year=1928,
+                entry_work="米老鼠的黑白动画片生涯",
+            )
+        )
+        assert "1928 年因为" not in text
+        assert "没爬出来" not in text
+        assert "片单往前能追到 1928 年" in text
+
+    def test_modern_entry_keeps_ruku_wording(self):
+        text = persona._compose_long_review(
+            _long_review_profile(entry_year=2016, latest_year=2026)
+        )
+        assert "入坑不算晚——2016 年因为" in text
+
+    def test_mid_span_uses_span_wording_for_ancient(self):
+        """年代不可信但跨度不大时，走「横跨 N 年的口味」而不是「都能啃」。"""
+        text = persona._compose_long_review(
+            _long_review_profile(entry_year=1998, latest_year=2026)
+        )
+        assert "横跨 28 年的口味" in text
+        assert "1998 年因为" not in text
+
+
+class TestFreshnessDimension:
+    """「追新度」：近两年发行作品占比。
+
+    原「追更强度」（want/seen）判断不了——数据源拿不到「正在追」信号（B 站追番
+    的「在看」被并入 seen），线上出现过追番 500 条却 0 分。2026-10-28 换掉。
+    """
+
+    @staticmethod
+    def _works(years):
+        return [{"year": year} for year in years]
+
+    def test_all_old_scores_zero(self):
+        from datetime import datetime
+
+        current = datetime.now().year
+        assert persona._freshness(self._works([current - 20] * 10)) == 0
+
+    def test_all_recent_scores_full(self):
+        from datetime import datetime
+
+        current = datetime.now().year
+        assert persona._freshness(self._works([current] * 10)) == 100
+
+    def test_half_recent(self):
+        from datetime import datetime
+
+        current = datetime.now().year
+        assert persona._freshness(self._works([current] * 5 + [current - 20] * 5)) == 50
+
+    def test_small_sample_is_neutral(self):
+        """只收藏了两三部新番不该判成硬核追新党。"""
+        from datetime import datetime
+
+        assert persona._freshness(self._works([datetime.now().year])) == 50
+
+    def test_undated_works_ignored(self):
+        from datetime import datetime
+
+        current = datetime.now().year
+        works = self._works([current - 20] * 10) + [{"year": None}] * 5
+        assert persona._freshness(works) == 0
+
+    def test_profile_carries_fresh_not_hype(self):
+        profile = persona.build_profile(
+            [
+                {
+                    "title": f"W{i}", "type": "anime", "year": 2006, "status": "seen",
+                    "tags": ["日常"], "score": 8.0, "popularity": 5000,
+                    "rate": 8, "source": "bangumi",
+                }
+                for i in range(10)
+            ],
+            bangumi_total=10,
+        )
+        assert "fresh" in profile["dimensions"]
+        assert "hype" not in profile["dimensions"]

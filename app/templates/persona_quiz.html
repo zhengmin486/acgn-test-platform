@@ -1,10 +1,34 @@
 {% extends "base_content.html" %}
 {% block title %}选几部，测出你的御宅成分{% endblock %}
+
+{% macro work_card(w, type_labels) %}
+<div class="col-6 col-sm-4 col-md-3 col-lg-2">
+    <div class="card app-card h-100">
+        <img class="card-img-top" style="height:170px;object-fit:cover;background:#eef2f7"
+             src="{{ thumb_src(w.image_url) }}" alt="{{ w.title }}封面"
+             loading="lazy" decoding="async" referrerpolicy="no-referrer"
+             onerror="this.style.display='none'">
+        <div class="card-body p-2">
+            <div class="small fw-semibold text-truncate" title="{{ w.title }}">{{ w.title }}</div>
+            <div class="small text-muted">{% if w.year %}{{ w.year }} · {% endif %}{{ type_labels.get(w.type, w.type) }}</div>
+            <div class="btn-group btn-group-sm w-100 mt-1" role="group" aria-label="{{ w.title }} 操作">
+                <input type="checkbox" class="btn-check" id="seen{{ w.id }}" name="seen" value="{{ w.id }}" autocomplete="off">
+                <label class="btn btn-outline-success" for="seen{{ w.id }}">看过</label>
+                <input type="checkbox" class="btn-check" id="doing{{ w.id }}" name="doing" value="{{ w.id }}" autocomplete="off">
+                <label class="btn btn-outline-primary" for="doing{{ w.id }}">在看</label>
+                <input type="checkbox" class="btn-check" id="drop{{ w.id }}" name="drop" value="{{ w.id }}" autocomplete="off">
+                <label class="btn btn-outline-danger" for="drop{{ w.id }}">抛弃</label>
+            </div>
+        </div>
+    </div>
+</div>
+{% endmacro %}
+
 {% block content %}
 <div class="d-flex flex-wrap justify-content-between align-items-end gap-2 mb-3">
     <div>
         <h1 class="h3 mb-1 section-heading">选几部，测出你的御宅成分</h1>
-        <p class="text-muted small mb-0">不用 Bangumi 账号、不用授权。把下面这些作品里你看过或想看的标出来，就能算出维度口味与二次元人格。</p>
+        <p class="text-muted small mb-0">不用 Bangumi 账号、不用授权。主测动画，把认识的作品标出来——看过、在看、或者早就抛弃，就能算出维度口味与二次元人格。</p>
     </div>
     <a class="btn btn-outline-secondary btn-sm" href="/persona">我有账号，用收藏数据算</a>
 </div>
@@ -25,36 +49,52 @@
         </div>
         <p class="small text-muted mt-2 mb-0">
             已选 <span class="fw-semibold" id="quiz-count">0</span> 部，至少 {{ min_positive }} 部就能出结果。
-            选得越多越准——{{ sizes[0] }} 题是快速版，{{ sizes[-1] }} 题会把四类口味都问到。
-            「没看过」直接跳过就行，不会被当成不喜欢。
+            选得越多越准——{{ sizes[0] }} 题是快速版，{{ sizes[-1] }} 题会把动画口味问得更细。
+            不认识的跳过就行；<strong>看过 / 在看</strong>算口味，<strong>抛弃</strong>算避雷。
         </p>
+        {# 搜更多：题面里没有的作品，按名字找出来补上，不占题量 #}
+        <div class="d-flex flex-wrap gap-2 align-items-center mt-2">
+            <span class="small text-muted">题面里没有？搜出来补上</span>
+            <input type="search" id="quiz-search-q" class="form-control form-control-sm"
+                   style="max-width:220px" placeholder="作品名关键字" autocomplete="off">
+            <button type="button" class="btn btn-sm btn-outline-secondary" id="quiz-search-btn">搜索</button>
+            <span class="small text-muted" id="quiz-search-msg"></span>
+        </div>
     </div>
 </div>
 
 <form id="quiz-form" method="post" action="/persona/quiz">
     <input type="hidden" name="size" value="{{ size }}">
     <input type="hidden" name="seed" value="{{ seed }}">
-    <div class="row g-2 g-md-3">
-        {% for w in works %}
-        <div class="col-6 col-sm-4 col-md-3 col-lg-2">
-            <div class="card app-card h-100">
-                <img class="card-img-top" style="height:170px;object-fit:cover;background:#eef2f7"
-                     src="{{ thumb_src(w.image_url) }}" alt="{{ w.title }}封面"
-                     loading="lazy" decoding="async" referrerpolicy="no-referrer"
-                     onerror="this.style.display='none'">
-                <div class="card-body p-2">
-                    <div class="small fw-semibold text-truncate" title="{{ w.title }}">{{ w.title }}</div>
-                    <div class="small text-muted">{% if w.year %}{{ w.year }} · {% endif %}{{ type_labels.get(w.type, w.type) }}</div>
-                    <div class="btn-group btn-group-sm w-100 mt-1" role="group" aria-label="{{ w.title }} 操作">
-                        <input type="checkbox" class="btn-check" id="seen{{ w.id }}" name="seen" value="{{ w.id }}" autocomplete="off">
-                        <label class="btn btn-outline-success" for="seen{{ w.id }}">看过</label>
-                        <input type="checkbox" class="btn-check" id="want{{ w.id }}" name="want" value="{{ w.id }}" autocomplete="off">
-                        <label class="btn btn-outline-primary" for="want{{ w.id }}">想看</label>
-                    </div>
+
+    {# 主题面：动画 #}
+    <div class="row g-2 g-md-3" id="quiz-grid">
+        {% for w in works %}{{ work_card(w, type_labels) }}{% endfor %}
+    </div>
+
+    {# 附加题：漫画 / 游戏 / 轻小说，可选，默认折叠，不占主题面题量 #}
+    {% if extras %}
+    <details class="mt-3" id="quiz-extras">
+        <summary class="btn btn-outline-secondary btn-sm">附加题（可选）：漫画 / 游戏 / 轻小说</summary>
+        <p class="small text-muted mt-2 mb-0">不展开也能出结果；这几类也有口味的话展开标一下，画像会更准。</p>
+        <div class="row g-2 g-md-3 mt-1">
+            {% for w in extras %}{{ work_card(w, type_labels) }}{% endfor %}
+        </div>
+    </details>
+    {% endif %}
+
+    {# 搜索加入：额外补的，不算进题量 #}
+    <div class="mt-3 d-none" id="quiz-search-wrap">
+        <div class="card app-card">
+            <div class="card-body py-2 d-flex flex-wrap align-items-center justify-content-between gap-2">
+                <div>
+                    <div class="small fw-semibold">搜索加入</div>
+                    <div class="small text-muted">这些不占题量，是额外补标的作品。</div>
                 </div>
+                <button type="button" class="btn btn-sm btn-outline-secondary" id="quiz-search-clear">清空搜索</button>
             </div>
         </div>
-        {% endfor %}
+        <div class="row g-2 g-md-3 mt-1" id="quiz-search-results"></div>
     </div>
 
     <div class="card app-card mt-3">
@@ -75,21 +115,28 @@
     var counter = document.getElementById('quiz-count');
     var submit = document.getElementById('quiz-submit');
     var minPositive = {{ min_positive }};
+    var typeLabels = {{ type_labels | tojson }};
 
     function refresh() {
-        var n = form.querySelectorAll('input[type=checkbox]:checked').length;
+        // 「抛弃」是负向信号，不算进「至少 N 部」的正向额度
+        var n = 0;
+        form.querySelectorAll('input[type=checkbox]:checked').forEach(function (el) {
+            if (el.name !== 'drop') n++;
+        });
         if (counter) counter.textContent = n;
         if (submit) submit.disabled = n < minPositive;
     }
 
-    // 互斥：「看过」与「想看」只能留一个，再点一次同一个按钮即取消
+    // 互斥：「看过 / 在看 / 抛弃」一个作品只能留一个，再点同一个即取消
     form.addEventListener('change', function (e) {
         var el = e.target;
         if (!el || el.type !== 'checkbox') return;
         if (el.checked) {
-            var other = el.name === 'seen' ? 'want' : 'seen';
-            var rival = form.querySelector('input[name=' + other + '][value="' + el.value + '"]');
-            if (rival) rival.checked = false;
+            ['seen', 'doing', 'drop'].forEach(function (name) {
+                if (name === el.name) return;
+                var rival = form.querySelector('input[name=' + name + '][value="' + el.value + '"]');
+                if (rival) rival.checked = false;
+            });
         }
         refresh();
     });
@@ -97,6 +144,77 @@
     form.addEventListener('submit', function () {
         if (submit) { submit.disabled = true; submit.textContent = '正在算…'; }
     });
+
+    // ---- 搜更多：AJAX 找作品，插到独立容器里（不占题量、不刷新页面） ----
+    function esc(s) {
+        return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+            return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+        });
+    }
+
+    function cardHTML(w) {
+        var img = w.image_url
+            ? '<img class="card-img-top" style="height:170px;object-fit:cover;background:#eef2f7" src="' + esc(w.image_url) + '" alt="' + esc(w.title) + '封面" loading="lazy" decoding="async" referrerpolicy="no-referrer" onerror="this.style.display=\'none\'">'
+            : '';
+        return '<div class="col-6 col-sm-4 col-md-3 col-lg-2">' +
+            '<div class="card app-card h-100">' + img +
+            '<div class="card-body p-2">' +
+            '<div class="small fw-semibold text-truncate" title="' + esc(w.title) + '">' + esc(w.title) + '</div>' +
+            '<div class="small text-muted">' + (w.year ? w.year + ' · ' : '') + esc(typeLabels[w.type] || w.type) + '</div>' +
+            '<div class="btn-group btn-group-sm w-100 mt-1" role="group" aria-label="' + esc(w.title) + ' 操作">' +
+            '<input type="checkbox" class="btn-check" id="seen' + w.id + '" name="seen" value="' + w.id + '" autocomplete="off">' +
+            '<label class="btn btn-outline-success" for="seen' + w.id + '">看过</label>' +
+            '<input type="checkbox" class="btn-check" id="doing' + w.id + '" name="doing" value="' + w.id + '" autocomplete="off">' +
+            '<label class="btn btn-outline-primary" for="doing' + w.id + '">在看</label>' +
+            '<input type="checkbox" class="btn-check" id="drop' + w.id + '" name="drop" value="' + w.id + '" autocomplete="off">' +
+            '<label class="btn btn-outline-danger" for="drop' + w.id + '">抛弃</label>' +
+            '</div></div></div></div>';
+    }
+
+    var searchBtn = document.getElementById('quiz-search-btn');
+    var searchInput = document.getElementById('quiz-search-q');
+    var searchMsg = document.getElementById('quiz-search-msg');
+    var searchWrap = document.getElementById('quiz-search-wrap');
+    var searchResults = document.getElementById('quiz-search-results');
+    var searchClear = document.getElementById('quiz-search-clear');
+
+    function doSearch() {
+        var q = (searchInput.value || '').trim();
+        if (!q || !searchResults) return;
+        searchMsg.textContent = '搜索中…';
+        fetch('/persona/quiz/search?q=' + encodeURIComponent(q))
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                var works = (data && data.works) || [];
+                var added = 0;
+                works.forEach(function (w) {
+                    if (document.getElementById('seen' + w.id)) return; // 已在页面上
+                    searchResults.insertAdjacentHTML('beforeend', cardHTML(w));
+                    added++;
+                });
+                if (added) searchWrap.classList.remove('d-none');
+                searchMsg.textContent = added
+                    ? ('找到 ' + works.length + ' 部，新加 ' + added + ' 部')
+                    : '没有可加的新作品（可能都已在题面里）';
+                refresh();
+            })
+            .catch(function () { searchMsg.textContent = '搜索失败，稍后再试'; });
+    }
+
+    if (searchBtn && searchInput) {
+        searchBtn.addEventListener('click', doSearch);
+        searchInput.addEventListener('keydown', function (e) {
+            if (e.key === 'Enter') { e.preventDefault(); doSearch(); }
+        });
+    }
+    if (searchClear && searchWrap && searchResults) {
+        searchClear.addEventListener('click', function () {
+            searchResults.innerHTML = '';
+            searchWrap.classList.add('d-none');
+            searchMsg.textContent = '';
+            refresh();
+        });
+    }
 
     refresh();
 })();

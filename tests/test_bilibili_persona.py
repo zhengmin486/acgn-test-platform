@@ -378,7 +378,7 @@ class TestUserLlmKey:
         assert resp.status_code == 303 and "llmkey=saved" in resp.headers["location"]
         page = env.client.get("/me/persona")
         assert "sk-u…3456" in page.text  # 脱敏回显
-        assert "用已配置的 LLM 生成文案" in page.text
+        assert "用 AI 生成文案" in page.text
         assert "你的" in page.text  # 来源标识
 
     def test_user_key_overrides_site_key(self, env, monkeypatch):
