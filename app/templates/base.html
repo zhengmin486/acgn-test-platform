@@ -12,9 +12,13 @@
     {# 标题统一拼接：子模板只写页面名，品牌名与后缀在 base 收口。
        测试平台另有自己的后缀（见 base_admin.html 覆盖 title_suffix）。 #}
     <title>{% block title %}{{ site_tagline }}{% endblock %}{% block title_suffix %} · {{ site_name }}{% endblock %}</title>
-    {# favicon：与导航字标同源的「星芒」标识（深底 + 青绿四角星 + 蓝点）。
-       不再使用「屏幕 + 播放键」——这站是编目站，不是视频站。 #}
-    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='15' fill='%230a2d42'/%3E%3Cpath d='M32 7c1.7 14.4 10.6 23.3 25 25-14.4 1.7-23.3 10.6-25 25-1.7-14.4-10.6-23.3-25-25 14.4-1.7 23.3-10.6 25-25Z' fill='%2339c5bb'/%3E%3Ccircle cx='50' cy='48' r='3.6' fill='%2366ccff'/%3E%3C/svg%3E">
+    {# 图标分级交付（与导航字标同源的「圆环 O + 星芒」基因）：
+       - 小尺寸 favicon(16/32/48)：圆环 O + 星芒符号，缩略也清晰
+       - 大尺寸 PWA/手机主屏：渐变底白字 Otaku 字标（otaku-icon.svg / maskable）
+       不使用「屏幕 + 播放键」——这站是编目站，不是视频站。 #}
+    <link rel="icon" type="image/svg+xml" href="/static/img/otaku-favicon.svg">
+    <link rel="apple-touch-icon" href="/static/img/otaku-icon.svg">
+    <link rel="manifest" href="/static/manifest.webmanifest">
     {# Bootstrap 自托管（static/vendor），去掉对 jsdelivr 等 CDN 的网络依赖：
        国内网络偶尔拉不到 CDN 会导致整页无样式、所有栅格竖向堆叠（与「分类变竖向」高度相关）。 #}
     <link href="/static/vendor/bootstrap.min.css" rel="stylesheet">

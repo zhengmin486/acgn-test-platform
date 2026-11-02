@@ -1,0 +1,24 @@
+{
+  "name": "Otaku · 御宅内容平台",
+  "short_name": "Otaku",
+  "description": "动画 / 漫画 / 游戏 / 轻小说信息浏览",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0a2d42",
+  "theme_color": "#66ccff",
+  "icons": [
+    {
+      "src": "/static/img/otaku-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/static/img/otaku-icon-maskable.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    }
+  ]
+}
