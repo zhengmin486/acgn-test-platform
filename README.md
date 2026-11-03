@@ -27,9 +27,9 @@
 
 | 页面 | 截图 | 页面 | 截图 |
 |---|---|---|---|
-| 首页 `/` | ![首页](docs/screenshots/home.webp) | 作品库 `/contents` | ![作品库](docs/screenshots/contents.webp) |
-| 作品详情 `/contents/{id}` | ![作品详情](docs/screenshots/detail.webp) | 资讯 `/articles` | ![资讯](docs/screenshots/articles.webp) |
-| 新番档期 `/schedule` | ![新番档期](docs/screenshots/schedule.webp) | 阿宅画像（免登录试算） | ![阿宅画像](docs/screenshots/persona.webp) |
+| 首页 `/` | ![首页](docs/screenshots/home.png) | 作品库 `/contents` | ![作品库](docs/screenshots/contents.webp) |
+| 作品详情 `/contents/{id}` | ![作品详情](docs/screenshots/detail.png) | 资讯 `/articles` | ![资讯](docs/screenshots/articles.webp) |
+| 新番档期 `/schedule` | ![新番档期](docs/screenshots/schedule.webp) | 阿宅画像（免登录试算） | ![阿宅画像](docs/screenshots/persona.png) |
 | 测试后台（管理员） | ![测试后台](docs/screenshots/testcases.webp) | 数据管理（管理员） | ![数据管理](docs/screenshots/manage.webp) |
 | 个人空间 `/me` | ![个人空间](docs/screenshots/me.webp) | | |
 
