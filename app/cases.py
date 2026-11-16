@@ -61,7 +61,15 @@ def execute_case(case_id: int, db: DbSession) -> dict:
     case = crud.get_case(db, case_id)
     if case is None:
         raise HTTPException(status_code=404, detail=f"测试用例不存在: id={case_id}")
-    return runner.run_case(db, case).as_dict()
+    judgment: dict = {}
+    record = runner.run_case(db, case, judgment=judgment)
+    if record is None:
+        # 方案 6.6 / 6.7：身份不可用或取不到样本就不执行，不拿别的身份或假 id 顶替。
+        raise HTTPException(
+            status_code=409,
+            detail=f"用例未执行：{judgment.get('reason', 'identity_unavailable')}",
+        )
+    return record.as_dict()
 
 
 @router.get("/api/runs")

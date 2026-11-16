@@ -127,7 +127,7 @@
 <div class="table-responsive table-card">
 <table class="table table-hover align-middle">
     <thead>
-    <tr><th>ID</th><th>名称</th><th>方法</th><th>路径</th><th>预期状态码</th><th>状态</th><th>创建时间</th><th>操作</th></tr>
+    <tr><th>ID</th><th>名称</th><th>方法</th><th>路径</th><th>预期状态码</th><th>状态</th><th>创建时间</th><th>确认</th><th>操作</th></tr>
     </thead>
     <tbody>
     {% for c in cases %}
@@ -139,6 +139,11 @@
         <td>{{ c.expected_status }}</td>
         <td>{% if c.enabled %}<span class="badge bg-success">启用</span>{% else %}<span class="badge bg-secondary">停用</span>{% endif %}</td>
         <td class="text-muted small">{{ c.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+        <td class="text-muted small">
+            {% if c.confirmed_at %}{{ c.confirmed_at.strftime('%Y-%m-%d %H:%M') }}
+                {%- if c.confirmed_by %} · #{{ c.confirmed_by }}{% else %} · 系统{% endif %}
+            {% else %}—{% endif %}
+        </td>
         <td>
             {# 操作列：主操作实心、次要描边、危险图标化（title/aria-label 兜底文案，触控 ≥32px） #}
             <div class="table-ops">

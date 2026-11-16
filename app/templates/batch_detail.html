@@ -2,6 +2,21 @@
 {% block title %}批次 #{{ batch.id }}{% endblock %}
 {% block content %}
 <h1 class="h3 mb-3 section-heading">批次 #{{ batch.id }} 执行结果</h1>
+{% if legacy %}
+<div class="alert alert-secondary py-2 mb-3">历史批次（旧口径）：本批次产生于判定快照功能之前，按原始记录展示，不套用新的通过率分母，也不显示跳转与未执行统计。</div>
+{% endif %}
+{% if conclusion %}
+<div class="alert alert-warning py-2 mb-3">{{ conclusion }}</div>
+{% endif %}
+{% if not legacy and counts %}
+<div class="d-flex flex-wrap gap-2 mb-3">
+    <span class="badge bg-info text-dark">跳转 {{ counts.redirect_count or 0 }}（单独记录，不计入通过率）</span>
+    <span class="badge bg-secondary">未执行 {{ counts.not_run_count or 0 }}</span>
+    <span class="badge bg-light text-dark border">停用 {{ counts.disabled_count or 0 }}</span>
+    <span class="badge bg-light text-dark border">未确认 {{ counts.pending_count or 0 }}</span>
+    <span class="badge bg-light text-dark border">已驳回 {{ counts.rejected_count or 0 }}</span>
+</div>
+{% endif %}
 <div class="row g-3 mb-3">
     <div class="col-md-3">
         <div class="card app-card stat-card text-center h-100">
@@ -51,7 +66,10 @@
 {% if not regression.comparable %}
 <div class="alert alert-warning py-2 mb-3">无法对比：{{ regression.reason }}</div>
 {% else %}
-<p class="text-muted small">与批次 #{{ regression.previous_batch_id }} 对比（以用例 ID 对齐）；"缺失"表示当前批次无该用例记录，不计为通过。</p>
+<p class="text-muted small">与批次 #{{ regression.previous_batch_id }} 对比（以用例 ID 对齐）；"缺失"表示用例已被删除，不计为通过；停用、未执行与跳转单列展示，不参与六类计数。</p>
+{% if regression.set_incomplete %}
+<div class="alert alert-warning py-2 mb-3">用例集合不完整：相邻批次中有历史批次（无判定快照），"新增 / 缺失"不可信，仅作参考。</div>
+{% endif %}
 {% set pr = regression.pass_rate %}
 {% set fc = regression.failure_change %}
 <div class="row g-3 mb-3">
@@ -79,6 +97,9 @@
     <span class="badge bg-secondary">持续通过 {{ regression.summary.unchanged_pass }}</span>
     <span class="badge bg-primary">新增用例 {{ regression.summary.added }}</span>
     <span class="badge bg-warning text-dark">缺失用例 {{ regression.summary.missing }}</span>
+    {% if unstable_count %}
+    <span class="badge bg-info text-dark">疑似不稳定 {{ unstable_count }}（已从回归扣除，不计入上方新增失败）</span>
+    {% endif %}
 </div>
 <div class="table-responsive table-card">
 <table class="table table-sm align-middle">
@@ -95,11 +116,29 @@
             {% elif item.change == 'unchanged_pass' %}<span class="badge bg-secondary">状态不变·通过</span>
             {% elif item.change == 'unchanged_fail' %}<span class="badge bg-secondary">状态不变·失败</span>
             {% elif item.change == 'missing' %}<span class="badge bg-warning text-dark">缺失</span>
+            {% elif item.change == 'not_run' %}<span class="badge bg-secondary">未执行</span>
+            {% elif item.change == 'redirect' %}<span class="badge bg-info text-dark">跳转</span>
+            {% elif item.change == 'flaky' %}<span class="badge bg-info text-dark">疑似不稳定（不计入回归）</span>
+            {% elif item.change == 'mixed' %}<span class="badge bg-warning text-dark">复跑结果不一致（不计入回归）</span>
             {% else %}<span class="badge bg-primary">新增</span>{% endif %}</td>
         <td>{% if item.previous_passed is none %}—{% elif item.previous_passed %}通过{% else %}失败{% endif %}</td>
         <td>{% if item.current_passed is none %}—{% elif item.current_passed %}通过{% else %}失败{% endif %}</td>
         <td class="text-muted small">{{ item.detail }}</td>
     </tr>
+    {% endfor %}
+    </tbody>
+</table>
+</div>
+{% endif %}
+
+{% if not legacy and not_run %}
+<h2 class="h5 mt-4">未执行用例</h2>
+<div class="table-responsive table-card">
+<table class="table table-sm align-middle">
+    <thead><tr><th>用例ID</th><th>未执行原因</th></tr></thead>
+    <tbody>
+    {% for item in not_run %}
+    <tr><td>{{ item.case_id }}</td><td class="text-muted small">{{ item.reason }}</td></tr>
     {% endfor %}
     </tbody>
 </table>

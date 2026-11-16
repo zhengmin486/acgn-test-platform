@@ -18,6 +18,7 @@ from fastapi import APIRouter, Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from app import crud, sync_tasks
+from app.models import batch_pass_rate
 from app.admin_common import (
     actor_id as _actor_id,
 )
@@ -121,7 +122,8 @@ def _relative_time(value: datetime | None, now: datetime | None = None) -> str:
 def _quality_summary(batch, now: datetime | None = None):
     """质量条数据：最近一次回归批次的通过率与时间；没有批次返回 None。
 
-    通过率口径与批次详情页一致：passed / total，空批次（total=0）为 None 而不是 0%。
+    通过率口径与批次详情页一致：统一走 models.batch_pass_rate（新批次从判定快照算，
+    legacy 回退 passed / total），空批次（total=0）为 None 而不是 0%。
     超过 24 小时的批次标记为「可能已过期」——批次是手动触发的，旧结果不代表当前代码。
     """
     if batch is None:
@@ -131,7 +133,7 @@ def _quality_summary(batch, now: datetime | None = None):
     age = (now - finished).total_seconds() if finished else 0
     return {
         "batch": batch,
-        "pass_rate": round(batch.passed / batch.total * 100, 1) if batch.total else None,
+        "pass_rate": batch_pass_rate(batch),
         "when": _relative_time(finished, now),
         "stale": age > 24 * 3600,
     }

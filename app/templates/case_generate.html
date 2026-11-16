@@ -7,10 +7,12 @@
     <h1 class="h3 mb-0 section-heading">从接口清单生成用例</h1>
     <a class="btn btn-sm btn-outline-secondary" href="/testcases">&larr; 返回用例列表</a>
 </div>
+{% if notice %}<div class="alert alert-info py-2 mb-3">{{ notice }}</div>{% endif %}
 <p class="text-muted small mb-3">
     扫描本站全部路由，只挑出<strong>只读、不带路径参数</strong>的接口（GET / HEAD），
-    按「管理员身份」生成期望为 200 的冒烟用例。写操作与带 <code>{id}</code> 的接口不生成——
-    执行器发的是真请求，自动生成一条删除就是真删数据。
+    按「管理员身份」生成冒烟用例。写操作不生成——执行器发的是真请求，
+    自动生成一条删除就是真删数据。带 <code>{id}</code> 的接口在下面的异常用例区生成，
+    参数取真实样本，取不到就不执行。
 </p>
 
 {% if error %}
@@ -33,7 +35,11 @@
                         </td>
                         <td class="text-nowrap"><span class="badge bg-secondary">{{ item.method }}</span></td>
                         <td><code>{{ item.path }}</code></td>
-                        <td class="text-end small text-muted">期望 200</td>
+                        <td class="text-end small text-muted">
+                            {% if item.probe and item.probe.status %}探测 {{ item.probe.status }}
+                            {% elif item.probe and item.probe.error %}<span class="text-danger">{{ item.probe.error }}</span>
+                            {% else %}—{% endif %}
+                        </td>
                     </tr>
                     {% endfor %}
                     </tbody>
@@ -47,7 +53,11 @@
     <div class="card app-card mb-3">
         <div class="card-body">
             <h2 class="h6 mb-2">将更新（{{ plan["update"] | length }} 条）</h2>
-            <p class="text-muted small mb-2">已存在的自动生成用例：只更新名称与期望值，<strong>保留原 id</strong>（回归对比靠它对齐）。</p>
+            <p class="text-muted small mb-2">
+                已存在的自动生成用例：只同步名称与执行身份，<strong>保留原 id</strong>（回归对比靠它对齐）。
+                <strong>期望值不再自动覆盖</strong>——探测值与期望不符时在右侧标红，
+                由人工判断是接口回归还是期望值该更新。
+            </p>
             <div class="table-responsive table-card">
                 <table class="table table-sm align-middle mb-0">
                     <tbody>
@@ -59,7 +69,13 @@
                         </td>
                         <td class="text-nowrap"><span class="badge bg-secondary">{{ item.method }}</span></td>
                         <td><code>{{ item.path }}</code></td>
-                        <td class="text-end small text-muted">#{{ item.case.id }}</td>
+                        <td class="small text-muted">#{{ item.case.id }}</td>
+                        <td class="text-end small text-muted">
+                            {% if item.drift %}<span class="text-danger">期望 {{ item.drift.expected }} / 实际 {{ item.drift.actual }}</span>
+                            {% elif item.probe and item.probe.status %}{{ item.probe.status }}
+                            {% elif item.probe and item.probe.error %}<span class="text-danger">{{ item.probe.error }}</span>
+                            {% else %}—{% endif %}
+                        </td>
                     </tr>
                     {% endfor %}
                     </tbody>
@@ -129,5 +145,83 @@
     <a class="btn btn-outline-secondary btn-sm" href="/testcases">返回用例列表</a>
     {% endif %}
 </form>
+
+{% if anomaly["add"] %}
+<div class="card app-card mb-3">
+    <div class="card-body">
+        <h2 class="h6 mb-2">异常用例候选（{{ anomaly["add"] | length }} 条）</h2>
+        <p class="text-muted small mb-2">
+            越权（匿名访问后台）、带参（取真实样本）、边界（不存在的 id）。
+            生成后进入<strong>待确认</strong>，确认前不参与批次。
+        </p>
+        <form method="post" action="/testcases/generate/anomaly">
+            <div class="table-responsive table-card">
+                <table class="table table-sm align-middle mb-0">
+                    <tbody>
+                    {% for item in anomaly["add"] %}
+                    <tr>
+                        <td style="width: 2.5rem;">
+                            <input class="form-check-input" type="checkbox" name="select"
+                                   value="{{ item.method }} {{ item.path }}" checked>
+                        </td>
+                        <td class="text-nowrap"><span class="badge bg-secondary">{{ item.method }}</span></td>
+                        <td class="text-nowrap"><span class="badge {{ 'bg-warning text-dark' if item.identity == 'anon' else 'bg-info text-dark' }}">{{ item.identity }}</span></td>
+                        <td><code>{{ item.path }}</code></td>
+                        <td class="small text-muted">{{ item.note }}</td>
+                        <td class="text-end small text-muted">
+                            {% if item.probe and item.probe.status %}探测 {{ item.probe.status }}
+                            {% elif item.probe and item.probe.error %}<span class="text-danger">{{ item.probe.error }}</span>
+                            {% else %}—{% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            <button class="btn btn-outline-primary btn-sm mt-3" type="submit">生成所选异常用例（进待确认）</button>
+        </form>
+    </div>
+</div>
+{% endif %}
+
+{% if pending %}
+<div class="card app-card mb-3">
+    <div class="card-body">
+        <h2 class="h6 mb-2">待确认（{{ pending | length }} 条）</h2>
+        <p class="text-muted small mb-2">
+            探测得到的期望值必须人工过目：确认后才进批次；驳回后保留记录但不执行。
+        </p>
+        <form method="post" action="/testcases/confirm">
+            <div class="table-responsive table-card">
+                <table class="table table-sm align-middle mb-0">
+                    <thead>
+                    <tr><th style="width: 2.5rem;"></th><th>#</th><th>身份</th>
+                        <th>方法</th><th>路径</th><th class="text-end">期望</th></tr>
+                    </thead>
+                    <tbody>
+                    {% for c in pending %}
+                    <tr>
+                        <td><input class="form-check-input" type="checkbox" name="case_id"
+                                   value="{{ c.id }}" checked></td>
+                        <td class="small text-muted">#{{ c.id }}</td>
+                        <td class="text-nowrap"><span class="badge {{ 'bg-warning text-dark' if c.identity == 'anon' else 'bg-secondary' }}">{{ c.identity }}</span></td>
+                        <td class="text-nowrap"><span class="badge bg-secondary">{{ c.method }}</span></td>
+                        <td><code>{{ c.path }}</code></td>
+                        <td class="text-end small text-muted">
+                            {{ c.expected_status }}{% if c.expect_range %}（{{ c.expect_range }}）{% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            <div class="d-flex gap-2 mt-3">
+                <button class="btn btn-primary btn-sm" type="submit" formaction="/testcases/confirm">确认所选</button>
+                <button class="btn btn-outline-danger btn-sm" type="submit" formaction="/testcases/reject">驳回所选</button>
+            </div>
+        </form>
+    </div>
+</div>
+{% endif %}
 {% endif %}
 {% endblock %}

@@ -1,5 +1,6 @@
 """内容数据模型（SQLAlchemy 2.0 声明式风格）。"""
 
+import json
 from datetime import date, datetime
 
 from sqlalchemy import Boolean, Date, DateTime, Float, Index, Integer, JSON, String, Text, UniqueConstraint
@@ -204,6 +205,13 @@ class ContentStudio(Base):
 CASE_SOURCE_MANUAL = "manual"
 CASE_SOURCE_AUTO = "auto"
 
+# 用例生命周期（方案 6.3）：探测 → 待确认 → 转正 / 驳回。
+# 只有 active + enabled 才进批次；其余在快照里各记一种 reason，不进分母。
+CASE_STATUS_PROBING = "probing"
+CASE_STATUS_PENDING = "pending_review"
+CASE_STATUS_ACTIVE = "active"
+CASE_STATUS_REJECTED = "rejected"
+
 
 class TestCase(Base):
     """接口自动化测试用例定义。
@@ -224,6 +232,19 @@ class TestCase(Base):
     source: Mapped[str] = mapped_column(String(10), nullable=False, default=CASE_SOURCE_MANUAL)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
 
+    # 二期：期望状态码区间。NULL = 精确匹配 expected_status；'3xx' = 300~399 视为符合。
+    # 不设 '4xx' 通配——异常用例的期望值探测后钉死为精确码（方案决策 1）。
+    expect_range: Mapped[str | None] = mapped_column(String(10), nullable=True, default=None)
+    # 二期：执行身份 staff / anon / owner。默认 staff 保证历史用例与新用例基线不变。
+    identity: Mapped[str] = mapped_column(String(10), nullable=False, default="staff")
+    # 二期：生命周期 probing / pending_review / active / rejected。
+    # 只有 active + enabled=1 的用例进批次；探测期的用例靠这两道挡在统计外。
+    case_status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
+    # 确认留痕：只在 pending_review → active 时写，驳回不写，历史 active 保持 NULL。
+    # confirmed_by 由服务端从登录会话取，绝不接受请求体传值（否则留痕可伪造）。
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
+    confirmed_by: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+
     def as_dict(self) -> dict:
         """序列化 JSON 结构；创建时间输出为秒级 ISO 字符串。"""
         return {
@@ -234,6 +255,9 @@ class TestCase(Base):
             "expected_status": self.expected_status,
             "enabled": self.enabled,
             "created_at": self.created_at.isoformat(sep=" ", timespec="seconds"),
+            "expect_range": self.expect_range,
+            "identity": self.identity,
+            "case_status": self.case_status,
         }
 
 
@@ -259,6 +283,10 @@ class ExecutionRecord(Base):
     passed: Mapped[bool] = mapped_column(Boolean, nullable=False)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
+
+    # 二期：同批次内失败用例的复跑结果 JSON 数组。第 1~3 步不写不读，第 4 步才启用。
+    # 首次结果仍用上面原有列，复跑只进这个数组——批次计数、通过率、最慢统计都不掺复跑。
+    retries: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
 
     def as_dict(self) -> dict:
         """序列化 JSON 结构；耗时保留 2 位小数，时间为秒级 ISO 字符串。"""
@@ -294,6 +322,13 @@ class ExecutionBatch(Base):
     passed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     failed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
+    # 二期：批次元数据 / 运行环境 / 用例集合与判定快照，均为 JSON 文本。
+    # 旧批次三列皆为 NULL（legacy），页面按旧口径展示，不伪造快照。
+    # 不进 as_dict：/api/batches 契约保持稳定，分析层从 ORM 对象读这三列。
+    meta: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    env: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    case_set: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+
     def as_dict(self) -> dict:
         """序列化 JSON 结构；通过率为百分比，无用例时为 None。"""
         return {
@@ -303,8 +338,39 @@ class ExecutionBatch(Base):
             "total": self.total,
             "passed": self.passed,
             "failed": self.failed,
-            "pass_rate": round(self.passed / self.total * 100, 1) if self.total else None,
+            "pass_rate": batch_pass_rate(self),
         }
+
+
+# 判定快照结构版本；口径变了能识别旧数据（方案 5.2 的 result_schema 同值）。
+CASE_SET_SCHEMA = 1
+
+
+def batch_pass_rate(batch: ExecutionBatch) -> float | None:
+    """批次通过率，全站唯一实现（方案 6.2）。
+
+    新批次从 case_set 取数：分子 = outcome='pass'，
+    分母 = eligible_count - redirect_count - not_run_count。
+    legacy（无快照）退回旧口径 passed/total（方案 5.6 分口径）。
+    注意 batch.passed 把 redirect 记为 True（占位），不能当分子用。
+    """
+    legacy_rate = round(batch.passed / batch.total * 100, 1) if batch.total else None
+    if not batch.case_set:
+        return legacy_rate
+    try:
+        snapshot = json.loads(batch.case_set)
+        if snapshot.get("schema") != CASE_SET_SCHEMA:
+            return legacy_rate
+        counts = snapshot["counts"]
+        denominator = (counts["eligible_count"] - counts["redirect_count"]
+                       - counts["not_run_count"])
+    except (ValueError, TypeError, KeyError):
+        return legacy_rate
+    passes = sum(1 for e in snapshot.get("cases", [])
+                 if e.get("outcome") == "pass")
+    return round(passes / denominator * 100, 1) if denominator else None
+
+
 class Article(Base):
     """ACGN news article."""
 

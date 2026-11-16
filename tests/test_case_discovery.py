@@ -33,7 +33,13 @@ CANARY_PATHS = (
 )
 
 # case_discovery 允许 import 的 app 模块（main 仅限函数内延迟导入）。
-ALLOWED_APP_IMPORTS = {"app", "app.crud", "app.models", "app.schemas", "app.main"}
+# case_samples / runner 不是页面模块：前者是参数样本配置，后者提供探测用的
+# 进程内客户端。生成流程本来就包含「候选 → 探测」，这两个依赖是预期的；
+# 这个断言真正要防的是把 article_pages / testing_pages 之类写死成清单。
+ALLOWED_APP_IMPORTS = {
+    "app", "app.crud", "app.models", "app.schemas", "app.main",
+    "app.case_samples", "app.runner",
+}
 
 
 @pytest.fixture
@@ -247,3 +253,129 @@ def test_generate_page_is_admin_only(gen_env):
     resp = guest.get("/testcases/generate", follow_redirects=False)
     assert resp.status_code == 303
     assert gen_env.admin.get("/testcases/generate").status_code == 200
+
+
+def test_apply_creates_pending_and_confirm_activates(gen_env):
+    """方案 6.3：生成进 pending_review 且不启用，人工确认后才转 active。"""
+    db = _db(gen_env)
+    plan = case_discovery.build_plan(db)
+    keys = [f"{i['method']} {i['path']}" for i in plan["add"][:3]]
+    case_discovery.apply_plan(db, keys)
+
+    pending = [c for c in crud.list_cases(db) if c.case_status == "pending_review"]
+    assert len(pending) == 3
+    assert all(not c.enabled for c in pending), "未确认的用例不能进批次"
+
+    assert case_discovery.confirm_cases(db, [c.id for c in pending])["confirmed"] == 3
+    db.expire_all()
+    for case in crud.list_cases(db):
+        assert case.case_status == "active" and case.enabled
+
+
+def test_reject_keeps_record_and_cannot_be_confirmed(gen_env):
+    """驳回保留记录但不执行；已驳回的用例不能被一次确认复活。"""
+    db = _db(gen_env)
+    plan = case_discovery.build_plan(db)
+    item = plan["add"][0]
+    case_discovery.apply_plan(db, [f"{item['method']} {item['path']}"])
+    pending = [c for c in crud.list_cases(db) if c.case_status == "pending_review"]
+    case_id = pending[0].id
+
+    assert case_discovery.reject_cases(db, [case_id])["rejected"] == 1
+    db.expire_all()
+    case = crud.get_case(db, case_id)
+    assert case.case_status == "rejected" and not case.enabled
+    assert case_discovery.confirm_cases(db, [case_id])["confirmed"] == 0
+
+
+def test_anomaly_plan_covers_overreach_and_params(gen_env):
+    """异常用例 ≥20 条：越权期望值来自探测（303），带参取真实样本。"""
+    db = _db(gen_env)
+    plan = case_discovery.build_anomaly_plan(db)
+    assert len(plan["add"]) >= 20
+    assert {i["identity"] for i in plan["add"]} == {"anon", "staff"}
+
+    anon = [i for i in plan["add"] if i["identity"] == "anon"]
+    assert anon, "没有越权用例就谈不上覆盖异常请求"
+    # 本项目页面路由走 RedirectResponse，匿名访问后台是 303 而不是 401
+    assert all((i.get("probe") or {}).get("status") == 303 for i in anon)
+
+
+def test_param_sample_missing_is_not_run(gen_env):
+    """未配置样本的模板路径：不发请求、不写记录，记 missing_sample。"""
+    db = _db(gen_env)
+    case = crud.create_case(
+        db,
+        TestCaseCreate(name="GET /cast/{person_id}", method="GET",
+                       path="/cast/{person_id}", expected_status=200),
+        source=CASE_SOURCE_MANUAL,
+        identity="staff",
+    )
+    judgment: dict = {}
+    assert runner.run_case(db, case, judgment=judgment) is None
+    assert judgment["reason"] == "missing_sample"
+    assert crud.list_runs(db) == []
+
+
+def test_confirm_records_operator_reject_does_not(gen_env):
+    """确认写确认人与时间；确认人取自会话，忽略请求体里伪造的 confirmed_by。"""
+    db = _db(gen_env)
+    plan = case_discovery.build_plan(db)
+    keys = [f"{i['method']} {i['path']}" for i in plan["add"][:2]]
+    case_discovery.apply_plan(db, keys)
+    ids = [c.id for c in crud.list_cases(db) if c.case_status == "pending_review"]
+    assert len(ids) == 2
+
+    resp = gen_env.admin.post(
+        "/testcases/confirm",
+        data={"case_id": [str(ids[0])], "confirmed_by": "999"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    db.expire_all()
+    confirmed = crud.get_case(db, ids[0])
+    operator = crud.highest_staff_account(db)
+    assert confirmed.case_status == "active" and confirmed.enabled
+    assert confirmed.confirmed_at is not None
+    assert confirmed.confirmed_by == operator.id != 999, "确认人必须来自会话，不能采信请求体"
+
+    resp = gen_env.admin.post("/testcases/reject", data={"case_id": str(ids[1])},
+                              follow_redirects=False)
+    assert resp.status_code == 303
+    db.expire_all()
+    rejected = crud.get_case(db, ids[1])
+    assert rejected.case_status == "rejected" and not rejected.enabled
+    assert rejected.confirmed_at is None and rejected.confirmed_by is None
+
+
+def test_apply_keeps_active_expectation_and_reports_drift(gen_env):
+    """生成不覆盖已 active 用例的期望值，只报告差异（drift）。"""
+    db = _db(gen_env)
+    plan = case_discovery.build_plan(db)
+    item = next(i for i in plan["add"] if i["path"] == "/api/health")
+    case_discovery.apply_plan(db, [f"{item['method']} {item['path']}"])
+    pending = [c for c in crud.list_cases(db) if c.case_status == "pending_review"]
+    case_discovery.confirm_cases(db, [pending[0].id], operator_id=1)
+
+    case = crud.get_case(db, pending[0].id)
+    case.expected_status = 418
+    db.commit()
+
+    plan2 = case_discovery.build_plan(db)
+    upd = next(i for i in plan2["update"] if i["case"].id == case.id)
+    assert upd["drift"] == {"expected": 418, "actual": 200}
+
+    case_discovery.apply_plan(db, [f"{case.method} {case.path}"])
+    db.expire_all()
+    assert crud.get_case(db, case.id).expected_status == 418, "回归基准不能被生成动作抹平"
+
+
+def test_sample_value_shapes():
+    """样本取值：兼容 items/data 包裹，空数组与缺字段各归各的原因。"""
+    from app import case_samples
+
+    spec = {"response_path": "items", "id_field": "id", "type": "int"}
+    assert case_samples.pick_value({"items": [{"id": 7}]}, spec)[0] == 7
+    assert case_samples.pick_value({"data": [{"id": 3}]}, spec)[0] == 3
+    assert case_samples.pick_value({"items": []}, spec)[1] == "missing_sample"
+    assert case_samples.pick_value({"items": [{}]}, spec)[1] == "invalid_sample"

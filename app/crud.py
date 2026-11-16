@@ -45,6 +45,7 @@ from app.models import (
     BangumiCollection,
     BilibiliFollow,
     CASE_SOURCE_MANUAL,
+    CASE_STATUS_ACTIVE,
     Content,
     ContentEntityLink,
     ContentFavorite,
@@ -3474,6 +3475,65 @@ def ensure_test_case_source_column(engine: Engine) -> list[str]:
     return ["source"]
 
 
+def ensure_test_platform_phase2_columns(engine: Engine) -> list[str]:
+    """为测试平台二期补齐九列（test_cases 5 / test_runs 1 / test_batches 3），幂等。
+
+    项目无 Alembic：create_all 只建新表，历史库不会自动得到这些列，
+    ORM 一次 SELECT 全列会直接 no such column——与 source 列同一模式。
+
+    默认值保证基线不变：历史用例的 identity 视为 staff（旧执行器固定最高 staff
+    身份）、case_status 视为 active（旧用例全部进批次）。expect_range 与三个批次
+    列保持 NULL：NULL 即精确匹配，case_set 为 NULL 即 legacy 批次。
+    """
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    added: list[str] = []
+
+    def columns_of(table: str) -> set[str]:
+        return {column["name"] for column in inspector.get_columns(table)}
+
+    # 一个表只在这个表确实存在时补；缺表由 create_all 负责（新表自带全部列）。
+    if "test_cases" in tables:
+        existing = columns_of("test_cases")
+        with engine.begin() as connection:
+            if "expect_range" not in existing:
+                connection.execute(text("ALTER TABLE test_cases ADD COLUMN expect_range VARCHAR(10)"))
+                added.append("test_cases.expect_range")
+            if "identity" not in existing:
+                connection.execute(text("ALTER TABLE test_cases ADD COLUMN identity VARCHAR(10) NOT NULL DEFAULT 'staff'"))
+                connection.execute(text("UPDATE test_cases SET identity = 'staff' WHERE identity IS NULL"))
+                added.append("test_cases.identity")
+            if "case_status" not in existing:
+                connection.execute(text("ALTER TABLE test_cases ADD COLUMN case_status VARCHAR(20) NOT NULL DEFAULT 'active'"))
+                connection.execute(text("UPDATE test_cases SET case_status = 'active' WHERE case_status IS NULL"))
+                added.append("test_cases.case_status")
+            # 确认留痕：NULL 表示「从未经人工确认」，历史 active 用例保持 NULL，
+            # 不回填、不伪造确认时间与确认人。
+            if "confirmed_at" not in existing:
+                connection.execute(text("ALTER TABLE test_cases ADD COLUMN confirmed_at DATETIME"))
+                added.append("test_cases.confirmed_at")
+            if "confirmed_by" not in existing:
+                connection.execute(text("ALTER TABLE test_cases ADD COLUMN confirmed_by INTEGER"))
+                added.append("test_cases.confirmed_by")
+
+    if "test_runs" in tables:
+        existing = columns_of("test_runs")
+        if "retries" not in existing:
+            with engine.begin() as connection:
+                connection.execute(text("ALTER TABLE test_runs ADD COLUMN retries TEXT"))
+            added.append("test_runs.retries")
+
+    if "test_batches" in tables:
+        existing = columns_of("test_batches")
+        with engine.begin() as connection:
+            for name in ("meta", "env", "case_set"):
+                if name not in existing:
+                    connection.execute(text(f"ALTER TABLE test_batches ADD COLUMN {name} TEXT"))
+                    added.append(f"test_batches.{name}")
+
+    return added
+
+
 def ensure_content_image_column(engine: Engine) -> list[str]:
     """为已存在的 contents 表补齐封面列（image_url），幂等，返回新增列名。
 
@@ -4094,6 +4154,7 @@ def init_db(engine: Engine) -> int:
     ensure_content_cast_relation_column(engine)
     ensure_persona_report_columns(engine)
     ensure_test_case_source_column(engine)
+    ensure_test_platform_phase2_columns(engine)
     ensure_article_image_column(engine)
     ensure_article_ip_name_column(engine)
     ensure_article_classification_columns(engine)
@@ -7019,8 +7080,15 @@ def set_case_enabled(db: Session, case: TestCase, enabled: bool) -> TestCase:
     return case
 
 
-def create_case(db: Session, data: TestCaseCreate, source: str = CASE_SOURCE_MANUAL) -> TestCase:
-    """新建用例；字段已由 TestCaseCreate 完成校验。source 默认人工录入。"""
+def create_case(db: Session, data: TestCaseCreate, source: str = CASE_SOURCE_MANUAL,
+                identity: str = "staff", case_status: str = CASE_STATUS_ACTIVE,
+                expect_range: str | None = None) -> TestCase:
+    """新建用例；字段已由 TestCaseCreate 完成校验。source 默认人工录入。
+
+    identity 由自动生成按路由的 owner-only 守卫决定（方案 6.6），人工录入默认 staff。
+    case_status / expect_range 供自动生成写入探测结果（方案 6.3）：探测出来的用例
+    先进 pending_review，确认后才转 active，避免一次错的首次探测被固化成期望值。
+    """
     case = TestCase(
         name=data.name,
         method=data.method,
@@ -7028,6 +7096,9 @@ def create_case(db: Session, data: TestCaseCreate, source: str = CASE_SOURCE_MAN
         expected_status=data.expected_status,
         enabled=data.enabled,
         source=source,
+        identity=identity,
+        case_status=case_status,
+        expect_range=expect_range,
     )
     db.add(case)
     db.commit()

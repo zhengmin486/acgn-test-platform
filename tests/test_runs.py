@@ -188,3 +188,39 @@ def test_execute_page_flow(run_env):
 
 def test_runs_page_missing_404(run_env):
     assert run_env.client.get("/runs/999").status_code == 404
+
+
+def test_identity_isolation_and_no_downgrade(run_env):
+    """方案 6.6：anon 不继承 staff 会话；身份不可用时不降级、不留执行记录。"""
+    from app import crud, runner
+    from app.schemas import TestCaseCreate
+
+    db = run_env.session_factory()
+
+    def make(path, expect, identity):
+        return crud.create_case(
+            db,
+            TestCaseCreate(name=f"{identity} {path}", method="GET", path=path,
+                           expected_status=expect),
+            source=crud.CASE_SOURCE_MANUAL,
+            identity=identity,
+        )
+
+    try:
+        anon_case = make("/manage", 303, "anon")
+        staff_case = make("/manage", 200, "staff")
+
+        assert runner.run_case(db, anon_case).actual_status == 303
+        assert runner.run_case(db, staff_case).actual_status == 200
+        # 关键：staff 跑完后 anon 仍是 303，说明两个身份各用各的 cookie jar
+        assert runner.run_case(db, anon_case).actual_status == 303
+
+        # 测试库没有站长账号：owner 用例不执行、不顶替身份、也不留记录
+        owner_case = make("/admin/roles", 200, "owner")
+        before = len(crud.list_runs(db))
+        judgment = {}
+        assert runner.run_case(db, owner_case, judgment=judgment) is None
+        assert judgment == {"outcome": "not_run", "reason": "identity_unavailable"}
+        assert len(crud.list_runs(db)) == before
+    finally:
+        db.close()

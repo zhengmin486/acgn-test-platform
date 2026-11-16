@@ -3,6 +3,45 @@
 {% block content %}
 <h1 class="h3 mb-1 section-heading">批次执行历史</h1>
 <p class="text-muted small mb-3">每次批量执行的汇总结果，进入详情可查看回归对比。</p>
+
+<h2 class="h5 mt-4">批次趋势（仅新口径批次）</h2>
+<p class="text-muted small">通过率取执行数口径；集合变化直接比相邻批次用例 ID 集合，不是比数量。历史批次（旧口径）没有判定快照，不参与趋势与集合比较。</p>
+{% if trend.rows %}
+<div class="table-responsive table-card">
+<table class="table table-sm align-middle">
+    <thead>
+    <tr><th>批次</th><th class="text-end">通过率</th><th class="text-end">执行数</th><th class="text-end">未执行</th><th class="text-end">跳转</th><th>集合变化</th></tr>
+    </thead>
+    <tbody>
+    {% for row in trend.rows %}
+    <tr>
+        <td>#{{ row.batch_id }}</td>
+        <td class="text-end">{% if row.pass_rate is not none %}{{ row.pass_rate }}%{% else %}—{% endif %}</td>
+        <td class="text-end">{{ row.executed_count }}</td>
+        <td class="text-end">{{ row.not_run_count }}</td>
+        <td class="text-end">{{ row.redirect_count }}</td>
+        <td>
+        {% if row.set_changed %}
+        <details>
+            <summary class="text-danger">有变化（展开明细）</summary>
+            <div class="text-muted small mt-1">
+                新增 {{ row.added }} · 删除 {{ row.removed }} · 停用 {{ row.disabled }} · 未执行 {{ row.not_run_count }}
+                （其中未确认 {{ row.pending }} / 已驳回 {{ row.rejected }}）<br>
+                集合变化后通过率变化不能直接解释为质量变化。
+            </div>
+        </details>
+        {% else %}—{% endif %}
+        </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+</div>
+{% else %}
+<div class="detail-empty">暂无新口径批次，无法绘制趋势（历史批次不参与）。</div>
+{% endif %}
+
+<h2 class="h5 mt-4">批次列表</h2>
 {% if batches %}
 <div class="table-responsive table-card">
 <table class="table table-hover align-middle">

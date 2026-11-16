@@ -1,0 +1,181 @@
+{% extends "base_admin.html" %}
+{% block title %}结果分析{% endblock %}
+{% block content %}
+<h1 class="h3 mb-1 section-heading">结果分析</h1>
+<p class="text-muted small mb-3">
+    失败记录的自动归因与路由分组统计。分母只含各自范围内的失败记录：通过、跳转、未执行都不进归因分布；
+    批次归因与单条执行归因分开展示、分别统计；历史批次按旧口径（passed=false）取失败，不伪造判定快照。
+</p>
+
+<form class="row g-2 align-items-end mb-3" method="get" action="/analysis">
+    <div class="col-auto">
+        <label class="form-label small mb-1" for="batch-filter">批次</label>
+        <select class="form-select form-select-sm" id="batch-filter" name="batch_id"
+                onchange="this.form.submit()">
+            <option value="">全部批次与单条执行</option>
+            {% for b in batches %}
+            <option value="{{ b.id }}" {% if selected_batch_id == b.id %}selected{% endif %}>
+                #{{ b.id }} · {{ b.started_at.strftime('%Y-%m-%d %H:%M') }}{% if b.id in legacy_ids %}（历史口径）{% endif %}
+            </option>
+            {% endfor %}
+        </select>
+    </div>
+    <div class="col-auto"><button class="btn btn-sm btn-outline-primary" type="submit">筛选</button></div>
+</form>
+
+{% if selected_batch_id and selected is none %}
+<div class="alert alert-warning py-2">批次 #{{ selected_batch_id }} 不存在，已展示全部数据。</div>
+{% endif %}
+
+<h2 class="h5 mt-4">批次失败归因分布</h2>
+{% if distribution.total > 0 %}
+<div class="table-responsive table-card">
+<table class="table table-sm align-middle">
+    <thead><tr><th>归因类别</th><th>条数</th><th>占比</th><th>说明</th></tr></thead>
+    <tbody>
+    {% for defect in defect_types %}
+    <tr>
+        <td>{{ defect }}</td>
+        <td>{{ distribution.counts[defect] }}</td>
+        <td>{% if distribution.shares[defect] is not none %}{{ distribution.shares[defect] }}%{% else %}—{% endif %}</td>
+        <td class="text-muted small">
+            {% if defect == 'Product Bug' %}经确认的状态码不符
+            {% elif defect == 'Automation Bug' %}用例配置或路径不合法 / 工具异常
+            {% elif defect == 'System Issue' %}连接、超时（进程内执行暂未用到）
+            {% elif defect == 'No Defect' %}本期不产出
+            {% else %}5xx、应用异常与无法识别的失败，不猜根因{% endif %}
+        </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+</div>
+<p class="text-muted small">批次失败总数：{{ distribution.total }}，五类占比之和为 100%（四舍五入后可能有 0.1% 误差）。</p>
+{% else %}
+<div class="detail-empty">当前批次范围没有失败记录，归因分布不可用（不展示「通过」代替）。</div>
+{% endif %}
+
+{% if single_distribution is not none %}
+<h2 class="h5 mt-4">单条执行失败归因（独立统计）</h2>
+<p class="text-muted small">未归属批次的单条执行单独统计，不并入上面的批次分母，也不进批次回归比较。</p>
+{% if single_distribution.total > 0 %}
+<div class="table-responsive table-card">
+<table class="table table-sm align-middle">
+    <thead><tr><th>归因类别</th><th>条数</th><th>占比</th></tr></thead>
+    <tbody>
+    {% for defect in defect_types %}
+    <tr>
+        <td>{{ defect }}</td>
+        <td>{{ single_distribution.counts[defect] }}</td>
+        <td>{% if single_distribution.shares[defect] is not none %}{{ single_distribution.shares[defect] }}%{% else %}—{% endif %}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+</div>
+<p class="text-muted small">单条执行失败总数：{{ single_distribution.total }}。</p>
+{% else %}
+<div class="detail-empty">当前没有单条执行失败记录。</div>
+{% endif %}
+{% endif %}
+
+<h2 class="h5 mt-4">路由分组 × 批次失败数</h2>
+<p class="text-muted small">按可复现算法分组：api / manage / admin 取前两段，页面路由取 page.首段；路径参数不参与分组。</p>
+{% if matrix.rows %}
+<div class="table-responsive table-card">
+<table class="table table-sm align-middle">
+    <thead>
+    <tr>
+        <th>路由分组</th>
+        {% for bid in matrix.batch_ids %}<th class="text-center">#{{ bid }}{% if bid in legacy_ids %}<br><span class="text-muted small">旧口径</span>{% endif %}</th>{% endfor %}
+        <th class="text-center">单条执行</th><th class="text-center">合计</th>
+    </tr>
+    </thead>
+    <tbody>
+    {% for row in matrix.rows %}
+    <tr>
+        <td><code>{{ row.group }}</code></td>
+        {% for bid in matrix.batch_ids %}<td class="text-center">{{ row.counts[bid] or '—' }}</td>{% endfor %}
+        <td class="text-center">{{ row.single or '—' }}</td>
+        <td class="text-center">{{ row.total }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+</div>
+{% else %}
+<div class="detail-empty">暂无失败记录，无法形成分组矩阵。</div>
+{% endif %}
+
+<h2 class="h5 mt-4">批次失败明细</h2>
+{% if failures %}
+<div class="table-responsive table-card">
+<table class="table table-hover align-middle">
+    <thead><tr><th>记录</th><th>用例</th><th>路径 / 分组</th><th>归因</th><th>原因（归一展示，原文未改）</th><th>操作</th></tr></thead>
+    <tbody>
+    {% for item in failures %}
+    <tr class="run-row-fail">
+        <td>#{{ item.run.id }}</td>
+        <td>{{ item.run.case_name }}</td>
+        <td><code>{{ item.run.path }}</code><br><span class="text-muted small">{{ item.group }}</span></td>
+        <td><span class="badge bg-secondary">{{ item.defect }}</span></td>
+        <td class="text-muted small">{{ item.normalized }}</td>
+        <td><a class="btn btn-sm btn-outline-primary" href="/runs/{{ item.run.id }}">详情</a></td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+</div>
+{% else %}
+<div class="detail-empty">当前范围没有批次失败记录。</div>
+{% endif %}
+
+{% if single_distribution is not none %}
+<h2 class="h5 mt-4">单条执行失败明细（独立统计）</h2>
+{% if single_failures %}
+<div class="table-responsive table-card">
+<table class="table table-hover align-middle">
+    <thead><tr><th>记录</th><th>用例</th><th>路径 / 分组</th><th>归因</th><th>原因（归一展示，原文未改）</th><th>操作</th></tr></thead>
+    <tbody>
+    {% for item in single_failures %}
+    <tr class="run-row-fail">
+        <td>#{{ item.run.id }}</td>
+        <td>{{ item.run.case_name }}</td>
+        <td><code>{{ item.run.path }}</code><br><span class="text-muted small">{{ item.group }}</span></td>
+        <td><span class="badge bg-secondary">{{ item.defect }}</span></td>
+        <td class="text-muted small">{{ item.normalized }}</td>
+        <td><a class="btn btn-sm btn-outline-primary" href="/runs/{{ item.run.id }}">详情</a></td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+</div>
+{% else %}
+<div class="detail-empty">当前没有单条执行失败记录。</div>
+{% endif %}
+{% endif %}
+
+<h2 class="h5 mt-4">最慢用例（耗时观察，非性能测试）</h2>
+<p class="text-muted small">按首次执行的 duration_ms 降序取前 10 条；未执行、无耗时与耗时为 0 的记录不参与，不按 0 计。进程内执行的耗时受机器负载影响，仅作观察清单，不是性能基准或达标结论。</p>
+{% if slowest %}
+<div class="table-responsive table-card">
+<table class="table table-sm align-middle">
+    <thead><tr><th>记录</th><th>用例</th><th>路径 / 分组</th><th>批次</th><th class="text-end">耗时 (ms)</th></tr></thead>
+    <tbody>
+    {% for item in slowest %}
+    <tr>
+        <td>#{{ item.run.id }}</td>
+        <td>{{ item.run.case_name }}</td>
+        <td><code>{{ item.run.path }}</code><br><span class="text-muted small">{{ item.group }}</span></td>
+        <td>{{ item.batch_label }}</td>
+        <td class="text-end">{{ '%.1f'|format(item.run.duration_ms) }}</td>
+    </tr>
+    {% endfor %}
+    </tbody>
+</table>
+</div>
+{% else %}
+<div class="detail-empty">当前范围没有有效耗时记录，无法列出最慢用例。</div>
+{% endif %}
+<a class="btn btn-outline-secondary btn-sm" href="/batches">返回批次列表</a>
+{% endblock %}

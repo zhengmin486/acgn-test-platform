@@ -189,8 +189,8 @@ def test_regression_fixed_and_unchanged(batch_env):
     assert changes[2] == "fixed"
 
 
-def test_regression_added_and_missing(batch_env):
-    """停用后的用例记为缺失（不计通过），新用例记为新增。"""
+def test_regression_added_and_disabled(batch_env):
+    """停用的用例记 not_run（不算缺失、不进六类），新用例记为新增（方案 5.3）。"""
     client = batch_env.client
     old_case = _create(client).json()["id"]
     client.post("/api/batches")
@@ -203,10 +203,12 @@ def test_regression_added_and_missing(batch_env):
 
     reg = client.get("/api/batches/2/regression").json()
     assert reg["comparable"] is True
+    assert reg["set_incomplete"] is False
     changes = {i["case_id"]: i for i in reg["items"]}
-    assert changes[old_case]["change"] == "missing"
+    assert changes[old_case]["change"] == "not_run"
     assert changes[old_case]["current_passed"] is None
-    assert "不计为通过" in changes[old_case]["detail"]
+    assert "不参与六类对比" in changes[old_case]["detail"]
+    assert reg["summary"]["missing"] == 0
     assert changes[2]["change"] == "added"
     assert changes[2]["previous_passed"] is None
 
@@ -260,7 +262,7 @@ def test_regression_summary_counts_and_pass_rate(batch_env):
 
 
 def test_regression_case_set_inconsistent_summary(batch_env):
-    """用例集合不一致：停用用例记为缺失、新用例记为新增，均不计入四类核心分类。"""
+    """用例集合不一致：停用不算缺失、新用例算新增，两者都不进四类核心分类。"""
     client = batch_env.client
     old_case = _create(client, name="旧用例", expected_status=200).json()["id"]
     client.post("/api/batches")
@@ -275,12 +277,12 @@ def test_regression_case_set_inconsistent_summary(batch_env):
     assert reg["comparable"] is True
     assert reg["summary"] == {
         "regression": 0, "fixed": 0, "unchanged_fail": 0,
-        "unchanged_pass": 0, "added": 1, "missing": 1,
+        "unchanged_pass": 0, "added": 1, "missing": 0,
     }
     assert reg["pass_rate"] == {"current": 100.0, "previous": 100.0, "delta": 0.0}
 
     items = {i["case_id"]: i for i in reg["items"]}
-    assert items[old_case]["change"] == "missing"
+    assert items[old_case]["change"] == "not_run"
     assert items[old_case]["current_passed"] is None
     assert items[new_case]["change"] == "added"
     assert items[new_case]["previous_passed"] is None
@@ -363,3 +365,329 @@ def test_batch_page_flow(batch_env):
     listing = client.get("/batches")
     assert listing.status_code == 200
     assert "批次执行历史" in listing.text
+
+
+# ---------- 二期第 1 步：四态判定与批次快照 ----------
+
+
+def _case_set_of(session_factory, batch_id: int) -> dict:
+    import json
+    from app.models import ExecutionBatch
+    db = session_factory()
+    try:
+        batch = db.get(ExecutionBatch, batch_id)
+        return json.loads(batch.case_set) if batch.case_set else None
+    finally:
+        db.close()
+
+
+def test_case_set_snapshot_and_invariants(batch_env):
+    """批次写 case_set/meta/env；八计数两条恒等式成立，判定落 outcome。"""
+    client = batch_env.client
+    _create(client)  # /api/health 200
+    _create(client, name="失败用例", expected_status=500)  # 精确匹配不符
+
+    client.post("/api/batches")
+    cs = _case_set_of(batch_env.session_factory, 1)
+    assert cs is not None and cs["schema"] == 1
+    counts = cs["counts"]
+    assert counts == {
+        "case_count": 2, "eligible_count": 2, "executed_count": 2,
+        "redirect_count": 0, "not_run_count": 0, "disabled_count": 0,
+        "pending_count": 0, "rejected_count": 0,
+    }
+    assert counts["case_count"] == (
+        counts["eligible_count"] + counts["disabled_count"]
+        + counts["pending_count"] + counts["rejected_count"]
+    )
+    assert counts["eligible_count"] == counts["executed_count"] + counts["not_run_count"]
+    outcomes = sorted(c["outcome"] for c in cs["cases"])
+    assert outcomes == ["fail", "pass"]
+    assert all(c["state"] == "executed" and c["run_id"] for c in cs["cases"])
+
+    from app.models import ExecutionBatch, ExecutionRecord
+    import json
+    db = batch_env.session_factory()
+    try:
+        b = db.get(ExecutionBatch, 1)
+        meta, env = json.loads(b.meta), json.loads(b.env)
+        assert meta["result_schema"] == 1 and meta["runtime"] == "real"
+        assert meta["selection"] == "all" and "commit" in meta
+        assert set(env) == {"python", "platform", "db_path"}
+        # 第 4 步启用复跑：仅失败记录写 retries（2 次复跑），通过记录仍 NULL。
+        # 复跑不覆盖首次结果——失败记录仍是 passed=False / actual_status=200 等原值。
+        runs = db.query(ExecutionRecord).all()
+        failed_runs = [r for r in runs if not r.passed]
+        passed_runs = [r for r in runs if r.passed]
+        assert failed_runs and all(r.retries for r in failed_runs)
+        assert all(r.retries is None for r in passed_runs)
+        for r in failed_runs:
+            attempts = json.loads(r.retries)
+            assert len(attempts) == 2
+            assert all(set(a) == {"attempt", "passed", "actual_status", "error",
+                                  "duration_ms"} for a in attempts)
+            assert [a["attempt"] for a in attempts] == [1, 2]
+    finally:
+        db.close()
+
+
+def test_disabled_case_goes_to_case_set_not_eligible(batch_env):
+    """停用用例进快照标 disabled，不进 eligible、不进分母，恒等式仍成立。"""
+    client = batch_env.client
+    _create(client)
+    disabled = _create(client, name="停用", enabled=False).json()["id"]
+    assert client.put(f"/api/testcases/{disabled}", json={
+        "name": "停用", "method": "GET", "path": "/api/health",
+        "expected_status": 200, "enabled": False,
+    }).status_code == 200
+
+    body = client.post("/api/batches").json()
+    assert body["total"] == 1  # 与二期前一致：只算启用用例
+    cs = _case_set_of(batch_env.session_factory, 1)
+    assert cs["counts"]["case_count"] == 2
+    assert cs["counts"]["eligible_count"] == 1
+    assert cs["counts"]["disabled_count"] == 1
+    by_id = {c["case_id"]: c for c in cs["cases"]}
+    assert by_id[disabled]["state"] == "not_run"
+    assert by_id[disabled]["reason"] == "disabled"
+    assert "not_run" not in by_id[disabled]  # 没有 outcome
+    assert cs["counts"]["case_count"] == (
+        cs["counts"]["eligible_count"] + cs["counts"]["disabled_count"]
+        + cs["counts"]["pending_count"] + cs["counts"]["rejected_count"]
+    )
+
+
+def test_legacy_batch_page_shows_old_caliber(batch_env):
+    """无 case_set 的旧批次：页面标历史口径、不显示跳转/未执行卡片、数字不变。"""
+    from app.models import ExecutionBatch
+    from datetime import datetime
+    db = batch_env.session_factory()
+    try:
+        db.add(ExecutionBatch(started_at=datetime.now(), finished_at=datetime.now(),
+                              total=5, passed=4, failed=1))  # case_set 留 NULL
+        db.commit()
+    finally:
+        db.close()
+    page = batch_env.client.get("/batches/1")
+    assert page.status_code == 200
+    assert "历史批次" in page.text and "旧口径" in page.text
+    assert "单独记录" not in page.text  # 不套新统计（跳转卡片）
+    assert "80.0%" in page.text  # 旧口径通过率 4/5 照常显示
+
+
+def test_regression_deleted_case_is_missing(batch_env):
+    """只有真删除才算 missing（方案 5.3）；停用走 not_run，不算缺失。"""
+    client = batch_env.client
+    old_case = _create(client, name="将被删除", expected_status=200).json()["id"]
+    _create(client, name="保留用例", path="/api/contents")
+    client.post("/api/batches")
+    assert client.delete(f"/api/testcases/{old_case}").status_code == 204
+    client.post("/api/batches")
+
+    reg = client.get("/api/batches/2/regression").json()
+    items = {i["case_id"]: i for i in reg["items"]}
+    assert items[old_case]["change"] == "missing"
+    assert items[old_case]["current_passed"] is None
+    assert "已删除" in items[old_case]["detail"]
+    assert reg["summary"]["missing"] == 1
+    assert reg["set_incomplete"] is False
+
+
+def test_legacy_regression_marks_set_incomplete(batch_env):
+    """相邻批次有 legacy 时标 set_incomplete，added/missing 明示不可信（方案 5.6）。"""
+    from app.models import ExecutionBatch
+    from datetime import datetime
+    client = batch_env.client
+    _create(client, expected_status=200)
+    client.post("/api/batches")  # id=1，新口径有快照
+    db = batch_env.session_factory()
+    try:
+        db.add(ExecutionBatch(started_at=datetime.now(), finished_at=datetime.now(),
+                              total=1, passed=1, failed=0))  # id=2，legacy
+        db.commit()
+    finally:
+        db.close()
+
+    reg = client.get("/api/batches/2/regression").json()
+    assert reg["comparable"] is True
+    assert reg["set_incomplete"] is True
+    page = client.get("/batches/2")
+    assert "用例集合不完整" in page.text
+
+
+def test_pass_rate_uses_case_set_caliber(batch_env):
+    """方案 6.2：分母排除跳转与未执行；legacy 回退旧公式。"""
+    from app.models import ExecutionBatch
+    from app.runner import batch_pass_rate, CASE_SET_SCHEMA
+    from datetime import datetime
+    import json
+    batch = ExecutionBatch(started_at=datetime.now(), total=5, passed=3, failed=1)
+    # passed=3 含 1 条跳转（test_runs.passed 占位 True），不能当分子。
+    batch.case_set = json.dumps({
+        "schema": CASE_SET_SCHEMA,
+        "counts": {"eligible_count": 5, "redirect_count": 1, "not_run_count": 1},
+        "cases": [
+            {"case_id": 1, "state": "executed", "outcome": "pass"},
+            {"case_id": 2, "state": "executed", "outcome": "pass"},
+            {"case_id": 3, "state": "executed", "outcome": "fail"},
+            {"case_id": 4, "state": "executed", "outcome": "redirect"},
+            {"case_id": 5, "state": "not_run", "reason": "missing_sample"},
+        ],
+    })
+    assert batch_pass_rate(batch) == 66.7  # 2 / (5 - 1 - 1)
+    batch.case_set = None
+    assert batch_pass_rate(batch) == 60.0  # legacy 旧口径 3 / 5
+
+
+# ---- 第 4 步：复跑写入 / flaky 扣除 / mixed 单列（方案 9.4 / 11.2） ----
+
+def test_retry_written_without_overwriting_first_result(batch_env, monkeypatch):
+    """首次失败后复跑 2 次写 retries；首次 passed / 状态 / 批次计数不变。"""
+    from app import runner
+
+    # 首次返回失败（400 不符预期 200），两次复跑返回通过。
+    answers = [
+        (400, False, "状态码不符: 实际 400 与预期 200 不一致", "fail", 10.0),
+        (200, True, None, "pass", 5.0),
+        (200, True, None, "pass", 6.0),
+    ]
+    calls = {"n": 0}
+
+    def fake_execute(case, request_path, identity, token):
+        result = answers[calls["n"] % len(answers)]
+        calls["n"] += 1
+        return result
+
+    monkeypatch.setattr(runner, "_execute_once", fake_execute)
+    client = batch_env.client
+    case_id = _create(client, expected_status=200).json()["id"]
+    body = client.post("/api/batches").json()
+    assert body["total"] == 1 and body["failed"] == 1  # 计数按首次失败
+
+    db = batch_env.session_factory()
+    try:
+        run = db.query(__import__("app.models", fromlist=["ExecutionRecord"]).ExecutionRecord).first()
+        assert run.passed is False and run.actual_status == 400  # 首次未改写
+        import json
+        attempts = json.loads(run.retries)
+        assert len(attempts) == 2
+        assert [a["passed"] for a in attempts] == [True, True]
+        assert runner._retry_kind(run) == "flaky"
+    finally:
+        db.close()
+
+
+def test_flaky_excluded_from_regression_count(batch_env, monkeypatch):
+    """A 通过 / B 首次失败+复跑两次通过：regression 不增加，明细单列 flaky，通过率仍按失败。"""
+    from app import runner
+
+    case_id = _create(batch_env.client, expected_status=200).json()["id"]
+    batch_env.client.post("/api/batches")  # 批 1：通过
+    client = batch_env.client
+    client.put(f"/api/testcases/{case_id}", json={
+        "name": "用例", "method": "GET", "path": "/api/health",
+        "expected_status": 404, "enabled": True})
+    # 批 2：首次失败 + 两次复跑通过
+    answers = [
+        (200, False, "状态码不符: 实际 200 与预期 404 不一致", "fail", 10.0),
+        (404, True, None, "pass", 5.0),
+        (404, True, None, "pass", 6.0),
+    ]
+    state = {"n": 0}
+
+    def fake_execute(case, request_path, identity, token):
+        ret = answers[state["n"] % len(answers)]
+        state["n"] += 1
+        return ret
+
+    monkeypatch.setattr(runner, "_execute_once", fake_execute)
+    client.post("/api/batches")
+    reg = client.get("/api/batches/2/regression").json()
+    assert reg["summary"]["regression"] == 0  # 已扣除
+    flaky = [i for i in reg["items"] if i["change"] == "flaky"]
+    assert len(flaky) == 1 and flaky[0]["case_id"] == case_id
+    assert "不计入回归" in flaky[0]["detail"]
+    # 通过率仍按首次失败：case_set.outcome 未被复跑覆盖。
+    detail = client.get("/api/batches/2").json()
+    assert detail["failed"] == 1
+    page = client.get("/batches/2")
+    assert "疑似不稳定 1" in page.text
+    assert "疑似不稳定（不计入回归）" in page.text
+
+
+def test_mixed_retry_listed_separately(batch_env, monkeypatch):
+    """复跑结果不一致（失败→通过→失败）单列 mixed，不计入 regression。"""
+    from app import runner
+
+    case_id = _create(batch_env.client, expected_status=200).json()["id"]
+    batch_env.client.post("/api/batches")
+    client = batch_env.client
+    client.put(f"/api/testcases/{case_id}", json={
+        "name": "用例", "method": "GET", "path": "/api/health",
+        "expected_status": 404, "enabled": True})
+    answers = [
+        (200, False, "状态码不符: 首次", "fail", 10.0),
+        (404, True, None, "pass", 5.0),
+        (200, False, "状态码不符: 三次", "fail", 7.0),
+    ]
+    state = {"n": 0}
+
+    def fake_execute(case, request_path, identity, token):
+        ret = answers[state["n"] % len(answers)]
+        state["n"] += 1
+        return ret
+
+    monkeypatch.setattr(runner, "_execute_once", fake_execute)
+    client.post("/api/batches")
+    reg = client.get("/api/batches/2/regression").json()
+    assert reg["summary"]["regression"] == 0
+    mixed = [i for i in reg["items"] if i["change"] == "mixed"]
+    assert len(mixed) == 1
+    assert "尚不能确认稳定性" in mixed[0]["detail"]
+
+
+def test_single_execute_does_not_retry(batch_env, monkeypatch):
+    """单条执行不触发复跑（retry_on_fail 默认 False），retries 保持 NULL。"""
+    from app import runner
+    from app.models import ExecutionRecord
+
+    calls = {"n": 0}
+    real = runner._execute_once
+
+    def count_calls(case, request_path, identity, token):
+        calls["n"] += 1
+        return real(case, request_path, identity, token)
+
+    monkeypatch.setattr(runner, "_execute_once", count_calls)
+    client = batch_env.client
+    case_id = _create(client, expected_status=404).json()["id"]  # 访问 200 期望 404 → 失败
+    client.post(f"/api/testcases/{case_id}/execute")
+    assert calls["n"] == 1  # 只发 1 次，无复跑
+    db = batch_env.session_factory()
+    try:
+        run = db.query(ExecutionRecord).first()
+        assert run.retries is None and run.passed is False
+    finally:
+        db.close()
+
+
+def test_retry_kind_pure_function():
+    """_retry_kind 纯函数：flaky / mixed / None（首次通过、不足2次、损坏）。"""
+    from app import runner
+    import json
+    from types import SimpleNamespace
+
+    def rec(passed, retries):
+        return SimpleNamespace(passed=passed, retries=retries)
+
+    both_pass = json.dumps([{"passed": True}, {"passed": True}])
+    mixed = json.dumps([{"passed": False}, {"passed": True}])
+    both_fail = json.dumps([{"passed": False}, {"passed": False}])
+    assert runner._retry_kind(rec(False, both_pass)) == "flaky"
+    assert runner._retry_kind(rec(False, mixed)) == "mixed"
+    assert runner._retry_kind(rec(False, both_fail)) is None
+    assert runner._retry_kind(rec(True, both_pass)) is None  # 首次通过不标
+    assert runner._retry_kind(rec(False, None)) is None
+    assert runner._retry_kind(rec(False, "[broken")) is None
+    assert runner._retry_kind(rec(False, json.dumps([{"passed": True}]))) is None
+

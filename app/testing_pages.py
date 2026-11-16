@@ -1,12 +1,14 @@
 """测试平台页面路由：测试用例管理、执行历史与批次结果（数据来源：数据库访问层）。"""
 
-from urllib.parse import urlencode
+import json
+from urllib.parse import quote, urlencode
 
 from fastapi import APIRouter, Form, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import ValidationError
 
-from app import case_discovery, crud, runner
+from app import analysis, case_discovery, crud, runner
+from app.auth import get_current_user
 from app.page_common import DbSession, render_missing, templates
 from app.schemas import TestCaseCreate
 
@@ -73,7 +75,8 @@ def testcases_page(request: Request, db: DbSession,
                    q: str = Query(default=""), method: str = Query(default=""),
                    enabled: str = Query(default=""),
                    added: int = Query(default=0), updated: int = Query(default=0),
-                   disabled: int = Query(default=0), generated: str = Query(default="")):
+                   disabled: int = Query(default=0), generated: str = Query(default=""),
+                   error: str = Query(default="")):
     """用例管理首页：用例列表 + 新建表单；支持关键词/方法/状态筛选（GET，可分享）。
 
     added / updated / disabled / generated 来自「从接口清单生成」后的 PRG 回显。
@@ -83,7 +86,7 @@ def testcases_page(request: Request, db: DbSession,
     return templates.TemplateResponse(
         request=request,
         name="testcases.html",
-        context={"cases": cases, "all_cases": all_cases, "error": "", "form": {},
+        context={"cases": cases, "all_cases": all_cases, "error": error, "form": {},
                  "filter": _case_filter_view(q, method, enabled),
                  "generated": {"added": added, "updated": updated,
                                "disabled": disabled, "error": generated}},
@@ -177,7 +180,13 @@ def execute_case_page(request: Request, case_id: int, db: DbSession):
     case = crud.get_case(db, case_id)
     if case is None:
         return render_missing(request, "测试用例", case_id)
-    run = runner.run_case(db, case)
+    judgment: dict = {}
+    run = runner.run_case(db, case, judgment=judgment)
+    if run is None:
+        reason = judgment.get("reason", "identity_unavailable")
+        detail = judgment.get("detail") or reason
+        return RedirectResponse(
+            "/testcases?error=" + quote(f"用例未执行：{detail}"), status_code=303)
     return RedirectResponse(f"/runs/{run.id}", status_code=303)
 
 
@@ -223,19 +232,22 @@ def _query(**params) -> str:
 
 
 @router.get("/testcases/generate", response_class=HTMLResponse)
-def generate_cases_page(request: Request, db: DbSession):
-    """生成预览：列出将新增 / 更新 / 下线 / 跳过的接口，勾选后才写库。"""
+def generate_cases_page(request: Request, db: DbSession, notice: str = Query(default="")):
+    """生成预览：常规候选 + 异常候选 + 待确认列表，都要人工确认后才生效。"""
     plan = case_discovery.build_plan(db)
+    anomaly = case_discovery.build_anomaly_plan(db)
+    pending = [c for c in crud.list_cases(db) if c.case_status == "pending_review"]
     return templates.TemplateResponse(
         request=request,
         name="case_generate.html",
-        context={"plan": plan, "error": plan.get("error", "")},
+        context={"plan": plan, "error": plan.get("error", ""),
+                 "anomaly": anomaly, "pending": pending, "notice": notice},
     )
 
 
 @router.post("/testcases/generate/apply")
 async def apply_generated_cases(request: Request, db: DbSession):
-    """按勾选结果落库（PRG 303 回列表并回显计数）。"""
+    """按勾选结果落库；新增的进待确认，确认后才参与批次（方案 6.3）。"""
     form = await request.form()
     summary = case_discovery.apply_plan(db, form.getlist("select"))
     return RedirectResponse(
@@ -243,6 +255,41 @@ async def apply_generated_cases(request: Request, db: DbSession):
                disabled=summary.get("disabled"), generated=summary.get("error", "")),
         status_code=303,
     )
+
+
+@router.post("/testcases/generate/anomaly")
+async def apply_anomaly_cases(request: Request, db: DbSession):
+    """把勾选的异常用例落库为待确认（越权、带参、边界各一组）。"""
+    form = await request.form()
+    summary = case_discovery.apply_anomaly_plan(db, form.getlist("select"))
+    notice = quote(f"已加入 {summary.get('added', 0)} 条异常用例，等待确认")
+    return RedirectResponse(f"/testcases/generate?notice={notice}", status_code=303)
+
+
+@router.post("/testcases/confirm")
+async def confirm_pending_cases(request: Request, db: DbSession):
+    """把选中的待确认用例转正：active + 启用，并记录确认人与时间。
+
+    确认人**只从登录会话取**：请求体里即便带了 confirmed_by 也不读，
+    否则留痕本身可以被伪造，答辩时那句「某管理员确认过」就不成立。
+    """
+    form = await request.form()
+    ids = [int(v) for v in form.getlist("case_id") if str(v).isdigit()]
+    user = get_current_user(request, db)
+    result = case_discovery.confirm_cases(
+        db, ids, operator_id=user.id if user else None)
+    notice = quote(f"已确认 {result['confirmed']} 条")
+    return RedirectResponse(f"/testcases/generate?notice={notice}", status_code=303)
+
+
+@router.post("/testcases/reject")
+async def reject_pending_cases(request: Request, db: DbSession):
+    """把选中的待确认用例驳回：rejected + 停用，记录保留可追溯。"""
+    form = await request.form()
+    ids = [int(v) for v in form.getlist("case_id") if str(v).isdigit()]
+    result = case_discovery.reject_cases(db, ids)
+    notice = quote(f"已驳回 {result['rejected']} 条")
+    return RedirectResponse(f"/testcases/generate?notice={notice}", status_code=303)
 
 
 @router.post("/testcases/execute-all")
@@ -254,26 +301,100 @@ def execute_all_page(request: Request, db: DbSession):
 
 @router.get("/batches", response_class=HTMLResponse)
 def batches_page(request: Request, db: DbSession):
-    """批次历史页。"""
+    """批次历史页：批次列表 + 趋势（通过率 / 执行量 / 集合变化，仅非 legacy）。"""
     return templates.TemplateResponse(
         request=request,
         name="batches.html",
-        context={"batches": crud.list_batches(db)},
+        context={"batches": crud.list_batches(db),
+                 "trend": analysis.trend(db)},
+    )
+
+
+@router.get("/analysis", response_class=HTMLResponse)
+def analysis_page(request: Request, db: DbSession,
+                  batch_id: int | None = Query(default=None)):
+    """结果分析页：批次/单条归因分开 + 路由分组矩阵 + 最慢用例耗时观察。
+
+    归因分母严格等于各自范围的失败数（方案 7.1）：通过、跳转、未执行都不进来；
+    批次与单条执行分开展示、分别统计（v0.6）。可按批次筛选；不传时看全部
+    批次与单条执行。legacy 按 `passed=False` 回退取数并标注，不伪造 case_set。
+    最慢用例只取有效 duration_ms，是耗时观察不是性能测试，查询只读（9.5）。
+    """
+    batches = crud.list_batches(db)
+    selected = next((b for b in batches if b.id == batch_id), None) if batch_id else None
+    distribution = analysis.attribution(db, batch_id)
+    single_distribution = analysis.single_attribution(db) if batch_id is None else None
+    matrix = analysis.route_group_matrix(db)
+    slowest = [
+        {"run": run,
+         "group": analysis.route_group(run.path),
+         "batch_label": (f"#{run.batch_id}" if run.batch_id is not None
+                         else "单条执行")}
+        for run in analysis.slowest_runs(db, batch_id)
+    ]
+    legacy_ids = {b.id for b in batches if analysis.is_legacy(b)}
+    # 每条失败记录附上归一类与归一后的原因，原文不动、展示只读。
+    failures = [
+        {"run": run, "defect": analysis.classify_failure(run.error),
+         "normalized": analysis.normalize_error(run.error),
+         "group": analysis.route_group(run.path)}
+        for run in distribution["runs"]
+    ]
+    single_failures = [
+        {"run": run, "defect": analysis.classify_failure(run.error),
+         "normalized": analysis.normalize_error(run.error),
+         "group": analysis.route_group(run.path)}
+        for run in (single_distribution["runs"] if single_distribution else [])
+    ]
+    return templates.TemplateResponse(
+        request=request,
+        name="analysis.html",
+        context={"batches": batches, "selected_batch_id": batch_id,
+                 "selected": selected, "distribution": distribution,
+                 "defect_types": analysis.DEFECT_TYPES, "failures": failures,
+                 "single_distribution": single_distribution,
+                 "single_failures": single_failures,
+                 "matrix": matrix, "legacy_ids": legacy_ids, "slowest": slowest},
     )
 
 
 @router.get("/batches/{batch_id}", response_class=HTMLResponse)
 def batch_detail_page(request: Request, batch_id: int, db: DbSession):
-    """批次结果页：统计 + 回归对比 + 每条执行记录；批次不存在返回 404。"""
+    """批次结果页：统计 + 回归对比 + 每条执行记录；批次不存在返回 404。
+
+    二期第 1 步：case_set 为 NULL 的旧批次标 legacy，按旧口径展示，
+    不套用新分母、不显示新计数（方案 5.6）。
+    """
     batch = crud.get_batch(db, batch_id)
     if batch is None:
         return render_missing(request, "执行批次", batch_id)
     runs = crud.list_runs_for_batch(db, batch_id)
     regression = runner.compare_batches(db, batch)
-    pass_rate = round(batch.passed / batch.total * 100, 1) if batch.total else None
+    unstable_count = sum(1 for item in regression.get("items", [])
+                         if item.get("change") in ("flaky", "mixed"))
+    # 通过率统一走 runner 的口径（6.2）：新批次按快照算，legacy 回退旧公式。
+    pass_rate = runner.batch_pass_rate(batch)
+
+    # 解析判定快照；legacy 批次不伪造，counts 置空让模板走旧口径分支。
+    case_set = None
+    if batch.case_set:
+        try:
+            case_set = json.loads(batch.case_set)
+        except (ValueError, TypeError):
+            case_set = None
+    legacy = case_set is None
+    counts = (case_set or {}).get("counts", {})
+    not_run = [c for c in (case_set or {}).get("cases", [])
+               if c.get("state") == "not_run"] if not legacy else []
+    conclusion = None
+    if batch.total == 0:
+        conclusion = "本批次执行 0 条用例，未验证任何接口。"
+
     return templates.TemplateResponse(
         request=request,
         name="batch_detail.html",
         context={"batch": batch, "runs": runs, "regression": regression,
-                 "pass_rate": pass_rate},
+                 "unstable_count": unstable_count,
+                 "pass_rate": pass_rate, "legacy": legacy, "counts": counts,
+                 "not_run": not_run, "conclusion": conclusion},
     )

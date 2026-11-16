@@ -24,6 +24,7 @@ TEST_DOMAIN_TEMPLATES = {
     "batches.html",
     "batch_detail.html",
     "case_generate.html",
+    "analysis.html",
 }
 
 
