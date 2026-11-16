@@ -97,8 +97,14 @@
     <span class="badge bg-secondary">持续通过 {{ regression.summary.unchanged_pass }}</span>
     <span class="badge bg-primary">新增用例 {{ regression.summary.added }}</span>
     <span class="badge bg-warning text-dark">缺失用例 {{ regression.summary.missing }}</span>
-    {% if unstable_count %}
-    <span class="badge bg-info text-dark">疑似不稳定 {{ unstable_count }}（已从回归扣除，不计入上方新增失败）</span>
+    {% if flaky_count %}
+    <span class="badge bg-info text-dark">疑似不稳定 {{ flaky_count }}</span>
+    {% endif %}
+    {% if mixed_count %}
+    <span class="badge bg-warning text-dark">复跑不一致 {{ mixed_count }}</span>
+    {% endif %}
+    {% if flaky_count or mixed_count %}
+    <span class="text-muted small">已从回归扣除，不计入上方新增失败</span>
     {% endif %}
 </div>
 <div class="table-responsive table-card">

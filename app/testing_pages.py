@@ -370,8 +370,10 @@ def batch_detail_page(request: Request, batch_id: int, db: DbSession):
         return render_missing(request, "执行批次", batch_id)
     runs = crud.list_runs_for_batch(db, batch_id)
     regression = runner.compare_batches(db, batch)
-    unstable_count = sum(1 for item in regression.get("items", [])
-                         if item.get("change") in ("flaky", "mixed"))
+    flaky_count = sum(1 for item in regression.get("items", [])
+                      if item.get("change") == "flaky")
+    mixed_count = sum(1 for item in regression.get("items", [])
+                      if item.get("change") == "mixed")
     # 通过率统一走 runner 的口径（6.2）：新批次按快照算，legacy 回退旧公式。
     pass_rate = runner.batch_pass_rate(batch)
 
@@ -394,7 +396,7 @@ def batch_detail_page(request: Request, batch_id: int, db: DbSession):
         request=request,
         name="batch_detail.html",
         context={"batch": batch, "runs": runs, "regression": regression,
-                 "unstable_count": unstable_count,
+                 "flaky_count": flaky_count, "mixed_count": mixed_count,
                  "pass_rate": pass_rate, "legacy": legacy, "counts": counts,
                  "not_run": not_run, "conclusion": conclusion},
     )
