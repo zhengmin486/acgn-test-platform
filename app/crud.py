@@ -859,8 +859,27 @@ def _tag_index(db: Session) -> tuple[dict, dict, set]:
 
 
 def invalidate_tag_index() -> None:
-    """作品入库 / 标签变更后作废索引缓存，避免推荐仍按旧标签算（最长滞后 TTL）。"""
+    """作品入库 / 标签变更后作废所有标签派生缓存（推荐索引 + 筛选栏计数）。
+
+    这样推荐不会按旧标签算、筛选栏 chips 计数也不会滞后（最长滞后 TTL）。
+    """
     _tag_index_cache.clear()
+    _tag_count_cache.clear()
+
+
+# ---------- 筛选栏标签计数缓存（防重查询洪泛） ----------
+# /contents?all_tags=1 走全量标签计数：线上 30 万行 content_tags 聚合 ~2.4s，
+# 单 worker 并发堆积会顶到 1.3G 触发 OOM（2026-11 代理池洪泛事故）。标签是低频
+# 写入，缓存结果与 _tag_index 同 TTL、同失效时机即可，命中时降到毫秒级。
+# key 含 db URL + content_type + exclude + limit，保证不同筛选口径互不串。
+TAG_COUNT_TTL_SECONDS = 300
+_tag_count_cache: dict[str, tuple[float, list[tuple[str, int]]]] = {}
+
+
+def _db_cache_key(db: Session) -> str:
+    bind = db.get_bind()
+    url = getattr(bind, "url", None) or getattr(getattr(bind, "engine", None), "url", None)
+    return str(url) if url is not None else "default"
 
 
 def recommend_contents(
@@ -1517,6 +1536,15 @@ def list_tags_with_counts(
     关联时实测从 ~15ms 涨到 ~180ms（2026-10-26 改）。只有按类型过滤时才需要
     join ``Content`` 来加 ``Content.type`` 的 where 条件。
     """
+    # TTL 缓存：命中即返回（拷贝，避免调用方改动污染缓存）。key 覆盖所有影响
+    # 结果的入参；exclude 归一化为排序 tuple（入参常是 set，不可哈希）。
+    exclude_key = tuple(sorted(exclude)) if exclude else ()
+    cache_key = (_db_cache_key(db), content_type, exclude_key, limit)
+    now = time.monotonic()
+    cached = _tag_count_cache.get(cache_key)
+    if cached is not None and now - cached[0] < TAG_COUNT_TTL_SECONDS:
+        return list(cached[1])
+
     if content_type is not None:
         # 按类型统计：必须 join Content 才能加类型过滤
         stmt = (
@@ -1541,7 +1569,9 @@ def list_tags_with_counts(
     )
     if limit is not None:
         stmt = stmt.limit(limit)
-    return [(name, count) for name, count in db.execute(stmt).all()]
+    result = [(name, count) for name, count in db.execute(stmt).all()]
+    _tag_count_cache[cache_key] = (now, list(result))
+    return result
 
 
 def list_years_with_counts(

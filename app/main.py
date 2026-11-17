@@ -48,6 +48,7 @@ from app.auth import (
 from app.config import settings
 from app.database import SessionLocal, engine
 from app.logging_setup import configure_logging
+from app.anti_abuse import anti_abuse_middleware
 from app.page_common import templates
 
 logger = logging.getLogger(__name__)
@@ -111,6 +112,11 @@ if settings.gzip_enabled:
         minimum_size=settings.gzip_minimum_size,
         compresslevel=settings.gzip_compress_level,
     )
+
+
+# ---------- 重查询防滥用（最后注册 = 最先执行，超限在入口即短路） ----------
+# 对 /contents?all_tags=1 做全局并发闸门 + 每 IP 速率限制，挡代理池洪泛 OOM。
+app.middleware("http")(anti_abuse_middleware)
 
 
 # ---------- 未处理异常的统一 500：堆栈进日志，前端只拿脱敏响应 ----------

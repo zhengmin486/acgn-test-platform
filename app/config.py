@@ -297,6 +297,14 @@ class Settings(BaseSettings):
     security_headers_enabled: bool = True
     x_frame_options: str = "DENY"
 
+    # ---------- 重查询防滥用（防代理池洪泛 OOM） ----------
+    # /contents?all_tags=1 全量标签计数 ~2.4s，并发堆积曾把单 worker 顶到 1.3G OOM。
+    # 并发闸门是核心（不随代理 IP 轮换失效），每 IP 速率窗口为辅助。
+    abuse_enabled: bool = True
+    abuse_heavy_concurrency: int = 2       # 同时执行的重查询上限
+    abuse_per_ip_limit: int = 6            # 单 IP 在窗口内允许的重查询次数
+    abuse_window_seconds: int = 60         # 速率窗口长度（秒）
+
     # ---------- 静态资源与图片缓存（秒） ----------
     # style.css 带 ?v=mtime 版本号，改样式浏览器自动拉新；vendor 与封面图
     # 同名不变（上传换图生成新文件名），长缓存是安全的。0 表示不输出该头。
